@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=83"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentbench-desktop-backend"
+version = "2.3.0"
+description = "Local AgentBench Desktop API, agent runtime and scoring service"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.34,<1",
+  "pydantic>=2.10,<3",
+  "httpx>=0.28,<1",
+  "PyYAML>=6.0,<7",
+  "jsonschema>=4.23,<5",
+  "keyring>=25.6,<26",
+  "platformdirs>=4.3,<5"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.25,<1",
+  "pytest-cov>=6,<7",
+  "ruff>=0.9,<1",
+  "pyinstaller>=6.11,<7"
+]
+
+[project.scripts]
+agentbench-backend = "agentbench.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agentbench*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --disable-warnings"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]

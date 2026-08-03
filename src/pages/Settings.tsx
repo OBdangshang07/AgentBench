@@ -1,0 +1,91 @@
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { Archive, CheckCircle2, Database, HardDrive, Save, ShieldAlert, TerminalSquare, Upload } from "lucide-react";
+import { api, API_BASE } from "../lib/api";
+import { useApi } from "../lib/useApi";
+import type { ModelConfig, Runner, SystemStatus } from "../types";
+import { Button, Card, ErrorBlock, Field, LoadingBlock, PageHeader } from "../components/ui";
+
+export default function SettingsPage() {
+  const status = useApi<SystemStatus>("/system/status");
+  const models = useApi<ModelConfig[]>("/models");
+  const runners = useApi<Runner[]>("/runners");
+  const [nativeEnabled, setNativeEnabled] = useState(false);
+  const [maxRuntime, setMaxRuntime] = useState(7200);
+  const [judgeModel, setJudgeModel] = useState("");
+  const [judgeRunner, setJudgeRunner] = useState("");
+  const [judgeSaveState, setJudgeSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [judgeSaveError, setJudgeSaveError] = useState("");
+  const judgeQueue = useRef<Promise<unknown>>(Promise.resolve());
+  const latestJudge = useRef({ model: "", runner: "" });
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (status.data) {
+      setNativeEnabled(status.data.native_cli_enabled);
+      setMaxRuntime(status.data.settings.default_max_runtime_seconds ?? 7200);
+      setJudgeModel(status.data.settings.judge_model_id ?? "");
+      setJudgeRunner(status.data.settings.judge_runner_id ?? "");
+      latestJudge.current = { model: status.data.settings.judge_model_id ?? "", runner: status.data.settings.judge_runner_id ?? "" };
+    }
+  }, [status.data]);
+  if (status.loading) return <LoadingBlock />;
+  if (status.error || !status.data) return <ErrorBlock message={status.error ?? "读取本地状态失败"} retry={() => void status.refresh()} />;
+
+  async function save() {
+    setBusy(true); setMessage("");
+    try {
+      await api("/settings", { method: "PATCH", body: JSON.stringify({ allow_native_cli: nativeEnabled, default_max_runtime_seconds: maxRuntime, judge_model_id: judgeModel || null, judge_runner_id: judgeRunner || null }) });
+      setMessage("设置已保存"); await status.refresh();
+    } catch (value) { setMessage(value instanceof Error ? value.message : "保存失败"); } finally { setBusy(false); }
+  }
+  function saveJudge(model: string, runner: string) {
+    setJudgeModel(model); setJudgeRunner(runner); setJudgeSaveState("saving"); setJudgeSaveError("");
+    latestJudge.current = { model, runner };
+    judgeQueue.current = judgeQueue.current.catch(() => undefined).then(async () => {
+      try {
+        await api("/settings", { method: "PATCH", body: JSON.stringify({ judge_model_id: model || null, judge_runner_id: runner || null }) });
+        if (latestJudge.current.model === model && latestJudge.current.runner === runner) setJudgeSaveState("saved");
+      } catch (value) {
+        if (latestJudge.current.model === model && latestJudge.current.runner === runner) {
+          setJudgeSaveState("error"); setJudgeSaveError(value instanceof Error ? value.message : "自动保存失败");
+        }
+      }
+    });
+  }
+  async function backup() {
+    setBusy(true); setMessage("");
+    try {
+      const response = await fetch(`${API_BASE}/system/backup`, { method: "POST" });
+      if (!response.ok) throw new Error("备份失败");
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob); const anchor = document.createElement("a");
+      anchor.href = url; anchor.download = response.headers.get("content-disposition")?.match(/filename="(.+)"/)?.[1] ?? "agentbench-backup.zip"; anchor.click();
+      URL.revokeObjectURL(url); setMessage("备份已创建并保存");
+    } catch (value) { setMessage(value instanceof Error ? value.message : "备份失败"); } finally { setBusy(false); }
+  }
+  async function restore(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !window.confirm("恢复将替换当前本地数据库。平台会先自动创建安全备份，是否继续？")) return;
+    setBusy(true); setMessage("");
+    try {
+      const response = await fetch(`${API_BASE}/system/restore`, { method: "POST", headers: { "Content-Type": "application/zip" }, body: file });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail ?? "恢复失败");
+      setMessage(`恢复完成；恢复前安全备份：${result.safety_backup}`);
+      await Promise.all([status.refresh(), models.refresh(), runners.refresh()]);
+    } catch (value) { setMessage(value instanceof Error ? value.message : "恢复失败"); } finally { setBusy(false); }
+  }
+  return (
+    <div className="page">
+      <PageHeader eyebrow="LOCAL CONTROL" title="本地设置" description="管理执行安全、裁判配置和本机数据。没有任何 AgentBench 服务器参与。" actions={<Button busy={busy} onClick={() => void save()}><Save size={16} /> 保存设置</Button>} />
+      {message && <div className="success-banner">{message}</div>}
+      <div className="settings-grid">
+        <Card><div className="card-header"><div><span className="section-kicker">RUNTIME</span><h2>运行环境</h2></div><HardDrive size={19} /></div><div className="status-list"><div><Database size={18} /><div><strong>SQLite 数据库</strong><span>{status.data.database.path}</span></div><CheckCircle2 className="text-green" size={18} /></div><div><ShieldAlert size={18} /><div><strong>Docker 安全沙箱</strong><span>{status.data.docker.available ? status.data.docker.executable : "未检测到 Docker Desktop；命令任务将被阻止"}</span></div><span className={status.data.docker.available ? "dot dot-green" : "dot dot-amber"}>{status.data.docker.available ? "就绪" : "受限"}</span></div>{status.data.runners.map((runner) => <div key={runner.id}><TerminalSquare size={18} /><div><strong>{runner.name}</strong><span>{runner.capability.warning ?? runner.capability.error ?? runner.capability.version ?? "未检测到可执行文件"}</span>{runner.capability.install_command && <code>{runner.capability.install_command}</code>}</div><span className={runner.capability.installed && !runner.capability.warning ? "dot dot-green" : "dot dot-amber"}>{runner.capability.installed ? runner.capability.warning ? "需优化" : "可用" : runner.capability.desktop_installed ? "缺 CLI" : "缺失"}</span></div>)}</div></Card>
+        <Card><div className="card-header"><div><span className="section-kicker">NATIVE AGENTS</span><h2>原生 CLI Agent</h2></div></div><p className="setting-copy">Codex、Claude Code、Kimi Code 等在宿主机上使用自身权限系统。启用后，平台才允许启动原生 CLI 赛道。</p><label className="switch-row"><div><strong>允许原生 CLI Runner</strong><span>仅在你信任已安装的 Agent CLI 时开启</span></div><input type="checkbox" checked={nativeEnabled} onChange={(event) => setNativeEnabled(event.target.checked)} /><i /></label><Field label="运行安全看门狗" hint="它不是评分超时；达到时间只会停止疑似永久卡死的进程，并按环境失败处理。"><select value={maxRuntime} onChange={(event) => setMaxRuntime(Number(event.target.value))}><option value={0}>不限制</option><option value={1800}>30 分钟</option><option value={3600}>1 小时</option><option value={7200}>2 小时（推荐）</option><option value={14400}>4 小时</option></select></Field><div className="warning-box"><ShieldAlert size={17} /><span>原生 Agent 与 Docker 沙箱不是同一安全边界。平台会清理继承环境并限定工作目录，但 CLI 本身仍必须启用安全模式。</span></div></Card>
+        <Card><div className="card-header"><div><span className="section-kicker">JUDGE</span><h2>匿名 AI 裁判</h2></div><span className={`autosave-status autosave-${judgeSaveState}`}>{judgeSaveState === "saving" ? "正在保存…" : judgeSaveState === "saved" ? "已自动保存" : judgeSaveState === "error" ? "保存失败" : "选择后自动保存"}</span></div><div className="form-grid one-column"><Field label="裁判模型"><select value={judgeModel} onChange={(event) => saveJudge(event.target.value, latestJudge.current.runner)}><option value="">不启用主观评分</option>{models.data?.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></Field><Field label="裁判 Agent Runner"><select value={judgeRunner} onChange={(event) => saveJudge(latestJudge.current.model, event.target.value)}><option value="">选择 Runner</option>{runners.data?.map((runner) => <option key={runner.id} value={runner.id}>{runner.name}</option>)}</select></Field><small>裁判输入会移除参测身份；同一模型不能为自己评分。复杂项目可配置原生裁判 Agent。</small>{judgeSaveError && <div className="form-error">{judgeSaveError}</div>}</div></Card>
+        <Card><div className="card-header"><div><span className="section-kicker">DATA</span><h2>备份与迁移</h2></div><Archive size={19} /></div><p className="setting-copy">备份包含一致性 SQLite 快照和校验清单，不包含 Windows Credential Manager 中的 API 密钥。恢复前会再次创建安全备份。</p><div className="data-path"><span>本地数据目录</span><code>{status.data.data_dir}</code></div><div className="backup-actions"><Button variant="secondary" busy={busy} onClick={() => void backup()}><Archive size={16} /> 创建 ZIP 备份</Button><label className="button button-secondary"><Upload size={16} /> 校验并恢复<input type="file" accept=".zip,application/zip" hidden onChange={(event) => void restore(event)} /></label></div></Card>
+      </div>
+    </div>
+  );
+}
