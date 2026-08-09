@@ -1,38 +1,18 @@
 import { useMemo, useState, type FormEvent } from "react";
 import {
-  BarChart3,
-  Braces,
-  BriefcaseBusiness,
   ChevronRight,
-  Code2,
+  FileText,
   FileUp,
-  Route,
   Search,
   Shield,
-  Sigma,
   Sparkles,
-  Workflow,
-  Wrench,
 } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
-import { api } from "../lib/api";
+import { api, apiUpload } from "../lib/api";
 import { useApi } from "../lib/useApi";
-import type { TestCase } from "../types";
+import type { MathPaperImport, TestCase } from "../types";
 import { Button, Card, ErrorBlock, Field, LoadingBlock, Modal, PageHeader } from "../components/ui";
-
-const categoryMeta: Record<string, { name: string; icon: typeof Code2; color: string }> = {
-  "instruction-following": { name: "指令遵循", icon: Braces, color: "violet" },
-  reasoning: { name: "推理计算", icon: Sigma, color: "blue" },
-  "tool-use": { name: "工具使用", icon: Wrench, color: "cyan" },
-  "software-engineering": { name: "软件工程", icon: Code2, color: "green" },
-  "knowledge-work": { name: "知识工作", icon: BriefcaseBusiness, color: "purple" },
-  "data-analysis": { name: "数据分析", icon: BarChart3, color: "orange" },
-  "agentic-workflow": { name: "Agent 工作流", icon: Workflow, color: "teal" },
-  security: { name: "安全工程", icon: Shield, color: "red" },
-  planning: { name: "规划决策", icon: Route, color: "gold" },
-  "ultra-engineering": { name: "Ultra 工程", icon: Code2, color: "ultra" },
-  "ultra-planning": { name: "Ultra 规划", icon: Route, color: "ultra" },
-};
+import { categoryMeta } from "../lib/categoryMeta";
 
 function DifficultyBadge({ value = 1 }: { value?: number }) {
   return <span className={`difficulty-badge difficulty-${value}`}><i>{value}</i> {value >= 6 ? "Ultra" : value >= 5 ? "极限" : value >= 4 ? "困难" : value >= 3 ? "进阶" : "基础"}</span>;
@@ -46,6 +26,7 @@ export default function TestLibrary() {
   const [environment, setEnvironment] = useState<"all" | "local" | "docker" | "judge">("all");
   const [selected, setSelected] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  const [importingMath, setImportingMath] = useState(false);
   const state = useApi<TestCase[]>("/test-cases?limit=500");
 
   const counts = useMemo(() => {
@@ -77,7 +58,7 @@ export default function TestLibrary() {
         eyebrow="CAPABILITY BENCHMARKS"
         title="能力测试"
         description="从确定性基础题到项目型极限任务。按能力、难度和运行环境筛选，先理解测试，再开始实验。"
-        actions={<Button onClick={() => setImporting(true)}><FileUp size={16} /> 导入自定义测试</Button>}
+        actions={<><Button variant="secondary" onClick={() => setImportingMath(true)}><FileText size={16} /> 导入考研数学 PDF</Button><Button onClick={() => setImporting(true)}><FileUp size={16} /> 导入自定义测试</Button></>}
       />
       <div className="library-overview">
         <Card><span>全部测试</span><strong>{state.data?.length ?? 0}</strong><small>11 个能力域</small></Card>
@@ -119,8 +100,37 @@ export default function TestLibrary() {
       </Card>
       {selected && <TestDetail caseId={selected} onClose={() => setSelected(null)} />}
       {importing && <ImportModal onClose={() => setImporting(false)} onSaved={() => { setImporting(false); void state.refresh(); }} />}
+      {importingMath && <MathPaperImportModal onClose={() => setImportingMath(false)} />}
     </div>
   );
+}
+
+function MathPaperImportModal({ onClose }: { onClose: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<MathPaperImport | null>(null);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setBusy(true); setError("");
+    const form = new FormData(event.currentTarget);
+    const file = form.get("paper");
+    const year = Number(form.get("year") ?? 2025);
+    if (!(file instanceof File) || !file.name.toLowerCase().endsWith(".pdf")) {
+      setError("请选择 PDF 试卷文件"); setBusy(false); return;
+    }
+    try {
+      const imported = await apiUpload<MathPaperImport>(
+        `/math-papers/import?filename=${encodeURIComponent(file.name)}&year=${year}`,
+        file,
+        "application/pdf",
+      );
+      setResult(imported);
+    } catch (value) {
+      setError(value instanceof Error ? value.message : "PDF 导入失败");
+    } finally { setBusy(false); }
+  }
+  return <Modal title="导入考研数学真题" description="PDF 仅保存在本机。系统先提取 22 道题的待校对草稿，不会自动发布到正式榜单。" onClose={onClose}>
+    {result ? <div className="math-import-result"><div><FileText size={22} /><span><strong>{result.title}</strong><small>{result.source.page_count} 页 · {result.questions.filter((item) => item.question_text).length}/22 道已识别 · 150 分制</small></span></div><p>状态：待人工校对。接下来需要逐题确认公式、图形、答案、等价解法和解答题 Rubric。</p>{result.warnings.map((warning) => <em key={warning}>{warning}</em>)}<div className="modal-actions"><Button onClick={onClose}>完成</Button></div></div> : <form className="form-grid one-column" onSubmit={(event) => void submit(event)}><Field label="考试年份"><input name="year" type="number" min="2000" max="2100" defaultValue="2025" /></Field><Field label="真题与答案 PDF"><input name="paper" type="file" accept="application/pdf,.pdf" required /></Field><div className="math-import-note"><Shield size={16} /><span>原始 PDF、抽取文本与校对草稿只写入 AgentBench 本地数据目录，不会上传服务器或提交到公开仓库。</span></div>{error && <div className="form-error">{error}</div>}<div className="modal-actions"><Button type="button" variant="ghost" onClick={onClose}>取消</Button><Button type="submit" busy={busy}>导入并生成草稿</Button></div></form>}
+  </Modal>;
 }
 
 function TestDetail({ caseId, onClose }: { caseId: string; onClose: () => void }) {

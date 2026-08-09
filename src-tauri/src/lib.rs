@@ -194,6 +194,7 @@ fn stop_backend(app_handle: &tauri::AppHandle) {
 
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let backend = ensure_backend(app).map_err(std::io::Error::other)?;
             app.manage(BackendProcess(Mutex::new(backend)));

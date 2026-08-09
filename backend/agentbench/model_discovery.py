@@ -24,7 +24,7 @@ SOURCE_META: dict[str, tuple[str, str | None]] = {
     "gemini-cli": ("Gemini CLI", "gemini"),
     "aider-cli": ("Aider", "aider"),
     "kimi-code": ("Kimi Code", "kimi"),
-    "qoder-cli": ("Qoder", "qodercli"),
+    "qoder-cli": ("Qoder", "qoderclicn"),
 }
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -573,7 +573,12 @@ def _discover_headless_agent(
 ) -> tuple[list[dict[str, Any]], list[str]]:
     models: list[dict[str, Any]] = []
     if executable:
-        for suffix in (("models", "--json"), ("models", "list", "--json"), ("models",)):
+        for suffix in (
+            ("models", "--json"),
+            ("models", "list", "--json"),
+            ("models",),
+            ("--list-models",),
+        ):
             try:
                 result = subprocess.run(
                     [executable, *suffix],

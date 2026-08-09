@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import fnmatch
 import hashlib
 import os
@@ -8,6 +9,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -46,7 +48,10 @@ class Workspace:
     def write_file(self, path: str, content: str) -> dict[str, Any]:
         target = safe_workspace_path(self.root, path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        if content.startswith("base64:"):
+            target.write_bytes(base64.b64decode(content[len("base64:"):]))
+        else:
+            target.write_text(content, encoding="utf-8")
         return {"path": path, "bytes": target.stat().st_size}
 
     def list_files(self, path: str = ".", max_items: int = 500) -> list[str]:
@@ -267,6 +272,13 @@ CLI_INSTALL_RECIPES: dict[str, dict[str, Any]] = {
         "command": "npm install -g reasonix",
         "source": "npm 包 · reasonix",
     },
+    "qoder_cli": {
+        "manager": "npm",
+        "manager_candidates": ["npm.cmd", "npm"],
+        "args": ["install", "-g", "@qodercn-ai/qoderclicn"],
+        "command": "npm install -g @qodercn-ai/qoderclicn",
+        "source": "npm 官方包 · @qodercn-ai/qoderclicn（Qoder 国内版 CLI）",
+    },
     "gemini_cli": {
         "manager": "npm",
         "manager_candidates": ["npm.cmd", "npm"],
@@ -291,7 +303,6 @@ CLI_INSTALL_RECIPES: dict[str, dict[str, Any]] = {
 }
 
 MANUAL_INSTALL_GUIDANCE = {
-    "qoder_cli": "Qoder 暂无已验证的官方无头 CLI 安装命令；请安装支持非交互输出的 qodercli 并加入 PATH。",
     "command": "自定义 Runner 由用户自行提供可执行文件，AgentBench 不会安装任意第三方命令。",
 }
 
@@ -303,7 +314,7 @@ INSTALL_COMMAND_BY_EXECUTABLE = {
     "gemini": CLI_INSTALL_RECIPES["gemini_cli"]["command"],
     "aider": CLI_INSTALL_RECIPES["aider_cli"]["command"],
     "kimi": CLI_INSTALL_RECIPES["kimi_code_cli"]["command"],
-    "qodercli": MANUAL_INSTALL_GUIDANCE["qoder_cli"],
+    "qoderclicn": CLI_INSTALL_RECIPES["qoder_cli"]["command"],
 }
 
 
@@ -404,6 +415,9 @@ def _npm_native_binary(shim: str, executable: str | None) -> str | None:
         "claude": "node_modules/@anthropic-ai/claude-code/bin/claude.exe",
         "opencode": "node_modules/opencode-ai/bin/opencode.exe",
         "reasonix": "node_modules/reasonix/node_modules/@reasonix/cli-*/bin/reasonix.exe",
+        # qoderclicn currently ships a Node bundle (no native main binary), so
+        # this pattern only future-proofs resolution if a native exe is bundled.
+        "qoderclicn": "node_modules/@qodercn-ai/qoderclicn/bin/qoderclicn.exe",
     }
     pattern = patterns.get(_executable_name(executable))
     if not pattern:
@@ -487,15 +501,20 @@ def native_cli_status(executable: str | None) -> dict[str, Any]:
                         "error": "已安装 OpenCode 桌面版，但评测需要单独安装 opencode CLI",
                     }
                 )
-        if name == "qodercli":
+        if name == "qoderclicn":
             desktop_path = _qoder_desktop_path()
             if desktop_path:
                 result.update(
                     {
                         "desktop_installed": True,
                         "desktop_executable": str(desktop_path),
-                        "error": "已安装 Qoder 桌面版，但自动评测需要可返回结果的 qodercli，不能用 GUI chat 子命令代替",
+                        "error": "已安装 Qoder 桌面版，但自动评测需要可返回结果的 qoderclicn，不能用 GUI chat 子命令代替",
                     }
+                )
+            if shutil.which("qodercli"):
+                result["note"] = (
+                    "检测到国际版 qodercli，但 AgentBench 需要国内版 Qoder CLI "
+                    "（npm 包 @qodercn-ai/qoderclicn，命令 qoderclicn）；两者账号体系不互通"
                 )
         return result
 
@@ -559,6 +578,10 @@ def run_native_cli(
     extra_env: dict[str, str],
     timeout: int,
     cancel_event: threading.Event | None = None,
+    stdin_text: str | None = None,
+    line_callback: Callable[[str, str], None] | None = None,
+    heartbeat_callback: Callable[[int], None] | None = None,
+    heartbeat_interval: float = 5.0,
 ) -> CommandResult:
     candidates = _native_cli_candidates(executable)
     if not candidates:
@@ -582,7 +605,9 @@ def run_native_cli(
                 [resolved, *rendered],
                 cwd=workspace.root,
                 env=environment,
-                stdin=subprocess.DEVNULL,
+                # stdin_text feeds large prompts (e.g. judge rubrics) through stdin so
+                # they never hit Windows cmd.exe's 8191-char command line limit.
+                stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -603,37 +628,77 @@ def run_native_cli(
             "cli_unavailable",
         )
     deadline = time.monotonic() + timeout if timeout > 0 else None
-    stdout = ""
-    stderr = ""
-    while True:
+    output_parts: dict[str, list[str]] = {"stdout": [], "stderr": []}
+
+    def drain(stream_name: str, stream) -> None:
+        if stream is None:
+            return
         try:
-            # communicate(timeout=...) drains stdout/stderr while the CLI is running.
-            # Waiting only on poll() can fill a Windows pipe and deadlock verbose Agents.
-            stdout, stderr = process.communicate(timeout=0.2)
-            break
-        except subprocess.TimeoutExpired:
+            for chunk in iter(stream.readline, ""):
+                output_parts[stream_name].append(chunk)
+                if line_callback is not None:
+                    with suppress(Exception):
+                        line_callback(stream_name, chunk.rstrip("\r\n"))
+        finally:
+            stream.close()
+
+    readers = [
+        threading.Thread(target=drain, args=("stdout", process.stdout), daemon=True),
+        threading.Thread(target=drain, args=("stderr", process.stderr), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+
+    if stdin_text is not None and process.stdin is not None:
+        try:
+            process.stdin.write(stdin_text)
+            process.stdin.flush()
+        except (BrokenPipeError, OSError):
             pass
+        finally:
+            process.stdin.close()
+
+    error_code: str | None = None
+    next_heartbeat = time.monotonic() + max(0.5, heartbeat_interval)
+    while process.poll() is None:
+        now = time.monotonic()
         if cancel_event and cancel_event.is_set():
+            error_code = "cancelled"
             process.terminate()
             try:
-                stdout, stderr = process.communicate(timeout=5)
+                process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
-                stdout, stderr = process.communicate()
-            return CommandResult(
-                False, None, stdout, stderr, int((time.perf_counter() - start) * 1000), "cancelled"
-            )
-        if deadline is not None and time.monotonic() > deadline:
+            break
+        if deadline is not None and now > deadline:
+            error_code = "runtime_safety_limit"
             process.kill()
-            stdout, stderr = process.communicate()
-            return CommandResult(
-                False,
-                None,
-                stdout,
-                stderr,
-                int((time.perf_counter() - start) * 1000),
-                "runtime_safety_limit",
-            )
+            break
+        if heartbeat_callback is not None and now >= next_heartbeat:
+            with suppress(Exception):
+                heartbeat_callback(int((time.perf_counter() - start) * 1000))
+            next_heartbeat = now + max(0.5, heartbeat_interval)
+        time.sleep(0.1)
+
+    with suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=5)
+    if process.poll() is None:
+        process.kill()
+        process.wait()
+    for reader in readers:
+        reader.join(timeout=5)
+
+    stdout = "".join(output_parts["stdout"])
+    stderr = "".join(output_parts["stderr"])
+    if error_code is not None:
+        return CommandResult(
+            False,
+            None,
+            stdout[-500_000:],
+            stderr[-100_000:],
+            int((time.perf_counter() - start) * 1000),
+            error_code,
+        )
     return CommandResult(
         process.returncode == 0,
         process.returncode,

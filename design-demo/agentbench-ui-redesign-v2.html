@@ -1,0 +1,664 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AgentBench — Evaluation Operating System</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #080a0d;
+      --ink-2: #0c0f13;
+      --surface: #10141a;
+      --surface-2: #141920;
+      --surface-3: #192029;
+      --line: #252c35;
+      --line-bright: #38424e;
+      --paper: #f1efe8;
+      --silver: #b3b8bd;
+      --muted: #707880;
+      --acid: #d7ff63;
+      --acid-soft: #263016;
+      --sky: #7bc7ff;
+      --blue: #2869ff;
+      --orange: #ff9b61;
+      --red: #ff707a;
+      --green: #67e2aa;
+      --radius: 12px;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-width: 1120px; min-height: 100%; }
+    body {
+      overflow: hidden;
+      color: var(--paper);
+      background: var(--ink);
+      font-family: "Segoe UI Variable", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+      font-size: 13px;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input { font: inherit; }
+    button { color: inherit; }
+    svg { display: block; }
+    ::selection { color: #0b0e0a; background: var(--acid); }
+
+    .shell { height: 100vh; display: grid; grid-template: 56px minmax(0, 1fr) / 64px minmax(0, 1fr); }
+    .titlebar {
+      grid-column: 1 / -1;
+      padding: 0 14px 0 13px;
+      display: grid;
+      grid-template-columns: 236px minmax(400px, 1fr) auto;
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+      background: #0a0c0f;
+      -webkit-app-region: drag;
+    }
+    .product { display: flex; align-items: center; gap: 10px; }
+    .monogram {
+      position: relative;
+      width: 32px; height: 32px;
+      border: 1px solid #44501f;
+      border-radius: 9px;
+      display: grid; place-items: center;
+      color: var(--acid);
+      background: #151a10;
+      font-size: 11px; font-weight: 850; letter-spacing: -.06em;
+    }
+    .monogram:after { content: ""; position: absolute; right: -2px; top: -2px; width: 6px; height: 6px; border: 2px solid #0a0c0f; border-radius: 50%; background: var(--acid); }
+    .product strong { display: block; font-size: 13px; letter-spacing: -.02em; }
+    .product small { display: block; margin-top: 2px; color: #616970; font-size: 8px; letter-spacing: .15em; }
+    .workspace-switch {
+      height: 32px; padding: 0 9px;
+      border: 1px solid var(--line); border-radius: 8px;
+      display: inline-flex; align-items: center; gap: 8px;
+      color: #9aa1a8; background: #101318;
+      font-size: 10px; cursor: pointer;
+      -webkit-app-region: no-drag;
+    }
+    .workspace-switch i { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+    .workspace-switch b { color: #d9dcde; font-weight: 600; }
+    .workspace-switch span { color: #596168; }
+    .title-center { justify-self: center; display: flex; align-items: center; gap: 4px; }
+    .top-tab {
+      height: 31px; padding: 0 13px;
+      border: 0; border-radius: 7px;
+      color: #737b82; background: transparent;
+      font-size: 10px; cursor: pointer;
+      -webkit-app-region: no-drag;
+    }
+    .top-tab:hover { color: #bbc0c4; background: #11151a; }
+    .top-tab.active { color: #f2f1eb; background: #171b21; }
+    .title-actions { display: flex; align-items: center; gap: 7px; -webkit-app-region: no-drag; }
+    .command-button {
+      width: 184px; height: 32px; padding: 0 9px;
+      border: 1px solid var(--line); border-radius: 8px;
+      display: flex; align-items: center; gap: 7px;
+      color: #707980; background: #0e1115;
+      cursor: pointer;
+    }
+    .command-button svg { width: 14px; }
+    .command-button span { flex: 1; text-align: left; font-size: 9px; }
+    kbd { padding: 2px 5px; border: 1px solid #303740; border-radius: 4px; color: #727b83; background: #151a20; font: 8px/1.2 inherit; }
+    .icon-button, .run-button, .ghost-button, .mini-button {
+      border: 0; display: inline-flex; align-items: center; justify-content: center; gap: 7px; cursor: pointer;
+    }
+    .icon-button { width: 32px; height: 32px; border: 1px solid var(--line); border-radius: 8px; color: #8d959c; background: #101318; }
+    .icon-button:hover { color: var(--paper); border-color: var(--line-bright); }
+    .run-button { height: 32px; padding: 0 12px; border-radius: 8px; color: #12160c; background: var(--acid); font-size: 10px; font-weight: 750; }
+    .run-button:hover { background: #e3ff8c; }
+    .run-button svg, .ghost-button svg { width: 14px; height: 14px; }
+    .ghost-button { height: 32px; padding: 0 11px; border: 1px solid var(--line); border-radius: 8px; color: #a0a8ae; background: #11151a; font-size: 10px; }
+    .ghost-button:hover { color: var(--paper); border-color: #3a444f; }
+    .mini-button { height: 27px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; color: #8d969e; background: #11161c; font-size: 9px; }
+
+    .toolrail {
+      min-height: 0;
+      padding: 12px 9px 10px;
+      display: flex; flex-direction: column; align-items: center; gap: 6px;
+      border-right: 1px solid var(--line);
+      background: #0a0c10;
+    }
+    .tool {
+      position: relative;
+      width: 44px; height: 42px;
+      border: 0; border-radius: 9px;
+      display: grid; place-items: center;
+      color: #667079; background: transparent;
+      cursor: pointer;
+    }
+    .tool svg { width: 18px; height: 18px; stroke-width: 1.7; }
+    .tool:hover { color: #b8bec3; background: #12161b; }
+    .tool.active { color: var(--paper); background: #171c22; }
+    .tool.active:before { content: ""; position: absolute; left: -9px; width: 2px; height: 22px; border-radius: 2px; background: var(--acid); box-shadow: 0 0 12px #d7ff6377; }
+    .tool.active svg { color: var(--acid); }
+    .tool[data-tip]:after {
+      content: attr(data-tip); position: absolute; z-index: 20; left: 54px; top: 50%;
+      padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;
+      opacity: 0; pointer-events: none; transform: translate(3px, -50%);
+      color: #d9dcde; background: #151a20; box-shadow: 0 8px 30px #0008;
+      white-space: nowrap; font-size: 9px; transition: .14s ease;
+    }
+    .tool:hover:after { opacity: 1; transform: translate(0, -50%); }
+    .rail-separator { width: 24px; height: 1px; margin: 5px 0; background: var(--line); }
+    .rail-spacer { flex: 1; }
+    .rail-health {
+      position: relative;
+      width: 38px; height: 38px;
+      border: 1px solid #2c3e2b; border-radius: 50%;
+      display: grid; place-items: center;
+      color: var(--green); background: #101710;
+      font-size: 8px; font-weight: 750;
+    }
+    .rail-health:before { content: ""; position: absolute; inset: 4px; border: 2px solid #263129; border-top-color: var(--green); border-radius: 50%; transform: rotate(35deg); }
+
+    .viewport { min-width: 0; min-height: 0; overflow: hidden; background: var(--ink); }
+    .view { display: none; width: 100%; height: 100%; }
+    .view.active { display: block; animation: reveal .2s ease both; }
+    @keyframes reveal { from { opacity: .2; } }
+
+    .view-header {
+      height: 72px; padding: 0 26px;
+      display: flex; align-items: center; justify-content: space-between; gap: 20px;
+      border-bottom: 1px solid var(--line);
+    }
+    .view-title { display: flex; align-items: center; gap: 14px; }
+    .view-title .index { color: var(--acid); font: 10px/1 ui-monospace, Consolas, monospace; letter-spacing: .08em; }
+    .view-title h1 { margin: 0; font-size: 20px; font-weight: 620; letter-spacing: -.035em; }
+    .view-title p { margin: 4px 0 0; color: var(--muted); font-size: 9px; }
+    .header-meta { display: flex; align-items: center; gap: 8px; }
+    .meta-pill { height: 29px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; display: flex; align-items: center; gap: 6px; color: #7c858d; background: #0d1014; font-size: 9px; }
+    .meta-pill i { width: 5px; height: 5px; border-radius: 50%; background: var(--green); }
+
+    /* COMMAND DECK */
+    .command-deck { height: calc(100% - 72px); padding: 14px; display: grid; grid-template: minmax(390px, 1fr) 238px / minmax(650px, 1fr) 342px; gap: 12px; overflow: auto; }
+    .mission-stage {
+      position: relative;
+      min-height: 410px;
+      border: 1px solid var(--line); border-radius: var(--radius);
+      overflow: hidden; background-color: #0d1014;
+      background-image: radial-gradient(#293039 1px, transparent 1px);
+      background-size: 19px 19px;
+    }
+    .mission-stage:after { content: ""; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(90deg, #0d1014 0, transparent 20%, transparent 80%, #0d1014 100%); }
+    .stage-toolbar { position: relative; z-index: 2; height: 54px; padding: 0 16px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #222831; background: #0d1014e6; backdrop-filter: blur(8px); }
+    .live-label { display: flex; align-items: center; gap: 8px; color: #a9b0b6; font-size: 10px; }
+    .live-label i { width: 7px; height: 7px; border-radius: 50%; background: var(--acid); box-shadow: 0 0 0 5px #d7ff6310; animation: breathe 2s infinite; }
+    @keyframes breathe { 50% { box-shadow: 0 0 0 9px #d7ff6300; } }
+    .live-label strong { color: var(--paper); font-weight: 650; }
+    .stage-actions { display: flex; gap: 6px; }
+    .stage-content { position: relative; z-index: 2; height: calc(100% - 54px); min-height: 354px; display: grid; grid-template-columns: minmax(250px, .8fr) 310px minmax(250px, .8fr); align-items: center; }
+    .mission-copy { padding: 0 0 30px 30px; align-self: center; }
+    .mission-copy .overline { color: #78828a; font: 9px/1.4 ui-monospace, Consolas, monospace; letter-spacing: .12em; }
+    .mission-copy h2 { max-width: 340px; margin: 12px 0 10px; font-size: clamp(26px, 2.3vw, 38px); font-weight: 560; line-height: 1.05; letter-spacing: -.055em; }
+    .mission-copy p { max-width: 320px; margin: 0; color: #7c858d; font-size: 10px; line-height: 1.65; }
+    .duel { margin-top: 22px; display: flex; align-items: center; gap: 10px; }
+    .duel-model { display: flex; align-items: center; gap: 8px; }
+    .model-seal { width: 30px; height: 30px; border: 1px solid #3a434c; border-radius: 50%; display: grid; place-items: center; color: var(--sky); background: #131b22; font-size: 8px; font-weight: 800; }
+    .model-seal.acid { color: var(--acid); background: #171d11; }
+    .duel-model strong { display: block; font-size: 9px; }
+    .duel-model small { display: block; margin-top: 2px; color: #606971; font-size: 7px; }
+    .versus { color: #4f575e; font: italic 10px Georgia, serif; }
+    .orbit-wrap { position: relative; width: 286px; height: 286px; display: grid; place-items: center; justify-self: center; }
+    .orbit { position: absolute; inset: 13px; border: 1px solid #2e353e; border-radius: 50%; }
+    .orbit:before, .orbit:after { content: ""; position: absolute; border: 1px solid #242b33; border-radius: 50%; }
+    .orbit:before { inset: 24px; }
+    .orbit:after { inset: 49px; border-style: dashed; }
+    .progress-ring { position: absolute; inset: 40px; border-radius: 50%; background: conic-gradient(var(--acid) 0 55%, #20262d 55% 100%); transform: rotate(-25deg); -webkit-mask: radial-gradient(transparent 65%, #000 66%); mask: radial-gradient(transparent 65%, #000 66%); filter: drop-shadow(0 0 8px #d7ff6325); }
+    .ring-core { position: relative; z-index: 2; width: 126px; height: 126px; border: 1px solid #303840; border-radius: 50%; display: grid; place-items: center; text-align: center; background: #0c1014; box-shadow: 0 18px 50px #0008; }
+    .ring-core strong { display: block; font-size: 33px; font-weight: 560; letter-spacing: -.055em; }
+    .ring-core strong span { color: #6e777f; font-size: 14px; }
+    .ring-core small { display: block; margin-top: 2px; color: var(--acid); font-size: 8px; letter-spacing: .12em; }
+    .satellite { position: absolute; z-index: 3; min-width: 66px; padding: 6px 7px; border: 1px solid #2b343c; border-radius: 7px; color: #8b949b; background: #11161b; font-size: 8px; box-shadow: 0 8px 24px #0006; }
+    .satellite b { display: block; margin-bottom: 2px; color: #d8dadd; font-weight: 600; }
+    .sat-1 { top: 10px; left: 18px; }
+    .sat-2 { right: 0; top: 93px; }
+    .sat-3 { bottom: 4px; left: 30px; }
+    .stage-inspector { height: 100%; padding: 22px 22px 22px 0; display: flex; flex-direction: column; justify-content: center; }
+    .stage-inspector h3 { margin: 0 0 17px; color: #8e969d; font-size: 9px; font-weight: 650; letter-spacing: .12em; }
+    .stage-stat { padding: 11px 0; border-top: 1px solid #242a32; display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+    .stage-stat span { color: #707980; font-size: 9px; }
+    .stage-stat strong { font-size: 11px; font-weight: 600; }
+    .stage-stat small { grid-column: 1 / -1; color: #4f585f; font-size: 7px; }
+    .pipeline { position: absolute; z-index: 3; left: 30px; right: 24px; bottom: 20px; display: grid; grid-template-columns: repeat(5, 1fr); gap: 0; }
+    .pipe-step { position: relative; padding-top: 17px; color: #59636b; font-size: 8px; }
+    .pipe-step:before { content: ""; position: absolute; left: 0; right: 0; top: 5px; height: 1px; background: #313841; }
+    .pipe-step:after { content: ""; position: absolute; left: 0; top: 2px; width: 7px; height: 7px; border: 2px solid #0d1014; border-radius: 50%; background: #444d55; box-shadow: 0 0 0 1px #424b54; }
+    .pipe-step.done { color: #9ba2a8; }
+    .pipe-step.done:before { background: #6c7d38; }
+    .pipe-step.done:after { background: var(--acid); box-shadow: 0 0 0 1px #6c7d38; }
+    .pipe-step.current { color: var(--acid); }
+    .pipe-step.current:after { background: var(--acid); box-shadow: 0 0 0 5px #d7ff6311; }
+
+    .signal-console { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: #0d1014; }
+    .console-head { height: 54px; padding: 0 15px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
+    .console-head strong { font-size: 11px; font-weight: 620; }
+    .console-head span { color: #5d666e; font: 8px ui-monospace, Consolas, monospace; }
+    .health-score { padding: 17px 16px 15px; border-bottom: 1px solid var(--line); }
+    .health-score .label { display: flex; justify-content: space-between; color: #737c83; font-size: 8px; }
+    .health-score strong { display: block; margin: 7px 0 9px; font-size: 34px; font-weight: 540; letter-spacing: -.05em; }
+    .health-score strong small { color: var(--acid); font-size: 10px; font-weight: 600; letter-spacing: 0; }
+    .spectrum { height: 30px; display: flex; align-items: end; gap: 3px; }
+    .spectrum i { flex: 1; min-height: 4px; border-radius: 2px 2px 0 0; background: #29313a; }
+    .spectrum i.hot { background: var(--acid); box-shadow: 0 0 8px #d7ff6320; }
+    .signal-feed { padding: 7px 14px; }
+    .signal { padding: 11px 0; border-bottom: 1px solid #20262d; display: grid; grid-template-columns: 8px 1fr auto; gap: 9px; align-items: start; }
+    .signal:last-child { border-bottom: 0; }
+    .signal > i { width: 6px; height: 6px; margin-top: 4px; border-radius: 50%; background: var(--orange); }
+    .signal > i.red { background: var(--red); }
+    .signal > i.green { background: var(--green); }
+    .signal strong { display: block; color: #c5c9cc; font-size: 9px; font-weight: 600; line-height: 1.45; }
+    .signal p { margin: 3px 0 0; color: #606970; font-size: 8px; line-height: 1.5; }
+    .signal code { padding: 3px 5px; border-radius: 4px; color: #9ea5aa; background: #171c22; font: 7px ui-monospace, Consolas, monospace; }
+    .model-ledger { grid-column: 1 / -1; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: #0d1014; }
+    .ledger-head { height: 45px; padding: 0 15px; display: grid; grid-template-columns: 240px repeat(6, 1fr) 90px; align-items: center; border-bottom: 1px solid var(--line); color: #626b72; font-size: 8px; letter-spacing: .08em; }
+    .ledger-row { height: 62px; padding: 0 15px; display: grid; grid-template-columns: 240px repeat(6, 1fr) 90px; align-items: center; border-bottom: 1px solid #20262d; }
+    .ledger-row:last-child { border-bottom: 0; }
+    .model-id { display: flex; align-items: center; gap: 10px; }
+    .model-id .model-seal { width: 32px; height: 32px; border-radius: 9px; }
+    .model-id strong { display: block; font-size: 10px; }
+    .model-id small { display: block; margin-top: 3px; color: #5f686f; font-size: 7px; }
+    .cap-cell { padding-right: 13px; }
+    .cap-cell span { display: block; margin-bottom: 6px; color: #a4abb0; font-size: 8px; }
+    .cap-line { height: 3px; border-radius: 2px; background: #252c33; }
+    .cap-line i { display: block; height: 100%; border-radius: inherit; background: var(--sky); }
+    .ledger-row:nth-child(3) .cap-line i { background: var(--acid); }
+    .grade { width: 34px; height: 26px; border: 1px solid #435124; border-radius: 6px; display: grid; place-items: center; color: var(--acid); background: #171e10; font-size: 10px; font-weight: 800; }
+
+    /* LIBRARY — MASTER / DETAIL */
+    .library-layout { height: calc(100% - 72px); display: grid; grid-template-columns: 224px minmax(500px, 1fr) 330px; }
+    .collection-pane { min-height: 0; padding: 14px 12px; border-right: 1px solid var(--line); overflow: auto; background: #0b0e12; }
+    .pane-label { margin: 5px 9px 9px; color: #59626a; font-size: 8px; font-weight: 700; letter-spacing: .14em; }
+    .collection {
+      width: 100%; min-height: 43px; padding: 8px 9px;
+      border: 0; border-radius: 8px;
+      display: grid; grid-template-columns: 25px 1fr auto; align-items: center; gap: 8px;
+      color: #79828a; background: transparent; cursor: pointer; text-align: left;
+    }
+    .collection:hover { background: #11161b; }
+    .collection.active { color: var(--paper); background: #181d22; }
+    .collection-icon { width: 24px; height: 24px; border: 1px solid #2c343c; border-radius: 6px; display: grid; place-items: center; color: #828b92; background: #11161c; }
+    .collection.active .collection-icon { color: var(--acid); border-color: #475329; background: #171c11; }
+    .collection-icon svg { width: 12px; }
+    .collection strong { display: block; font-size: 9px; font-weight: 600; }
+    .collection small { display: block; margin-top: 2px; color: #535c64; font-size: 7px; }
+    .collection b { color: #5f686f; font-size: 8px; font-weight: 500; }
+    .import-tile { margin: 12px 3px 0; padding: 11px; border: 1px dashed #34404b; border-radius: 9px; color: #7b858d; background: #0e1318; cursor: pointer; }
+    .import-tile strong { display: block; color: #b8bec3; font-size: 9px; }
+    .import-tile span { display: block; margin-top: 4px; font-size: 7px; line-height: 1.5; }
+    .case-browser { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #0d1014; }
+    .browser-toolbar { height: 54px; padding: 0 14px; flex: 0 0 auto; display: flex; align-items: center; gap: 7px; border-bottom: 1px solid var(--line); }
+    .browser-search { height: 31px; flex: 1; min-width: 160px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; display: flex; align-items: center; gap: 7px; color: #657078; background: #0a0d11; }
+    .browser-search svg { width: 13px; }
+    .browser-search input { width: 100%; border: 0; outline: 0; color: #bec3c6; background: transparent; font-size: 9px; }
+    .browser-count { color: #5f686f; font: 8px ui-monospace, Consolas, monospace; }
+    .case-columns, .case-row { display: grid; grid-template-columns: minmax(260px, 1fr) 82px 95px 85px 72px; align-items: center; }
+    .case-columns { height: 34px; padding: 0 15px; flex: 0 0 auto; border-bottom: 1px solid var(--line); color: #596269; background: #0a0d10; font-size: 8px; letter-spacing: .08em; }
+    .case-list { min-height: 0; overflow: auto; }
+    .case-row { min-height: 61px; width: 100%; padding: 0 15px; border: 0; border-bottom: 1px solid #20262d; color: #90989f; background: transparent; cursor: pointer; text-align: left; }
+    .case-row:hover { background: #11161b; }
+    .case-row.active { position: relative; background: #171b1c; }
+    .case-row.active:before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 2px; background: var(--acid); }
+    .case-name strong { display: block; color: #d5d8da; font-size: 10px; font-weight: 600; }
+    .case-name small { display: block; margin-top: 4px; color: #59636a; font: 7px ui-monospace, Consolas, monospace; }
+    .difficulty { display: flex; gap: 3px; }
+    .difficulty i { width: 6px; height: 6px; border-radius: 50%; background: #2c343b; }
+    .difficulty i.on { background: var(--orange); }
+    .difficulty i.ultra { background: var(--red); }
+    .validator-stack { display: flex; gap: 3px; }
+    .validator-stack i { width: 20px; height: 17px; border: 1px solid #2e3740; border-radius: 4px; display: grid; place-items: center; color: #758089; background: #12171c; font-size: 6px; font-style: normal; }
+    .sample-count { color: #727b82; font-size: 8px; }
+    .full-score { color: var(--red); font-size: 10px; font-weight: 700; }
+    .full-score.mid { color: var(--orange); }
+    .full-score.good { color: var(--green); }
+    .inspector-pane { min-height: 0; overflow: auto; border-left: 1px solid var(--line); background: #0b0e12; }
+    .inspector-cover { position: relative; height: 132px; padding: 18px; overflow: hidden; border-bottom: 1px solid var(--line); background-color: #10151a; background-image: linear-gradient(#1b232a 1px, transparent 1px), linear-gradient(90deg, #1b232a 1px, transparent 1px); background-size: 18px 18px; }
+    .inspector-cover:after { content: ""; position: absolute; right: -42px; top: -48px; width: 160px; height: 160px; border: 1px solid #3a4528; border-radius: 50%; box-shadow: inset 0 0 0 24px #11170e, inset 0 0 0 25px #333d24; opacity: .75; }
+    .inspector-cover .priority { position: relative; z-index: 2; padding: 4px 6px; border: 1px solid #5c3035; border-radius: 5px; color: #ff9da4; background: #2a1519; font-size: 7px; font-weight: 800; }
+    .inspector-cover h2 { position: relative; z-index: 2; max-width: 220px; margin: 18px 0 5px; font-size: 16px; font-weight: 600; letter-spacing: -.03em; }
+    .inspector-cover code { position: relative; z-index: 2; color: #69737a; font: 7px ui-monospace, Consolas, monospace; }
+    .inspector-body { padding: 15px 16px 22px; }
+    .inspect-section { padding: 12px 0; border-bottom: 1px solid #20262d; }
+    .inspect-section:last-child { border-bottom: 0; }
+    .inspect-section > label { display: block; margin-bottom: 9px; color: #5b646c; font-size: 8px; font-weight: 700; letter-spacing: .12em; }
+    .history-kpi { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+    .history-kpi div { padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: #10151a; }
+    .history-kpi span { display: block; color: #626c74; font-size: 7px; }
+    .history-kpi strong { display: block; margin-top: 5px; font-size: 13px; font-weight: 600; }
+    .history-kpi strong.bad { color: var(--red); }
+    .validator-map { display: flex; flex-direction: column; gap: 7px; }
+    .validator-item { display: grid; grid-template-columns: 27px 1fr auto; align-items: center; gap: 8px; }
+    .validator-item b { width: 26px; height: 23px; border: 1px solid #303841; border-radius: 5px; display: grid; place-items: center; color: var(--sky); background: #111820; font-size: 7px; }
+    .validator-item strong { display: block; font-size: 8px; font-weight: 600; }
+    .validator-item small { display: block; margin-top: 2px; color: #5c666d; font-size: 7px; }
+    .validator-item em { color: #767f86; font-size: 8px; font-style: normal; }
+    .diagnosis { padding: 10px; border-left: 2px solid var(--orange); color: #939ba1; background: #17130f; font-size: 8px; line-height: 1.65; }
+    .inspect-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+
+    /* COMPOSER — NODE CANVAS */
+    .composer-layout { height: calc(100% - 72px); display: grid; grid-template-columns: minmax(680px, 1fr) 326px; }
+    .graph-workspace { min-width: 0; min-height: 0; position: relative; overflow: hidden; background-color: #0b0e12; background-image: radial-gradient(#29313a 1px, transparent 1px); background-size: 20px 20px; }
+    .graph-toolbar { position: absolute; z-index: 6; left: 14px; right: 14px; top: 12px; height: 42px; padding: 0 8px; border: 1px solid var(--line); border-radius: 9px; display: flex; align-items: center; gap: 6px; background: #10151be8; backdrop-filter: blur(10px); box-shadow: 0 10px 30px #0006; }
+    .graph-toolbar .separator { width: 1px; height: 19px; margin: 0 2px; background: var(--line); }
+    .graph-toolbar .spacer { flex: 1; }
+    .graph-stat { color: #747e86; font-size: 8px; }
+    .graph-stat strong { color: #c7cbce; font-weight: 600; }
+    .graph-canvas { position: absolute; inset: 0; min-width: 900px; min-height: 610px; }
+    .connections { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+    .connections path { fill: none; stroke: #39434c; stroke-width: 1.5; }
+    .connections path.live { stroke: #71843a; stroke-dasharray: 4 5; animation: dash 12s linear infinite; }
+    @keyframes dash { to { stroke-dashoffset: -120; } }
+    .graph-node { position: absolute; z-index: 3; width: 196px; border: 1px solid #303840; border-radius: 10px; overflow: hidden; background: #11161c; box-shadow: 0 16px 44px #0007; cursor: pointer; transition: .15s ease; }
+    .graph-node:hover { border-color: #47515b; transform: translateY(-1px); }
+    .graph-node.selected { border-color: #6b7c35; box-shadow: 0 0 0 1px #6b7c35, 0 18px 50px #0008; }
+    .node-head { height: 32px; padding: 0 9px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #293039; color: #7b858d; background: #151a20; font: 7px ui-monospace, Consolas, monospace; letter-spacing: .09em; }
+    .node-head i { width: 6px; height: 6px; border-radius: 50%; background: #4f5961; }
+    .graph-node.selected .node-head i, .node-head i.ready { background: var(--acid); box-shadow: 0 0 7px #d7ff6355; }
+    .node-body { padding: 12px; }
+    .node-symbol { width: 31px; height: 31px; border: 1px solid #35404a; border-radius: 8px; display: grid; place-items: center; color: var(--sky); background: #121a22; }
+    .node-symbol svg { width: 15px; }
+    .node-body h3 { margin: 11px 0 4px; font-size: 11px; font-weight: 620; }
+    .node-body p { margin: 0; color: #68727a; font-size: 8px; line-height: 1.5; }
+    .node-foot { margin-top: 11px; padding-top: 8px; border-top: 1px solid #252c33; display: flex; justify-content: space-between; color: #59636b; font-size: 7px; }
+    .port { position: absolute; z-index: 4; width: 9px; height: 9px; border: 2px solid #0b0e12; border-radius: 50%; background: #65717a; box-shadow: 0 0 0 1px #4b555e; }
+    .port.in { left: -5px; top: 50%; }
+    .port.out { right: -5px; top: 50%; }
+    .selected .port, .port.live { background: var(--acid); box-shadow: 0 0 0 1px #72823c; }
+    .node-suite { left: 7%; top: 35%; }
+    .node-model-a { left: 35%; top: 20%; }
+    .node-model-b { left: 35%; top: 53%; }
+    .node-judge { left: 63%; top: 35%; }
+    .node-policy { left: 82%; top: 35%; width: 164px; }
+    .node-model-c { left: 35%; top: 75%; display: none; }
+    .node-model-c.show { display: block; animation: node-in .2s ease both; }
+    @keyframes node-in { from { opacity: 0; transform: scale(.94); } }
+    .canvas-note { position: absolute; z-index: 2; left: 7%; top: 20%; width: 190px; color: #4e585f; font: 8px/1.6 ui-monospace, Consolas, monospace; }
+    .minimap { position: absolute; z-index: 6; right: 14px; bottom: 14px; width: 130px; height: 78px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background-color: #0e1217; background-image: radial-gradient(#2b333b 1px, transparent 1px); background-size: 8px 8px; }
+    .minimap i { position: absolute; left: 9px; top: 8px; width: 102px; height: 53px; border: 1px solid #607038; background: #d7ff6308; }
+    .composer-inspector { min-height: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: #0d1014; }
+    .composer-summary { padding: 15px; border-bottom: 1px solid var(--line); }
+    .composer-summary .eyebrow { color: #626b73; font-size: 8px; letter-spacing: .12em; }
+    .composer-summary h2 { margin: 7px 0 5px; font-size: 15px; font-weight: 620; }
+    .composer-summary p { margin: 0; color: #69737a; font-size: 8px; line-height: 1.55; }
+    .inspector-form { min-height: 0; padding: 15px; overflow: auto; }
+    .field { margin-bottom: 14px; }
+    .field label { display: flex; justify-content: space-between; margin-bottom: 7px; color: #717a82; font-size: 8px; }
+    .field label small { color: #4f585f; }
+    .select-box { min-height: 35px; padding: 0 9px; border: 1px solid #2d353e; border-radius: 7px; display: flex; align-items: center; justify-content: space-between; color: #b7bdc1; background: #12171d; font-size: 9px; }
+    .select-box span { color: #5e6870; }
+    .node-diagnostics { padding: 10px; border: 1px solid #2d3825; border-radius: 8px; color: #8d9980; background: #11170f; font-size: 8px; line-height: 1.6; }
+    .node-diagnostics strong { display: block; margin-bottom: 3px; color: var(--acid); font-weight: 600; }
+    .launch-panel { margin-top: auto; padding: 14px 15px 16px; border-top: 1px solid var(--line); background: #0a0d11; }
+    .launch-stats { margin-bottom: 12px; display: grid; grid-template-columns: repeat(3, 1fr); }
+    .launch-stats div { border-right: 1px solid var(--line); text-align: center; }
+    .launch-stats div:last-child { border-right: 0; }
+    .launch-stats span { display: block; color: #5f6870; font-size: 7px; }
+    .launch-stats strong { display: block; margin-top: 4px; font-size: 13px; font-weight: 600; }
+    .launch-panel .run-button { width: 100%; height: 37px; }
+
+    /* RUN EVIDENCE LEDGER */
+    .run-layout { height: calc(100% - 72px); display: grid; grid-template-columns: 230px minmax(560px, 1fr) 300px; }
+    .attempt-pane { min-height: 0; padding: 14px 12px; border-right: 1px solid var(--line); overflow: auto; background: #0b0e12; }
+    .run-id { margin: 4px 8px 17px; }
+    .run-id code { color: #59636b; font: 7px ui-monospace, Consolas, monospace; }
+    .run-id h3 { margin: 8px 0 5px; font-size: 13px; font-weight: 620; line-height: 1.3; }
+    .run-id span { color: #667078; font-size: 8px; }
+    .attempt { position: relative; margin-left: 9px; padding: 0 0 22px 22px; }
+    .attempt:before { content: ""; position: absolute; left: 4px; top: 10px; bottom: -2px; width: 1px; background: #313840; }
+    .attempt:last-child:before { display: none; }
+    .attempt:after { content: ""; position: absolute; left: 0; top: 5px; width: 7px; height: 7px; border: 2px solid #0b0e12; border-radius: 50%; background: #535d65; box-shadow: 0 0 0 1px #414a52; }
+    .attempt.pass:after { background: var(--acid); box-shadow: 0 0 0 1px #6f7e3b, 0 0 0 5px #d7ff630c; }
+    .attempt strong { display: block; font-size: 9px; }
+    .attempt p { margin: 4px 0 6px; color: #646e76; font-size: 8px; line-height: 1.45; }
+    .attempt span { color: #7a838a; font: 8px ui-monospace, Consolas, monospace; }
+    .outline-group { margin-top: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
+    .outline-button { width: 100%; height: 31px; padding: 0 8px; border: 0; border-radius: 6px; display: flex; align-items: center; gap: 8px; color: #727c83; background: transparent; cursor: pointer; text-align: left; font-size: 8px; }
+    .outline-button.active { color: #e1e3e4; background: #171c22; }
+    .outline-button svg { width: 13px; color: #7d878e; }
+    .evidence-canvas { min-width: 0; min-height: 0; overflow: auto; background: #0d1014; }
+    .score-hero { min-height: 172px; padding: 22px 25px; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 190px 1fr; gap: 26px; align-items: center; }
+    .big-score { display: flex; align-items: end; gap: 9px; }
+    .big-score strong { font-size: 64px; font-weight: 470; line-height: .86; letter-spacing: -.075em; }
+    .big-score span { margin-bottom: 5px; color: #6c757c; font-size: 11px; }
+    .score-caption { margin-top: 10px; color: #6c757d; font-size: 8px; }
+    .score-caption b { color: var(--acid); font-weight: 600; }
+    .score-stack { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+    .score-part { position: relative; min-height: 93px; padding: 11px; border-left: 1px solid #2b323a; }
+    .score-part label { color: #687178; font-size: 8px; }
+    .score-part strong { display: block; margin-top: 8px; font-size: 19px; font-weight: 560; }
+    .score-part small { display: block; margin-top: 3px; color: #505960; font-size: 7px; }
+    .vertical-meter { position: absolute; right: 5px; top: 11px; bottom: 11px; width: 3px; border-radius: 2px; background: #252c33; }
+    .vertical-meter i { position: absolute; left: 0; right: 0; bottom: 0; border-radius: inherit; background: var(--acid); }
+    .score-part:nth-child(3) .vertical-meter i, .score-part:nth-child(4) .vertical-meter i { background: var(--orange); }
+    .proof-ledger { padding: 0 25px 24px; }
+    .ledger-title { height: 55px; display: flex; align-items: center; justify-content: space-between; }
+    .ledger-title h3 { margin: 0; font-size: 11px; font-weight: 620; }
+    .ledger-title span { color: #5f686f; font-size: 8px; }
+    .proof-item { min-height: 66px; border-top: 1px solid #252c33; display: grid; grid-template-columns: 34px minmax(250px, 1fr) minmax(120px, .7fr) 58px; align-items: center; gap: 12px; }
+    .proof-index { width: 26px; height: 26px; border: 1px solid #34403b; border-radius: 50%; display: grid; place-items: center; color: var(--green); background: #101a16; font: 8px ui-monospace, Consolas, monospace; }
+    .proof-copy strong { display: block; font-size: 9px; font-weight: 600; }
+    .proof-copy small { display: block; margin-top: 4px; color: #626c73; font-size: 8px; line-height: 1.45; }
+    .proof-evidence { overflow: hidden; color: #6c757c; font: 7px/1.5 ui-monospace, Consolas, monospace; white-space: nowrap; text-overflow: ellipsis; }
+    .proof-score { color: #d4d7d9; font-size: 10px; text-align: right; }
+    .context-pane { min-height: 0; overflow: auto; border-left: 1px solid var(--line); background: #0b0e12; }
+    .context-block { padding: 15px; border-bottom: 1px solid var(--line); }
+    .context-block > label { display: block; margin-bottom: 11px; color: #5f6870; font-size: 8px; font-weight: 700; letter-spacing: .12em; }
+    .cost-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+    .cost-grid div { padding: 9px; border: 1px solid var(--line); border-radius: 7px; background: #10151a; }
+    .cost-grid span { display: block; color: #616a72; font-size: 7px; }
+    .cost-grid strong { display: block; margin-top: 5px; font-size: 12px; font-weight: 600; }
+    .timeline-event { position: relative; padding: 0 0 16px 19px; }
+    .timeline-event:before { content: ""; position: absolute; left: 4px; top: 8px; bottom: -2px; width: 1px; background: #303841; }
+    .timeline-event:last-child:before { display: none; }
+    .timeline-event:after { content: ""; position: absolute; left: 1px; top: 5px; width: 7px; height: 7px; border-radius: 50%; background: var(--sky); }
+    .timeline-event.warn:after { background: var(--orange); }
+    .timeline-event strong { display: block; font-size: 8px; }
+    .timeline-event span { display: block; margin-top: 3px; color: #5f6970; font-size: 7px; line-height: 1.5; }
+    .artifact-row { min-height: 39px; display: flex; align-items: center; gap: 8px; border-top: 1px solid #20262d; color: #858e95; font-size: 8px; }
+    .artifact-row svg { width: 13px; color: var(--sky); }
+    .artifact-row span { flex: 1; }
+
+    /* OVERLAYS */
+    .scrim { position: fixed; z-index: 40; inset: 0; opacity: 0; pointer-events: none; background: #030406aa; backdrop-filter: blur(4px); transition: .16s ease; }
+    .palette { position: fixed; z-index: 41; left: 50%; top: 18%; width: 540px; padding: 9px; border: 1px solid #3a434d; border-radius: 12px; opacity: 0; pointer-events: none; transform: translate(-50%, -8px) scale(.98); background: #12171c; box-shadow: 0 30px 90px #000c; transition: .17s ease; }
+    body.palette-open .scrim { opacity: 1; pointer-events: auto; }
+    body.palette-open .palette { opacity: 1; pointer-events: auto; transform: translate(-50%, 0) scale(1); }
+    .palette-search { height: 43px; padding: 0 9px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 9px; }
+    .palette-search svg { width: 16px; color: #737c84; }
+    .palette-search input { flex: 1; border: 0; outline: 0; color: var(--paper); background: transparent; }
+    .palette-label { padding: 10px 7px 5px; color: #596269; font-size: 7px; letter-spacing: .12em; }
+    .palette-item { width: 100%; height: 39px; padding: 0 9px; border: 0; border-radius: 7px; display: flex; align-items: center; gap: 9px; color: #9da4aa; background: transparent; cursor: pointer; text-align: left; }
+    .palette-item:hover { color: var(--paper); background: #1a2026; }
+    .palette-item svg { width: 14px; color: var(--acid); }
+    .palette-item span { flex: 1; font-size: 9px; }
+    .toast { position: fixed; z-index: 50; left: 50%; bottom: 22px; padding: 10px 13px; border: 1px solid #465327; border-radius: 8px; opacity: 0; transform: translate(-50%, 10px); color: #dfffa1; background: #151c0e; box-shadow: 0 16px 40px #0008; pointer-events: none; font-size: 9px; transition: .18s ease; }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+    @media (max-width: 1260px) {
+      .command-deck { grid-template-columns: minmax(650px, 1fr) 300px; }
+      .stage-content { grid-template-columns: minmax(220px,.8fr) 270px minmax(210px,.7fr); }
+      .orbit-wrap { transform: scale(.9); }
+      .library-layout { grid-template-columns: 200px minmax(470px, 1fr) 300px; }
+      .composer-layout { grid-template-columns: minmax(680px, 1fr) 300px; }
+      .run-layout { grid-template-columns: 210px minmax(530px, 1fr) 280px; }
+    }
+  </style>
+</head>
+<body>
+  <svg width="0" height="0" aria-hidden="true" style="position:absolute">
+    <symbol id="i-command" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM8 9l3 3-3 3M13 15h3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-library" viewBox="0 0 24 24"><path d="M5 4h5v16H5zM14 4h5v16h-5zM10 7h4M10 17h4" fill="none" stroke="currentColor" stroke-linejoin="round"/></symbol>
+    <symbol id="i-flow" viewBox="0 0 24 24"><rect x="3" y="4" width="6" height="5" rx="1" fill="none" stroke="currentColor"/><rect x="15" y="15" width="6" height="5" rx="1" fill="none" stroke="currentColor"/><path d="M9 6.5h3a5 5 0 0 1 5 5V15M15 17.5h-3a5 5 0 0 1-5-5V9" fill="none" stroke="currentColor"/></symbol>
+    <symbol id="i-ledger" viewBox="0 0 24 24"><path d="M5 3h14v18H5zM8 7h8M8 11h8M8 15h5" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+    <symbol id="i-agent" viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="12" rx="3" fill="none" stroke="currentColor"/><path d="M9 12h.01M15 12h.01M9 16h6M12 7V4" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor"/><path d="m16 16 5 5" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z" fill="none" stroke="currentColor" stroke-linejoin="round"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+    <symbol id="i-dots" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.5" fill="currentColor"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/><circle cx="19" cy="12" r="1.5" fill="currentColor"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6V3Z" fill="none" stroke="currentColor" stroke-linejoin="round"/><path d="M14 3v5h4" fill="none" stroke="currentColor"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.8 2.7 8.2 7 10 4.3-1.8 7-5.2 7-10V6l-7-3Z" fill="none" stroke="currentColor" stroke-linejoin="round"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3 1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3Z" fill="none" stroke="currentColor" stroke-linejoin="round"/></symbol>
+    <symbol id="i-filter" viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-expand" viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+  </svg>
+
+  <div class="shell">
+    <header class="titlebar">
+      <div style="display:flex;align-items:center;gap:18px"><div class="product"><div class="monogram">AB</div><div><strong>AgentBench</strong><small>EVALUATION OS</small></div></div><button class="workspace-switch"><i></i><b>Local Lab</b><span>⌄</span></button></div>
+      <nav class="title-center"><button class="top-tab active" data-view="command">控制台</button><button class="top-tab" data-view="library">测试库</button><button class="top-tab" data-view="compose">编排</button><button class="top-tab" data-view="run">证据</button></nav>
+      <div class="title-actions"><button class="command-button" id="openPalette"><svg><use href="#i-search"/></svg><span>搜索或执行命令</span><kbd>Ctrl K</kbd></button><button class="icon-button"><svg width="15"><use href="#i-dots"/></svg></button><button class="run-button" data-view-jump="compose"><svg><use href="#i-plus"/></svg>新建评测</button></div>
+    </header>
+
+    <aside class="toolrail">
+      <button class="tool active" data-view="command" data-tip="控制台"><svg><use href="#i-command"/></svg></button>
+      <button class="tool" data-view="library" data-tip="测试库"><svg><use href="#i-library"/></svg></button>
+      <button class="tool" data-view="compose" data-tip="评测编排"><svg><use href="#i-flow"/></svg></button>
+      <button class="tool" data-view="run" data-tip="证据账本"><svg><use href="#i-ledger"/></svg></button>
+      <div class="rail-separator"></div>
+      <button class="tool" data-view="command" data-tip="模型与 Agent"><svg><use href="#i-agent"/></svg></button>
+      <div class="rail-spacer"></div>
+      <button class="tool" data-view="command" data-tip="设置"><svg><use href="#i-settings"/></svg></button>
+      <div class="rail-health">7/9</div>
+    </aside>
+
+    <main class="viewport">
+      <section class="view active" id="view-command">
+        <header class="view-header"><div class="view-title"><span class="index">01 / COMMAND</span><div><h1>评测控制台</h1><p>正在监控 1 个运行 · 所有数据留在本机</p></div></div><div class="header-meta"><div class="meta-pill"><i></i>Docker 在线</div><div class="meta-pill">212 个测试</div><button class="ghost-button" data-view-jump="run">查看证据</button></div></header>
+        <div class="command-deck">
+          <article class="mission-stage">
+            <div class="stage-toolbar"><div class="live-label"><i></i><strong>LIVE / BENCH-0347</strong><span>高难快速摸底 · 修订候选</span></div><div class="stage-actions"><button class="mini-button">暂停</button><button class="mini-button">···</button></div></div>
+            <div class="stage-content">
+              <div class="mission-copy"><div class="overline">MODEL × AGENT COMPARATIVE RUN</div><h2>一次运行，看见模型与 Agent 的真实差距。</h2><p>42 个难度 4–5 测试正在通过相同评分协议执行。低区分度题已被隔离，不参与这次排名。</p><div class="duel"><div class="duel-model"><i class="model-seal acid">DS</i><div><strong>DeepSeek V4</strong><small>Reasonix CLI</small></div></div><span class="versus">vs</span><div class="duel-model"><i class="model-seal">G5</i><div><strong>GPT-5.6 SOL</strong><small>Codex CLI</small></div></div></div></div>
+              <div class="orbit-wrap"><div class="orbit"></div><div class="progress-ring"></div><div class="ring-core"><div><strong>23<span>/42</span></strong><small>55% COMPLETE</small></div></div><div class="satellite sat-1"><b>推理计算</b>8 / 12</div><div class="satellite sat-2"><b>编码工程</b>7 / 14</div><div class="satellite sat-3"><b>规划决策</b>3 / 8</div></div>
+              <div class="stage-inspector"><h3>CURRENT SIGNAL</h3><div class="stage-stat"><span>正在执行</span><strong>隐藏资源调度</strong><small>ROUND 02 · PRIVATE INSTANCE H-03</small></div><div class="stage-stat"><span>领先模型</span><strong>DeepSeek V4</strong><small>OBJECTIVE QUALITY +4.8</small></div><div class="stage-stat"><span>预计剩余</span><strong>31 分钟</strong><small>BASED ON LOCAL HISTORY</small></div></div>
+            </div>
+            <div class="pipeline"><div class="pipe-step done">初始化环境</div><div class="pipe-step done">确定性任务</div><div class="pipe-step current">Agent 工作流</div><div class="pipe-step">裁判复核</div><div class="pipe-step">生成报告</div></div>
+          </article>
+
+          <aside class="signal-console"><div class="console-head"><strong>题库信号台</strong><span>AUTO / 08:42</span></div><div class="health-score"><div class="label"><span>区分度健康指数</span><span>116 个难度 4–5 项</span></div><strong>72<small> / 100</small></strong><div class="spectrum"><i style="height:7px"></i><i style="height:11px"></i><i style="height:16px"></i><i style="height:9px"></i><i style="height:14px"></i><i style="height:20px"></i><i class="hot" style="height:10px"></i><i class="hot" style="height:23px"></i><i class="hot" style="height:17px"></i><i class="hot" style="height:26px"></i><i class="hot" style="height:19px"></i><i class="hot" style="height:28px"></i><i class="hot" style="height:22px"></i><i class="hot" style="height:25px"></i><i class="hot" style="height:18px"></i><i class="hot" style="height:24px"></i><i class="hot" style="height:16px"></i><i class="hot" style="height:20px"></i><i style="height:12px"></i><i style="height:17px"></i><i style="height:9px"></i><i style="height:13px"></i><i style="height:7px"></i><i style="height:5px"></i></div></div><div class="signal-feed"><div class="signal"><i class="red"></i><div><strong>跨文档审查已失去区分度</strong><p>47 次完成记录全部客观满分，建议从正式套件移除。</p></div><code>P0</code></div><div class="signal"><i></i><div><strong>数学低分含格式误伤</strong><p>exact-match 无法识别等价表达式，需 CAS 复判。</p></div><code>P1</code></div><div class="signal"><i class="green"></i><div><strong>Ultra 调度信号稳定</strong><p>隐藏实例与多轮提示仍能有效拉开完成质量。</p></div><code>KEEP</code></div></div></aside>
+
+          <section class="model-ledger"><div class="ledger-head"><span>MODEL / AGENT</span><span>推理</span><span>编码</span><span>规划</span><span>知识</span><span>分析</span><span>安全</span><span>等级</span></div><div class="ledger-row"><div class="model-id"><i class="model-seal acid">DS</i><div><strong>DeepSeek V4 Pro</strong><small>Reasonix CLI · 40 有效样本</small></div></div><div class="cap-cell"><span>82</span><div class="cap-line"><i style="width:82%"></i></div></div><div class="cap-cell"><span>96</span><div class="cap-line"><i style="width:96%"></i></div></div><div class="cap-cell"><span>74</span><div class="cap-line"><i style="width:74%"></i></div></div><div class="cap-cell"><span>91</span><div class="cap-line"><i style="width:91%"></i></div></div><div class="cap-cell"><span>78</span><div class="cap-line"><i style="width:78%"></i></div></div><div class="cap-cell"><span>88</span><div class="cap-line"><i style="width:88%"></i></div></div><div class="grade">A</div></div><div class="ledger-row"><div class="model-id"><i class="model-seal">G5</i><div><strong>GPT-5.6 SOL</strong><small>Codex CLI · 37 有效样本</small></div></div><div class="cap-cell"><span>88</span><div class="cap-line"><i style="width:88%"></i></div></div><div class="cap-cell"><span>91</span><div class="cap-line"><i style="width:91%"></i></div></div><div class="cap-cell"><span>81</span><div class="cap-line"><i style="width:81%"></i></div></div><div class="cap-cell"><span>89</span><div class="cap-line"><i style="width:89%"></i></div></div><div class="cap-cell"><span>73</span><div class="cap-line"><i style="width:73%"></i></div></div><div class="cap-cell"><span>85</span><div class="cap-line"><i style="width:85%"></i></div></div><div class="grade">A</div></div></section>
+        </div>
+      </section>
+
+      <section class="view" id="view-library">
+        <header class="view-header"><div class="view-title"><span class="index">02 / LIBRARY</span><div><h1>测试库</h1><p>以历史区分度和验证强度管理题目，而不只看难度标签</p></div></div><div class="header-meta"><div class="meta-pill">本轮冻结 Office</div><button class="ghost-button">导入本地题包</button><button class="run-button" data-view-jump="compose"><svg><use href="#i-play"/></svg>编排所选套件</button></div></header>
+        <div class="library-layout">
+          <aside class="collection-pane"><div class="pane-label">COLLECTIONS</div><button class="collection active"><i class="collection-icon"><svg><use href="#i-spark"/></svg></i><span><strong>区分度巡查</strong><small>历史信号自动聚合</small></span><b>27</b></button><button class="collection"><i class="collection-icon"><svg><use href="#i-command"/></svg></i><span><strong>高难快速摸底</strong><small>难度 4–5</small></span><b>60</b></button><button class="collection"><i class="collection-icon"><svg><use href="#i-flow"/></svg></i><span><strong>AgentBench Ultra</strong><small>三轮渐进提示</small></span><b>2</b></button><div class="pane-label" style="margin-top:18px">CAPABILITY</div><button class="collection"><i class="collection-icon">∫</i><span><strong>推理计算</strong><small>微积分与线性代数</small></span><b>20</b></button><button class="collection"><i class="collection-icon">&lt;/&gt;</i><span><strong>编码工程</strong><small>软件与安全</small></span><b>35</b></button><button class="collection"><i class="collection-icon"><svg><use href="#i-ledger"/></svg></i><span><strong>规划决策</strong><small>约束与取舍</small></span><b>15</b></button><div class="pane-label" style="margin-top:18px">LOCAL PACKS</div><div class="import-tile"><strong>2025 考研数学一</strong><span>等待授权 PDF，本地导入后按 150 分制管理。</span></div></aside>
+          <section class="case-browser"><div class="browser-toolbar"><label class="browser-search"><svg><use href="#i-search"/></svg><input placeholder="搜索测试名称、Slug 或能力标签" /></label><button class="mini-button"><svg width="12"><use href="#i-filter"/></svg>难度 4–5</button><button class="mini-button">P0 / P1</button><span class="browser-count">27 RESULTS</span></div><div class="case-columns"><span>测试项</span><span>难度</span><span>验证栈</span><span>历史样本</span><span>满分率</span></div><div class="case-list">
+            <button class="case-row active" data-case="knowledge"><span class="case-name"><strong>跨文档项目审查 01–15</strong><small>knowledge.cross-document · P0</small></span><span class="difficulty"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i></span><span class="validator-stack"><i>EX</i><i>FS</i></span><span class="sample-count">47 / 2 模型</span><span class="full-score">100%</span></button>
+            <button class="case-row" data-case="coding"><span class="case-name"><strong>业务规则模块 01–20</strong><small>coding.business-rules · P0</small></span><span class="difficulty"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i></span><span class="validator-stack"><i>CMD</i><i>FP</i></span><span class="sample-count">72 / 3 模型</span><span class="full-score">97%</span></button>
+            <button class="case-row" data-case="security"><span class="case-name"><strong>安全加固 01–15</strong><small>security.hardening · P0</small></span><span class="difficulty"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i></span><span class="validator-stack"><i>CMD</i><i>FP</i></span><span class="sample-count">23 / 2 模型</span><span class="full-score">100%</span></button>
+            <button class="case-row" data-case="workflow"><span class="case-name"><strong>多文件工单编排 09–15</strong><small>workflow.ticket-triage · P1</small></span><span class="difficulty"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i></i></span><span class="validator-stack"><i>FC</i><i>FS</i></span><span class="sample-count">4 / 1 模型</span><span class="full-score mid">100%</span></button>
+            <button class="case-row" data-case="math"><span class="case-name"><strong>高等数学短答案组</strong><small>math.* · P1 / FORMAT RISK</small></span><span class="difficulty"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i></span><span class="validator-stack"><i>EX</i></span><span class="sample-count">81 / 3 模型</span><span class="full-score mid">20%</span></button>
+            <button class="case-row" data-case="ultra"><span class="case-name"><strong>隐藏实例通用资源调度器</strong><small>ultra.hidden-general-resource-scheduler · KEEP</small></span><span class="difficulty"><i class="ultra"></i><i class="ultra"></i><i class="ultra"></i><i class="ultra"></i><i class="ultra"></i></span><span class="validator-stack"><i>PV</i><i>CMD</i><i>AI</i></span><span class="sample-count">多轮实测</span><span class="full-score good">健康</span></button>
+          </div></section>
+          <aside class="inspector-pane"><div class="inspector-cover"><span class="priority" id="casePriority">P0 / LOW DISCRIMINATION</span><h2 id="caseTitle">跨文档项目审查 01–15</h2><code id="caseSlug">knowledge.cross-document</code></div><div class="inspector-body"><section class="inspect-section"><label>EMPIRICAL SIGNAL</label><div class="history-kpi"><div><span>完成记录</span><strong id="caseRuns">47</strong></div><div><span>模型数</span><strong id="caseModels">2</strong></div><div><span>客观满分</span><strong class="bad" id="caseFull">100%</strong></div></div></section><section class="inspect-section"><label>VALIDATION STACK</label><div class="validator-map" id="validatorMap"><div class="validator-item"><b>EX</b><div><strong>Exact match</strong><small>只验证最终 initiative_id</small></div><em>92%</em></div><div class="validator-item"><b>FS</b><div><strong>Filesystem</strong><small>检查三份输入文件</small></div><em>8%</em></div></div></section><section class="inspect-section"><label>DIAGNOSIS</label><div class="diagnosis" id="caseDiagnosis">模型只需对三个结构化文件做一次确定性联表过滤；题目规模增加了 Token 数，但没有增加推理深度、歧义或恢复成本。</div></section><section class="inspect-section"><label>RECOMMENDED ACTION</label><p id="caseAction" style="margin:0;color:#969ea4;font-size:8px;line-height:1.65">用证据冲突、版本时序、来源可信度和缺失信息重构任务；要求输出可审计结论与引用，不再输出单个 ID。</p></section><section class="inspect-section"><div class="inspect-actions"><button class="ghost-button">查看历史证据</button><button class="run-button">创建修订版本</button></div></section></div></aside>
+        </div>
+      </section>
+
+      <section class="view" id="view-compose">
+        <header class="view-header"><div class="view-title"><span class="index">03 / COMPOSE</span><div><h1>评测编排画布</h1><p>把测试套件、模型、Agent、裁判和运行策略连接成可复用实验</p></div></div><div class="header-meta"><div class="meta-pill"><i></i>所有节点可执行</div><button class="ghost-button">保存为模板</button></div></header>
+        <div class="composer-layout">
+          <section class="graph-workspace"><div class="graph-toolbar"><button class="mini-button" id="addParticipant"><svg width="12"><use href="#i-plus"/></svg>参测节点</button><button class="mini-button">裁判节点</button><span class="separator"></span><button class="mini-button">自动布局</button><button class="mini-button"><svg width="12"><use href="#i-expand"/></svg>适配画布</button><span class="spacer"></span><span class="graph-stat"><strong>84</strong> RUNS · <strong>2</strong> CONCURRENT · LOCAL</span></div><div class="graph-canvas"><p class="canvas-note">EVALUATION GRAPH / 所有连接在启动前验证，模型与 Agent 的能力覆盖会自动检查。</p><svg class="connections" viewBox="0 0 1000 620" preserveAspectRatio="none"><path class="live" d="M255 290 C315 290 295 175 350 175"/><path class="live" d="M255 300 C315 300 295 380 350 380"/><path d="M545 175 C610 175 585 290 635 290"/><path d="M545 380 C610 380 585 300 635 300"/><path class="live" d="M830 295 C860 295 850 295 885 295" id="policyPath"/><path d="M255 306 C315 306 295 502 350 502" id="extraPath" style="display:none"/><path d="M545 502 C610 502 585 310 635 310" id="extraMerge" style="display:none"/></svg>
+            <article class="graph-node node-suite selected" data-node="suite"><i class="port out live"></i><div class="node-head"><span>SUITE / SOURCE</span><i class="ready"></i></div><div class="node-body"><div class="node-symbol"><svg><use href="#i-library"/></svg></div><h3>高难快速摸底 · 修订版</h3><p>42 项 · 难度 4–5<br>排除低区分度题</p><div class="node-foot"><span>INPUT</span><span>LOCAL CATALOG</span></div></div></article>
+            <article class="graph-node node-model-a" data-node="model-a"><i class="port in"></i><i class="port out"></i><div class="node-head"><span>PARTICIPANT / 01</span><i class="ready"></i></div><div class="node-body"><div class="node-symbol" style="color:var(--acid);background:#171d11">DS</div><h3>DeepSeek V4 Pro</h3><p>Reasonix CLI<br>原生工具已检测</p><div class="node-foot"><span>MODEL × AGENT</span><span>READY</span></div></div></article>
+            <article class="graph-node node-model-b" data-node="model-b"><i class="port in"></i><i class="port out"></i><div class="node-head"><span>PARTICIPANT / 02</span><i class="ready"></i></div><div class="node-body"><div class="node-symbol">G5</div><h3>GPT-5.6 SOL</h3><p>Codex CLI<br>模型覆盖可用</p><div class="node-foot"><span>MODEL × AGENT</span><span>READY</span></div></div></article>
+            <article class="graph-node node-model-c" data-node="model-c"><i class="port in"></i><i class="port out"></i><div class="node-head"><span>PARTICIPANT / 03</span><i></i></div><div class="node-body"><div class="node-symbol" style="color:var(--orange)">＋</div><h3>选择模型</h3><p>选择底层模型与执行 Agent</p><div class="node-foot"><span>UNCONFIGURED</span><span>EDIT</span></div></div></article>
+            <article class="graph-node node-judge" data-node="judge"><i class="port in"></i><i class="port out live"></i><div class="node-head"><span>JUDGE / CONSENSUS</span><i class="ready"></i></div><div class="node-body"><div class="node-symbol"><svg><use href="#i-shield"/></svg></div><h3>匿名双裁判</h3><p>GPT-5.6 Luna × 2<br>分歧触发第三裁判</p><div class="node-foot"><span>BLIND REVIEW</span><span>READY</span></div></div></article>
+            <article class="graph-node node-policy" data-node="policy"><i class="port in live"></i><div class="node-head"><span>RUN POLICY</span><i class="ready"></i></div><div class="node-body"><div class="node-symbol" style="color:var(--green)"><svg><use href="#i-play"/></svg></div><h3>本地执行</h3><p>并发 2 · 重复 1<br>无硬超时</p><div class="node-foot"><span>84 RUNS</span><span>READY</span></div></div></article>
+          </div><div class="minimap"><i></i></div></section>
+          <aside class="composer-inspector"><div class="composer-summary"><div class="eyebrow">SELECTED NODE</div><h2 id="nodeTitle">高难快速摸底 · 修订版</h2><p id="nodeDescription">测试套件定义评测范围。启动时会锁定题目版本和评分器版本。</p></div><div class="inspector-form"><div class="field"><label>测试套件 <small>必填</small></label><div class="select-box" id="nodeFieldA">高难快速摸底 · 修订版 <span>⌄</span></div></div><div class="field"><label>版本策略</label><div class="select-box" id="nodeFieldB">锁定当前版本 <span>⌄</span></div></div><div class="field"><label>执行环境</label><div class="select-box" id="nodeFieldC">本地工作区 + Docker <span>⌄</span></div></div><div class="node-diagnostics"><strong>✓ 连接检查通过</strong><span id="nodeDiagnostic">42 个测试均可由两个参测 Agent 执行；8 个 Docker 任务环境已就绪。</span></div></div><div class="launch-panel"><div class="launch-stats"><div><span>参测者</span><strong id="participantCount">2</strong></div><div><span>运行</span><strong id="runCount">84</strong></div><div><span>预计</span><strong>55–90m</strong></div></div><button class="run-button" id="launchRun"><svg><use href="#i-play"/></svg>验证并开始本地评测</button></div></aside>
+        </div>
+      </section>
+
+      <section class="view" id="view-run">
+        <header class="view-header"><div class="view-title"><span class="index">04 / EVIDENCE</span><div><h1>证据账本</h1><p>从最终分数追溯到轮次、验证义务、裁判理由和工作区产物</p></div></div><div class="header-meta"><div class="meta-pill">RUN / fd4dc5be</div><button class="ghost-button">打开工作区</button><button class="ghost-button">导出报告</button></div></header>
+        <div class="run-layout">
+          <aside class="attempt-pane"><div class="run-id"><code>ULTRA / SCHEDULER / 003</code><h3>隐藏实例通用资源调度器</h3><span>MiMo V2.5 Pro × OpenCode</span></div><div class="pane-label">ATTEMPT TRACE</div><div class="attempt"><strong>ROUND 01</strong><p>原始题面与公开 checker</p><span>61.2 · FAILED</span></div><div class="attempt"><strong>ROUND 02</strong><p>补充 setup 时间提示</p><span>82.4 · QUALITY CAP</span></div><div class="attempt pass"><strong>ROUND 03</strong><p>四个隐藏实例通过</p><span>99.5 · PASSED</span></div><div class="outline-group"><div class="pane-label">SECTIONS</div><button class="outline-button active"><svg><use href="#i-ledger"/></svg>评分构成</button><button class="outline-button"><svg><use href="#i-check"/></svg>验证义务</button><button class="outline-button"><svg><use href="#i-flow"/></svg>执行事件</button><button class="outline-button"><svg><use href="#i-file"/></svg>产物与日志</button></div></aside>
+          <section class="evidence-canvas"><div class="score-hero"><div><div class="big-score"><strong>68.6</strong><span>/ 100</span></div><div class="score-caption"><b>第 3 轮通过</b> · 原始质量 99.5 · 轮次折扣后</div></div><div class="score-stack"><div class="score-part"><label>客观质量 · 94%</label><strong>99.5</strong><small>确定性 + 私有验证</small><i class="vertical-meter"><i style="height:99.5%"></i></i></div><div class="score-part"><label>时间效率 · 3%</label><strong>100</strong><small>及格线内，不提前终止</small><i class="vertical-meter"><i style="height:100%"></i></i></div><div class="score-part"><label>步骤效率 · 2%</label><strong>60.0</strong><small>多轮与工具调用</small><i class="vertical-meter"><i style="height:60%"></i></i></div><div class="score-part"><label>Token 效率 · 1%</label><strong>31.9</strong><small>245k 总上下文</small><i class="vertical-meter"><i style="height:31.9%"></i></i></div></div></div><div class="proof-ledger"><div class="ledger-title"><h3>验证义务 / PROOF OBLIGATIONS</h3><span>隐藏数据仅展示摘要，不泄露答案</span></div><div class="proof-item"><i class="proof-index">01</i><div class="proof-copy"><strong>约束正确性</strong><small>释放时间、截止期、机器日历、前置关系与资源容量全部满足</small></div><code class="proof-evidence">private.checks.constraint_set = PASS</code><b class="proof-score">20 / 20</b></div><div class="proof-item"><i class="proof-index">02</i><div class="proof-copy"><strong>隐藏实例可行率</strong><small>四个未公开规模、日历和资源扰动实例全部找到可行解</small></div><code class="proof-evidence">H01 ✓ H02 ✓ H03 ✓ H04 ✓</code><b class="proof-score">30 / 30</b></div><div class="proof-item"><i class="proof-index">03</i><div class="proof-copy"><strong>多目标解质量</strong><small>按 makespan → nonrenewable → weighted completion 比较参考上界</small></div><code class="proof-evidence">Δmakespan=0 · Δnr=+2</code><b class="proof-score">28.8 / 30</b></div><div class="proof-item"><i class="proof-index">04</i><div class="proof-copy"><strong>重复运行稳定性</strong><small>固定种子重复运行输出规范化后一致</small></div><code class="proof-evidence">sha256: 8c0d…b42a</code><b class="proof-score">10 / 10</b></div><div class="proof-item"><i class="proof-index">05</i><div class="proof-copy"><strong>文件与边界安全</strong><small>只写入允许路径，无题库、测试或父级目录修改</small></div><code class="proof-evidence">forbidden_paths = 0</code><b class="proof-score">10 / 10</b></div></div></section>
+          <aside class="context-pane"><section class="context-block"><label>EXECUTION COST</label><div class="cost-grid"><div><span>总用时</span><strong>27m 01s</strong></div><div><span>轮次</span><strong>3 / 3</strong></div><div><span>输入 Token</span><strong>131.2k</strong></div><div><span>输出 Token</span><strong>113.9k</strong></div></div></section><section class="context-block"><label>EVENT TRACE</label><div class="timeline-event"><strong>初始化隔离工作区</strong><span>Docker + 本地 Agent 凭据代理</span></div><div class="timeline-event warn"><strong>ROUND 01 未通过</strong><span>隐藏实例 H-03 机器 setup 冲突</span></div><div class="timeline-event warn"><strong>ROUND 02 质量不足</strong><span>可行但 makespan 超参考上界</span></div><div class="timeline-event"><strong>ROUND 03 验证通过</strong><span>四个隐藏实例与稳定性检查完成</span></div></section><section class="context-block"><label>ARTIFACTS</label><div class="artifact-row"><svg><use href="#i-file"/></svg><span>scheduler.py · 18.4 KB</span><button class="mini-button">查看</button></div><div class="artifact-row"><svg><use href="#i-file"/></svg><span>solver-report.json · 6.2 KB</span><button class="mini-button">查看</button></div><div class="artifact-row"><svg><use href="#i-ledger"/></svg><span>validator-evidence.json</span><button class="mini-button">查看</button></div></section></aside>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="scrim" id="scrim"></div>
+  <section class="palette"><div class="palette-search"><svg><use href="#i-search"/></svg><input id="paletteInput" placeholder="搜索测试、模型、运行或执行命令…" /><kbd>ESC</kbd></div><div class="palette-label">NAVIGATE</div><button class="palette-item" data-command="command"><svg><use href="#i-command"/></svg><span>打开评测控制台</span><kbd>1</kbd></button><button class="palette-item" data-command="library"><svg><use href="#i-library"/></svg><span>巡查测试库区分度</span><kbd>2</kbd></button><button class="palette-item" data-command="compose"><svg><use href="#i-flow"/></svg><span>创建可视化评测编排</span><kbd>3</kbd></button><button class="palette-item" data-command="run"><svg><use href="#i-ledger"/></svg><span>查看最近运行证据</span><kbd>4</kbd></button></section>
+  <div class="toast" id="toast">评测图已验证，正在创建本地工作区…</div>
+
+  <script>
+    const viewNames = ['command', 'library', 'compose', 'run'];
+    function showView(name) {
+      if (!viewNames.includes(name)) return;
+      document.querySelectorAll('.view').forEach(view => view.classList.toggle('active', view.id === `view-${name}`));
+      document.querySelectorAll('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === name));
+      history.replaceState(null, '', `?view=${name}`);
+    }
+    document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => showView(button.dataset.view)));
+    document.querySelectorAll('[data-view-jump]').forEach(button => button.addEventListener('click', () => showView(button.dataset.viewJump)));
+    const initialView = new URLSearchParams(location.search).get('view');
+    if (initialView) showView(initialView);
+
+    const paletteInput = document.getElementById('paletteInput');
+    const closePalette = () => document.body.classList.remove('palette-open');
+    const openPalette = () => { document.body.classList.add('palette-open'); setTimeout(() => paletteInput.focus(), 20); };
+    document.getElementById('openPalette').addEventListener('click', openPalette);
+    document.getElementById('scrim').addEventListener('click', closePalette);
+    document.addEventListener('keydown', event => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); openPalette(); }
+      if (event.key === 'Escape') closePalette();
+    });
+    document.querySelectorAll('[data-command]').forEach(button => button.addEventListener('click', () => { closePalette(); showView(button.dataset.command); }));
+
+    const caseData = {
+      knowledge: { priority:'P0 / LOW DISCRIMINATION', title:'跨文档项目审查 01–15', slug:'knowledge.cross-document', runs:'47', models:'2', full:'100%', diagnosis:'模型只需对三个结构化文件做一次确定性联表过滤；题目规模增加了 Token 数，但没有增加推理深度、歧义或恢复成本。', action:'用证据冲突、版本时序、来源可信度和缺失信息重构任务；要求输出可审计结论与引用，不再输出单个 ID。', validators:[['EX','Exact match','只验证最终 initiative_id','92%'],['FS','Filesystem','检查三份输入文件','8%']] },
+      coding: { priority:'P0 / TEMPLATE SATURATION', title:'业务规则模块 01–20', slug:'coding.business-rules', runs:'72', models:'3', full:'97%', diagnosis:'20 道题只轮换四类短函数，公开规格几乎直接对应参考实现；少量断言不能覆盖状态、兼容性和性质边界。', action:'替换为多模块状态机、迁移兼容、幂等、并发与隐藏性质测试；用少量高质量母题生成真正不同的实例。', validators:[['CMD','Command tests','少量确定性断言','88%'],['FP','Forbidden paths','禁止修改 tests','7%']] },
+      security: { priority:'P0 / REPEATED FIX', title:'安全加固 01–15', slug:'security.hardening', runs:'23', models:'2', full:'100%', diagnosis:'15 题仅重复凭据脱敏、路径穿越和常量时间比较三种标准修复，且攻击面与输入编码过窄。', action:'改为组合攻击链，加入符号链接竞态、编码差异、解析器边界、回归兼容和负向性质测试。', validators:[['CMD','Attack tests','单一攻击样例','90%'],['FP','Forbidden paths','保护验证目录','5%']] },
+      workflow: { priority:'P1 / LOW SAMPLE', title:'多文件工单编排 09–15', slug:'workflow.ticket-triage', runs:'4', models:'1', full:'100%', diagnosis:'任务只是对 30 个同构文本文件做过滤排序。样本量尚小，但题目结构没有状态、失败或增量成本。', action:'加入跨文件状态依赖、重复事件、部分失败、幂等重跑和增量更新；再用至少三档模型校准。', validators:[['FC','File content','完整 CSV 匹配','82%'],['FS','Filesystem','源文件保护','14%']] },
+      math: { priority:'P1 / FORMAT CONTAMINATION', title:'高等数学短答案组', slug:'math.*', runs:'81', models:'3', full:'20%', diagnosis:'低满分率不能直接解释为高难度：exact-match 把等价表达式、空格和规范形式差异与数学错误混在了一起。', action:'引入 CAS 符号等价、定义域检查和私有数值采样；将单步公式题升级为多小问证明义务评分。', validators:[['EX','Exact match','严格字符串形式','90%']] },
+      ultra: { priority:'KEEP / HEALTHY SIGNAL', title:'隐藏实例通用资源调度器', slug:'ultra.hidden-general-resource-scheduler', runs:'多轮', models:'多', full:'健康', diagnosis:'隐藏实例、多目标质量、重复稳定性和三轮提示共同形成了真实区分度；当前问题不是题目过易。', action:'保留核心设计，继续增加私有种子、规模和故障注入；不要降低约束或公开隐藏上界。', validators:[['PV','Private validator','四个隐藏实例','70%'],['CMD','Behavior tests','接口与稳定性','20%'],['AI','Judge','解释质量','10%']] }
+    };
+    document.querySelectorAll('.case-row').forEach(row => row.addEventListener('click', () => {
+      document.querySelectorAll('.case-row').forEach(item => item.classList.remove('active'));
+      row.classList.add('active');
+      const data = caseData[row.dataset.case];
+      document.getElementById('casePriority').textContent = data.priority;
+      document.getElementById('caseTitle').textContent = data.title;
+      document.getElementById('caseSlug').textContent = data.slug;
+      document.getElementById('caseRuns').textContent = data.runs;
+      document.getElementById('caseModels').textContent = data.models;
+      document.getElementById('caseFull').textContent = data.full;
+      document.getElementById('caseDiagnosis').textContent = data.diagnosis;
+      document.getElementById('caseAction').textContent = data.action;
+      document.getElementById('validatorMap').innerHTML = data.validators.map(v => `<div class="validator-item"><b>${v[0]}</b><div><strong>${v[1]}</strong><small>${v[2]}</small></div><em>${v[3]}</em></div>`).join('');
+    }));
+
+    const nodeData = {
+      suite:['高难快速摸底 · 修订版','测试套件定义评测范围。启动时会锁定题目版本和评分器版本。','高难快速摸底 · 修订版','锁定当前版本','本地工作区 + Docker','42 个测试均可由两个参测 Agent 执行；8 个 Docker 任务环境已就绪。'],
+      'model-a':['DeepSeek V4 Pro × Reasonix','参测节点将底层模型与负责执行任务的 Agent 明确绑定。','DeepSeek V4 Pro','Reasonix CLI','使用 Agent 内置模型覆盖','本机已检测 Reasonix CLI，模型覆盖与工具调用均可用。'],
+      'model-b':['GPT-5.6 SOL × Codex','参测节点将底层模型与负责执行任务的 Agent 明确绑定。','GPT-5.6 SOL','Codex CLI','原生登录配置','本机已检测 Codex CLI，GPT-5.6 SOL 位于 Agent 内置模型列表。'],
+      'model-c':['新增参测者','选择一个底层模型和一个负责执行测试的 Agent。','选择模型','选择 Agent','等待配置','此节点尚未配置，不会计入运行规模。'],
+      judge:['匿名双裁判','裁判节点只处理无法完全确定性验证的评分维度。','GPT-5.6 Luna × 2','分歧触发第三裁判','隐藏参测模型身份','裁判配置已保存；API Key 不回显，也不会写入任务工作区。'],
+      policy:['本地执行策略','定义并发、重复、时间及格线、轮次和产物保留规则。','并发 2 · 重复 1','超过及格线继续运行','完整保留证据','预计 84 个运行；没有硬超时，超出时间只进行小幅效率扣分。']
+    };
+    document.querySelectorAll('.graph-node').forEach(node => node.addEventListener('click', () => {
+      document.querySelectorAll('.graph-node').forEach(item => item.classList.remove('selected'));
+      node.classList.add('selected');
+      const data = nodeData[node.dataset.node];
+      document.getElementById('nodeTitle').textContent = data[0]; document.getElementById('nodeDescription').textContent = data[1];
+      document.getElementById('nodeFieldA').innerHTML = `${data[2]} <span>⌄</span>`; document.getElementById('nodeFieldB').innerHTML = `${data[3]} <span>⌄</span>`; document.getElementById('nodeFieldC').innerHTML = `${data[4]} <span>⌄</span>`; document.getElementById('nodeDiagnostic').textContent = data[5];
+    }));
+    let participantAdded = false;
+    document.getElementById('addParticipant').addEventListener('click', () => {
+      participantAdded = !participantAdded;
+      document.querySelector('.node-model-c').classList.toggle('show', participantAdded);
+      document.getElementById('extraPath').style.display = participantAdded ? '' : 'none'; document.getElementById('extraMerge').style.display = participantAdded ? '' : 'none';
+      document.getElementById('participantCount').textContent = participantAdded ? '3' : '2'; document.getElementById('runCount').textContent = participantAdded ? '126' : '84';
+    });
+    const toast = document.getElementById('toast');
+    document.getElementById('launchRun').addEventListener('click', () => { toast.classList.add('show'); setTimeout(() => toast.classList.remove('show'), 2400); });
+  </script>
+</body>
+</html>

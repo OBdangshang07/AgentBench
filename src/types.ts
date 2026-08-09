@@ -58,6 +58,7 @@ export interface ModelDiscoveryResult {
     installation?: "temporary_npx" | string;
     desktop_installed?: boolean;
     desktop_executable?: string;
+    note?: string;
   };
   models: DiscoveredModel[];
   providers: DiscoveredProvider[];
@@ -96,6 +97,7 @@ export interface Runner {
     installation?: string;
     desktop_installed?: boolean;
     desktop_executable?: string;
+    note?: string;
   };
   install: {
     supported: boolean;
@@ -167,6 +169,28 @@ export interface TestCase {
   };
 }
 
+export interface MathPaperImport {
+  id: string;
+  status: "needs_review" | "confirmed" | string;
+  exam: string;
+  year: number;
+  title: string;
+  source: {
+    filename: string;
+    sha256: string;
+    size_bytes: number;
+    page_count: number;
+  };
+  questions: Array<{
+    number: number;
+    type: "choice" | "fill" | "solution";
+    points: number;
+    question_text: string;
+    review_status: string;
+  }>;
+  warnings: string[];
+}
+
 export interface Suite {
   id: string;
   name: string;
@@ -179,6 +203,18 @@ export interface Suite {
   category_count?: number;
   docker_case_count?: number;
   judge_case_count?: number;
+}
+
+export interface SuiteCasePreview {
+  id: string;
+  slug: string;
+  title: string;
+  description: string;
+  category: string;
+  difficulty?: number;
+  estimated_minutes?: number;
+  requires_docker?: boolean;
+  instruction: string;
 }
 
 export interface Participant {
@@ -244,6 +280,9 @@ export interface RunSummary {
   steps: number;
   attempt_count: number;
   passed?: boolean | null;
+  workspace_path?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
   error_code?: string;
   error_message?: string;
   created_at: string;
@@ -320,7 +359,8 @@ export interface RunDetail extends RunSummary {
     status: string;
     evidence: JsonObject;
   }>;
-  test_definition: TestCase["definition"];
+  test_definition?: Omit<NonNullable<TestCase["definition"]>, "instruction"> & { instruction?: string | null };
+  materials?: { name: string; size_bytes: number }[];
   runner_type: string;
   model_name: string;
 }
@@ -341,6 +381,7 @@ export interface DashboardData {
 export interface SystemStatus {
   version: string;
   data_dir: string;
+  workspaces_dir?: string;
   database: { path: string; ready: boolean };
   docker: { installed: boolean; available: boolean; executable?: string };
   native_cli_enabled: boolean;
@@ -362,6 +403,24 @@ export interface SystemStatus {
       desktop_installed?: boolean;
     };
   }>;
+}
+
+export interface ProfileDimension {
+  category: string;
+  avg_score: number;
+  runs: number;
+  success_rate: number;
+}
+
+export interface ModelProfile {
+  model_id: string;
+  model_name: string;
+  provider: string;
+  total_runs: number;
+  avg_score: number;
+  success_rate: number;
+  last_run_at: string;
+  dimensions: ProfileDimension[];
 }
 
 export interface LeaderboardRow {

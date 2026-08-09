@@ -1,1 +1,1 @@
-{}
+{"default":{"identifier":"default","description":"Default capability for the main window: core defaults plus opener access for revealing AI workspace folders.","local":true,"windows":["main"],"permissions":["core:default","opener:allow-open-path","opener:allow-reveal-item-in-dir"]}}

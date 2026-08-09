@@ -4,6 +4,8 @@ __pycache__/
 *.egg-info/
 *.py[cod]
 .pytest_cache/
+.pytest-tmp/
+.pytest-v3-*/
 .ruff_cache/
 .coverage
 htmlcov/
@@ -23,6 +25,12 @@ backend/dist/
 .env.*
 !.env.example
 .agentbench-data/
+.profiles-qa/
+.tmp/
+.tmp-live-qa/
+.tmp_pytest_out.txt
+.ncre-sources/.tmp/
+_ncre_dev/reference-workspace*/
 .installed-*/
 .migration-*/
 .runtime-*/

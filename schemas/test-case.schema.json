@@ -52,7 +52,7 @@
         "type": "object",
         "required": ["type", "weight"],
         "properties": {
-          "type": { "enum": ["exact_match", "contains", "regex", "json_schema", "json_file", "file_exists", "file_content", "file_contains", "forbidden_paths", "command", "ai_rubric"] },
+          "type": { "enum": ["exact_match", "contains", "regex", "json_schema", "json_file", "symbolic_json", "constraint_plan", "file_exists", "file_content", "file_contains", "forbidden_paths", "command", "command_metrics", "ai_rubric"] },
           "weight": { "type": "number", "exclusiveMinimum": 0 },
           "config": { "type": "object" }
         },

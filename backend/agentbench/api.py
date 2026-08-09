@@ -1,5 +1,6 @@
 import asyncio
 import json
+import urllib.parse
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
@@ -11,6 +12,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from . import __version__
 from .config import Settings
+from .reports import export_exam_report
 from .schemas import (
     AppSettingUpdate,
     ExperimentCreate,
@@ -22,6 +24,18 @@ from .schemas import (
     TestCaseImport,
 )
 from .service import EvaluationService
+
+_MATERIAL_MEDIA_TYPES = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".doc": "application/msword",
+    ".csv": "text/csv",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".json": "application/json",
+    ".py": "text/x-python",
+}
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -172,6 +186,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail=f"Invalid test DSL: {exc}") from exc
         return svc.import_test_case(payload)
 
+    @app.post("/api/v1/math-papers/import", status_code=201)
+    async def import_math_paper(
+        request: Request,
+        svc: Service,
+        filename: str = Query(min_length=1, max_length=255),
+        year: int = Query(default=2025, ge=2000, le=2100),
+    ) -> dict[str, Any]:
+        try:
+            return svc.import_math_paper(
+                filename=Path(filename).name,
+                content=await request.body(),
+                year=year,
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/v1/math-papers/imports")
+    def math_paper_imports(svc: Service) -> list[dict[str, Any]]:
+        return svc.list_math_paper_imports()
+
+    @app.get("/api/v1/math-papers/imports/{import_id}")
+    def math_paper_import(import_id: str, svc: Service) -> dict[str, Any]:
+        try:
+            return svc.get_math_paper_import(import_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="math_paper_import_not_found") from exc
+
     @app.get("/api/v1/suites")
     def suites(svc: Service) -> list[dict[str, Any]]:
         return svc.list_suites()
@@ -179,6 +220,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/v1/suites/{suite_id}")
     def suite(suite_id: str, svc: Service) -> dict[str, Any]:
         return svc.get_suite(suite_id)
+
+    @app.get("/api/v1/suites/{suite_id}/cases")
+    def suite_cases(suite_id: str, svc: Service) -> list[dict[str, Any]]:
+        return svc.list_suite_cases(suite_id)
 
     @app.get("/api/v1/experiments")
     def experiments(svc: Service, limit: int = Query(default=100, ge=1, le=500)):
@@ -217,6 +262,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
+    @app.get("/api/v1/experiments/{experiment_id}/exam-report")
+    def exam_report(
+        experiment_id: str,
+        svc: Service,
+        exam: str = Query(default="ncre-office", pattern=r"^[a-z0-9_-]{1,40}$"),
+        paper: str | None = Query(default=None, pattern=r"^[a-z0-9-]{1,60}$"),
+    ) -> dict[str, Any]:
+        svc.get_experiment(experiment_id)
+        return export_exam_report(svc.database, experiment_id, exam, paper)
+
     @app.get("/api/v1/runs")
     def runs(
         svc: Service,
@@ -232,6 +287,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/v1/runs/{run_id}/retry")
     def retry_run(run_id: str, svc: Service) -> dict[str, Any]:
         return svc.retry_run(run_id)
+
+    @app.post("/api/v1/runs/{run_id}/rejudge")
+    def rejudge_run(run_id: str, svc: Service) -> dict[str, Any]:
+        row = svc.database.fetch_one(
+            "SELECT status,final_answer FROM runs WHERE id=?", (run_id,)
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="run_not_found")
+        if row["status"] not in {"needs_review", "completed"}:
+            raise HTTPException(status_code=409, detail="run_not_rejudgeable")
+        if not (row["final_answer"] or "").strip():
+            raise HTTPException(status_code=409, detail="run_has_no_final_answer")
+        return svc.rejudge_run(run_id)
 
     @app.post("/api/v1/runs/{run_id}/manual-score")
     def manual_score(run_id: str, payload: ManualScoreUpdate, svc: Service) -> dict[str, Any]:
@@ -253,7 +321,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 events = svc.get_run_events(run_id, cursor)
                 for item in events:
                     cursor = item["seq"]
-                    yield f"id: {cursor}\nevent: {item['event_type']}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
+                    # A single generic SSE message lets the client consume present and
+                    # future event types without registering a listener per Agent CLI.
+                    yield f"id: {cursor}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
                     idle_ticks = 0
                 current = svc.database.fetch_one("SELECT status FROM runs WHERE id=?", (run_id,))
                 if (
@@ -291,12 +361,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="artifact_not_found")
         return FileResponse(target, filename=artifact_row["name"])
 
+    @app.get("/api/v1/runs/{run_id}/materials/{filename}")
+    def run_material(run_id: str, filename: str, svc: Service) -> Response:
+        content, name = svc.get_run_material(run_id, filename)
+        media_type = _MATERIAL_MEDIA_TYPES.get(
+            Path(name).suffix.lower(), "application/octet-stream"
+        )
+        ascii_fallback = (
+            name.encode("ascii", "ignore").decode("ascii").strip().strip(".") or "material"
+        )
+        disposition = (
+            f'attachment; filename="{ascii_fallback}"; '
+            f"filename*=UTF-8''{urllib.parse.quote(name)}"
+        )
+        return Response(
+            content=content, media_type=media_type, headers={"Content-Disposition": disposition}
+        )
+
     @app.get("/api/v1/leaderboard")
     def leaderboard(
         svc: Service,
         lane: str = Query(default="unified", pattern="^(unified|native)$"),
         suite_id: str | None = None,
+        benchmark_generation: str = Query(default="v3", pattern="^(v2|v3|all)$"),
     ) -> list[dict[str, Any]]:
-        return svc.leaderboard(lane, suite_id)
+        return svc.leaderboard(lane, suite_id, benchmark_generation)
+
+    @app.get("/api/v1/model-profiles")
+    def model_profiles(
+        svc: Service,
+        lane: str | None = None,
+        benchmark_generation: str = Query(default="v3", pattern="^(v2|v3|all)$"),
+    ) -> list[dict[str, Any]]:
+        return svc.model_profiles(lane, benchmark_generation)
 
     return app

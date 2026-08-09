@@ -1,0 +1,569 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AgentBench · Next UI Concept</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090c12;
+      --panel: #10151e;
+      --panel-2: #141b26;
+      --panel-3: #192231;
+      --line: #252e3d;
+      --line-soft: #1d2532;
+      --text: #f1f4fa;
+      --text-2: #b5bfce;
+      --muted: #778397;
+      --violet: #8275ff;
+      --violet-2: #a49bff;
+      --cyan: #46d9c0;
+      --amber: #f0b664;
+      --red: #ff7d88;
+      --green: #59d6a5;
+      --shadow: 0 18px 50px rgba(0, 0, 0, .24);
+      --radius: 14px;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-width: 1080px; min-height: 100%; }
+    body {
+      overflow: hidden;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 78% -16%, rgba(113, 94, 255, .10), transparent 32%),
+        var(--bg);
+      font-family: Inter, "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+      font-size: 13px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button, input, select { font: inherit; }
+    button { color: inherit; }
+    button:focus-visible { outline: 2px solid var(--violet); outline-offset: 2px; }
+    svg { display: block; }
+
+    .app { height: 100vh; display: grid; grid-template-columns: 232px minmax(0, 1fr); }
+    .sidebar {
+      min-height: 0;
+      padding: 22px 14px 16px;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid var(--line-soft);
+      background: rgba(11, 15, 22, .92);
+    }
+    .brand { height: 48px; padding: 0 10px; display: flex; align-items: center; gap: 11px; }
+    .brand-mark {
+      position: relative;
+      width: 31px; height: 31px;
+      border: 1px solid #8f83ff66;
+      border-radius: 10px;
+      display: grid; place-items: center;
+      background: #17182b;
+      box-shadow: inset 0 0 20px #7668ff1c;
+    }
+    .brand-mark:before, .brand-mark:after { content: ""; position: absolute; border-radius: 99px; background: var(--violet-2); }
+    .brand-mark:before { width: 14px; height: 2px; transform: rotate(-35deg); }
+    .brand-mark:after { width: 5px; height: 5px; margin: -8px 0 0 12px; box-shadow: -14px 10px 0 var(--cyan); }
+    .brand strong { display: block; font-size: 14px; letter-spacing: .01em; }
+    .brand small { display: block; margin-top: 2px; color: var(--muted); font-size: 9px; letter-spacing: .16em; }
+    .nav-label { margin: 22px 12px 8px; color: #566176; font-size: 9px; font-weight: 700; letter-spacing: .14em; }
+    .nav { display: flex; flex-direction: column; gap: 3px; }
+    .nav-button {
+      position: relative;
+      width: 100%; height: 40px; padding: 0 11px;
+      border: 0; border-radius: 9px;
+      display: flex; align-items: center; gap: 11px;
+      color: #909caf; background: transparent;
+      cursor: pointer; text-align: left; transition: .16s ease;
+    }
+    .nav-button svg { width: 17px; height: 17px; stroke-width: 1.8; }
+    .nav-button:hover { color: #d7dce6; background: #131923; }
+    .nav-button.active { color: #f5f4ff; background: #191d2d; }
+    .nav-button.active:before { content: ""; position: absolute; left: -14px; width: 2px; height: 20px; border-radius: 2px; background: var(--violet); box-shadow: 0 0 12px var(--violet); }
+    .nav-button.active svg { color: var(--violet-2); }
+    .nav-button .count { margin-left: auto; min-width: 20px; padding: 2px 6px; border-radius: 99px; color: #8f9aae; background: #1d2532; font-size: 9px; text-align: center; }
+    .nav-button .live-dot { margin-left: auto; width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px #59d6a516; }
+    .sidebar-spacer { flex: 1; }
+    .system-card { margin: 12px 4px 0; padding: 13px; border: 1px solid var(--line); border-radius: 12px; background: #101722; }
+    .system-card header { display: flex; align-items: center; justify-content: space-between; }
+    .system-card header span { color: var(--text-2); font-size: 11px; font-weight: 650; }
+    .health { display: inline-flex; align-items: center; gap: 6px; color: var(--green); font-size: 9px; }
+    .health i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; box-shadow: 0 0 8px currentColor; }
+    .system-grid { margin-top: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+    .system-grid span { color: var(--muted); font-size: 9px; }
+    .system-grid strong { display: block; margin-top: 4px; color: #d7dde8; font-size: 11px; font-weight: 600; }
+    .version { margin: 12px 10px 0; display: flex; justify-content: space-between; color: #4f5a6d; font-size: 9px; }
+
+    .workspace { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+    .topbar {
+      height: 66px; padding: 0 28px;
+      flex: 0 0 auto; display: flex; align-items: center; gap: 14px;
+      border-bottom: 1px solid var(--line-soft);
+      background: rgba(9, 12, 18, .78); backdrop-filter: blur(16px);
+    }
+    .breadcrumbs { color: var(--muted); font-size: 11px; }
+    .breadcrumbs strong { color: var(--text-2); font-weight: 600; }
+    .top-spacer { flex: 1; }
+    .command {
+      width: 238px; height: 34px; padding: 0 10px;
+      border: 1px solid var(--line); border-radius: 8px;
+      display: flex; align-items: center; gap: 8px;
+      color: #69758a; background: #0f141d; cursor: pointer;
+    }
+    .command svg { width: 14px; }
+    .command span { flex: 1; text-align: left; }
+    kbd { padding: 2px 6px; border: 1px solid #303949; border-bottom-color: #3e485a; border-radius: 5px; color: #8b96a8; background: #171e29; font: 9px/1.4 inherit; }
+    .live-pill { height: 34px; padding: 0 11px; border: 1px solid #234b42; border-radius: 8px; display: flex; align-items: center; gap: 8px; color: #9ce9d2; background: #10221e; font-size: 10px; }
+    .live-pill i { width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); animation: pulse 2s infinite; }
+    @keyframes pulse { 50% { box-shadow: 0 0 0 6px rgba(70, 217, 192, 0); } 0%,100% { box-shadow: 0 0 0 0 rgba(70,217,192,.25); } }
+    .primary, .secondary, .quiet, .icon-button {
+      border: 0; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; cursor: pointer; transition: .16s ease;
+    }
+    .primary { height: 35px; padding: 0 14px; color: #fff; background: #7568ef; box-shadow: 0 8px 24px #7568ef27; font-weight: 650; }
+    .primary:hover { background: #887cff; transform: translateY(-1px); }
+    .secondary { height: 34px; padding: 0 12px; border: 1px solid var(--line); color: #c6cedb; background: #161d28; }
+    .secondary:hover, .quiet:hover { border-color: #3b4658; background: #1a2230; }
+    .quiet { height: 32px; padding: 0 10px; border: 1px solid transparent; color: var(--text-2); background: transparent; }
+    .icon-button { width: 34px; height: 34px; border: 1px solid var(--line); color: #8e99aa; background: #121822; }
+    .primary svg, .secondary svg, .quiet svg { width: 15px; height: 15px; }
+
+    .viewport { flex: 1; min-height: 0; overflow: auto; scrollbar-color: #303a4a transparent; }
+    .page { display: none; min-height: 100%; padding: 28px 30px 44px; }
+    .page.active { display: block; animation: page-in .22s ease both; }
+    @keyframes page-in { from { opacity: .25; transform: translateY(4px); } }
+    .page-head { margin-bottom: 22px; display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
+    .eyebrow { margin-bottom: 7px; color: var(--violet-2); font-size: 9px; font-weight: 750; letter-spacing: .16em; }
+    h1 { margin: 0; font-size: 25px; line-height: 1.2; letter-spacing: -.035em; }
+    .page-head p { margin: 7px 0 0; color: var(--muted); font-size: 12px; }
+    .head-actions { display: flex; gap: 8px; }
+
+    .stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    .card { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); box-shadow: 0 1px 0 #ffffff05 inset; }
+    .stat-card { position: relative; min-height: 112px; padding: 17px 18px; overflow: hidden; }
+    .stat-card:after { content: ""; position: absolute; right: -22px; bottom: -34px; width: 90px; height: 90px; border: 1px solid #ffffff08; border-radius: 50%; }
+    .stat-top { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 10px; }
+    .stat-top svg { width: 15px; color: #69768a; }
+    .stat-card strong { display: inline-block; margin-top: 15px; font-size: 27px; letter-spacing: -.04em; }
+    .stat-card strong small { margin-left: 2px; color: var(--muted); font-size: 12px; font-weight: 500; }
+    .delta { margin-left: 9px; color: var(--green); font-size: 9px; }
+    .delta.down { color: var(--amber); }
+    .micro-track { margin-top: 12px; width: 100%; height: 3px; border-radius: 99px; background: #202837; }
+    .micro-track i { display: block; height: 100%; border-radius: inherit; background: var(--violet); }
+
+    .overview-grid { margin-top: 12px; display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(300px, .8fr); gap: 12px; }
+    .panel { min-width: 0; overflow: hidden; }
+    .panel-head { height: 56px; padding: 0 17px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line-soft); }
+    .panel-title strong { display: block; font-size: 12px; }
+    .panel-title span { display: block; margin-top: 3px; color: var(--muted); font-size: 9px; }
+    .segmented { padding: 3px; border: 1px solid var(--line); border-radius: 8px; display: flex; background: #0d121a; }
+    .segmented button { height: 24px; padding: 0 9px; border: 0; border-radius: 6px; color: #69758a; background: transparent; font-size: 9px; cursor: pointer; }
+    .segmented button.active { color: #d9d6ff; background: #24243b; }
+    .chart-wrap { padding: 13px 17px 15px; }
+    .chart-legend { display: flex; gap: 16px; color: var(--muted); font-size: 9px; }
+    .chart-legend span { display: flex; align-items: center; gap: 6px; }
+    .chart-legend i { width: 12px; height: 2px; background: var(--violet); }
+    .chart-legend span:last-child i { background: var(--cyan); }
+    .line-chart { width: 100%; height: 184px; margin-top: 9px; }
+    .chart-grid line { stroke: #222b39; stroke-width: 1; }
+    .chart-label { fill: #626e82; font-size: 9px; }
+    .line-a, .line-b { fill: none; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+    .line-a { stroke: var(--violet); filter: drop-shadow(0 4px 6px #8275ff35); }
+    .line-b { stroke: var(--cyan); }
+    .chart-area { fill: url(#areaFade); }
+    .insight-list { padding: 8px 16px 14px; }
+    .insight { padding: 12px 0; border-bottom: 1px solid var(--line-soft); display: grid; grid-template-columns: 31px 1fr auto; gap: 10px; align-items: start; }
+    .insight:last-child { border-bottom: 0; }
+    .insight-icon { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; color: var(--violet-2); background: #211f3a; }
+    .insight-icon.amber { color: var(--amber); background: #2a2117; }
+    .insight-icon.cyan { color: var(--cyan); background: #132925; }
+    .insight-icon svg { width: 14px; }
+    .insight strong { display: block; color: #d7dde8; font-size: 10px; line-height: 1.5; }
+    .insight p { margin: 3px 0 0; color: var(--muted); font-size: 9px; line-height: 1.55; }
+    .insight em { padding: 3px 6px; border-radius: 5px; color: var(--amber); background: #2a2117; font-size: 8px; font-style: normal; }
+    .lower-grid { margin-top: 12px; display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(340px, .75fr); gap: 12px; }
+    .table { width: 100%; border-collapse: collapse; }
+    .table th { height: 35px; padding: 0 15px; color: #647084; background: #0e131b; font-size: 8px; font-weight: 650; letter-spacing: .08em; text-align: left; }
+    .table td { height: 52px; padding: 0 15px; border-top: 1px solid var(--line-soft); color: #aeb8c7; font-size: 10px; }
+    .table td strong { display: block; color: #dfe4ed; font-size: 10px; }
+    .table td small { display: block; margin-top: 3px; color: #687489; font-size: 8px; }
+    .agent { display: inline-flex; align-items: center; gap: 7px; }
+    .agent-logo { width: 23px; height: 23px; border: 1px solid #343d4c; border-radius: 7px; display: grid; place-items: center; color: #b9b2ff; background: #1d2030; font-size: 8px; font-weight: 800; }
+    .status { display: inline-flex; align-items: center; gap: 6px; font-size: 9px; }
+    .status i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .status.running { color: var(--cyan); }
+    .status.done { color: var(--green); }
+    .status.review { color: var(--amber); }
+    .score { color: #f2f4fa; font-size: 14px; font-weight: 720; }
+    .radar-body { padding: 10px 12px 15px; display: grid; place-items: center; }
+    .radar { width: 100%; max-width: 300px; }
+    .radar .grid { fill: none; stroke: #293243; stroke-width: 1; }
+    .radar .axis { stroke: #222b39; }
+    .radar .shape { fill: #8275ff2d; stroke: var(--violet-2); stroke-width: 2; }
+    .radar text { fill: #818da0; font-size: 9px; }
+
+    .filters { margin-bottom: 12px; padding: 10px; display: flex; gap: 8px; align-items: center; }
+    .search-field { height: 34px; min-width: 260px; padding: 0 11px; border: 1px solid var(--line); border-radius: 8px; display: flex; align-items: center; gap: 8px; color: var(--muted); background: #0e141d; }
+    .search-field svg { width: 14px; }
+    .search-field input { width: 100%; border: 0; outline: 0; color: var(--text-2); background: transparent; }
+    .filter-chip { height: 30px; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px; color: #8692a4; background: #121923; cursor: pointer; font-size: 9px; }
+    .filter-chip.active { border-color: #6258bd; color: #d7d3ff; background: #23203a; }
+    .filter-info { margin-left: auto; color: var(--muted); font-size: 9px; }
+    .suite-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .suite-card { min-height: 190px; padding: 17px; cursor: pointer; transition: .18s ease; }
+    .suite-card:hover { border-color: #3a4557; transform: translateY(-2px); box-shadow: var(--shadow); }
+    .suite-top { display: flex; justify-content: space-between; align-items: flex-start; }
+    .suite-icon { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; color: var(--violet-2); background: #211f39; }
+    .suite-icon svg { width: 17px; }
+    .suite-icon.cyan { color: var(--cyan); background: #142a27; }
+    .suite-icon.amber { color: var(--amber); background: #2b2219; }
+    .tag { padding: 4px 7px; border: 1px solid #34304f; border-radius: 6px; color: #aaa3f5; background: #1b1a2b; font-size: 8px; font-weight: 700; letter-spacing: .05em; }
+    .tag.soon { border-color: #4d402b; color: #e7b96f; background: #231e17; }
+    .suite-card h3 { margin: 17px 0 6px; font-size: 14px; }
+    .suite-card p { min-height: 34px; margin: 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
+    .suite-meta { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line-soft); display: flex; gap: 14px; color: #778397; font-size: 9px; }
+    .suite-meta span { display: flex; align-items: center; gap: 5px; }
+    .suite-meta svg { width: 12px; }
+    .audit-card { margin-top: 12px; }
+    .audit-table td { height: 57px; }
+    .priority { min-width: 28px; padding: 4px 6px; border-radius: 5px; display: inline-block; text-align: center; font-size: 8px; font-weight: 800; }
+    .p0 { color: #ffc0c6; background: #381d24; }
+    .p1 { color: #f5c77d; background: #312619; }
+    .p2 { color: #91dec5; background: #173028; }
+    .full-rate { color: var(--red); font-weight: 700; }
+
+    .create-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr) 284px; gap: 12px; align-items: start; }
+    .steps { padding: 8px; }
+    .step { position: relative; padding: 13px 10px; border-radius: 9px; display: grid; grid-template-columns: 27px 1fr; gap: 9px; color: #717d90; }
+    .step + .step:before { content: ""; position: absolute; left: 23px; top: -8px; width: 1px; height: 16px; background: #2b3443; }
+    .step b { width: 27px; height: 27px; border: 1px solid #303a4b; border-radius: 8px; display: grid; place-items: center; font-size: 9px; }
+    .step strong { display: block; color: #9da8b8; font-size: 10px; }
+    .step small { display: block; margin-top: 3px; font-size: 8px; line-height: 1.4; }
+    .step.active { color: #9e96e7; background: #191b2c; }
+    .step.active b { border-color: #665bd1; color: #fff; background: #655bd2; }
+    .step.active strong { color: #edeaff; }
+    .config-card { padding-bottom: 16px; }
+    .section-body { padding: 16px; }
+    .section-label { margin-bottom: 9px; display: flex; justify-content: space-between; color: #8d99aa; font-size: 9px; font-weight: 650; }
+    .section-label small { color: #5e6a7e; font-weight: 400; }
+    .select-tile { padding: 14px; border: 1px solid #3b375f; border-radius: 11px; display: grid; grid-template-columns: 36px 1fr auto; gap: 11px; align-items: center; background: #191a2b; }
+    .select-tile .suite-icon { width: 36px; height: 36px; }
+    .select-tile strong { display: block; font-size: 11px; }
+    .select-tile span { display: block; margin-top: 4px; color: #7f8a9c; font-size: 8px; }
+    .select-tile .check { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; color: #fff; background: #6f63df; }
+    .select-tile .check svg { width: 12px; }
+    .participant-box { margin-top: 14px; padding: 13px; border: 1px solid var(--line); border-radius: 11px; background: #0f151e; }
+    .participant-head { display: flex; align-items: center; justify-content: space-between; }
+    .participant-head strong { font-size: 10px; }
+    .participant-head span { color: var(--green); font-size: 8px; }
+    .field-row { margin-top: 11px; display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+    .fake-select, .text-input { height: 38px; padding: 0 10px; border: 1px solid #2b3545; border-radius: 8px; display: flex; align-items: center; justify-content: space-between; color: #c8d0dd; background: #151c27; font-size: 9px; }
+    .fake-select small { color: #697589; }
+    .connection { margin-top: 9px; padding: 8px 10px; border-radius: 7px; display: flex; justify-content: space-between; color: #758195; background: #121923; font-size: 8px; }
+    .connection b { color: var(--green); font-weight: 600; }
+    .add-participant { width: 100%; height: 36px; margin-top: 10px; border: 1px dashed #364152; border-radius: 8px; color: #8c97a9; background: transparent; cursor: pointer; }
+    .summary-card { position: sticky; top: 12px; overflow: hidden; }
+    .summary-body { padding: 15px; }
+    .summary-score { padding: 14px; border: 1px solid #303151; border-radius: 10px; background: #191a2b; }
+    .summary-score span { color: #888fa8; font-size: 9px; }
+    .summary-score strong { display: block; margin-top: 6px; color: #e1deff; font-size: 22px; }
+    .summary-list { margin: 13px 0; }
+    .summary-list div { padding: 8px 0; border-bottom: 1px solid var(--line-soft); display: flex; justify-content: space-between; color: #768296; font-size: 9px; }
+    .summary-list strong { color: #c2cbd8; font-weight: 600; }
+    .summary-card .primary { width: 100%; }
+    .local-note { margin-top: 10px; display: flex; gap: 7px; color: #677487; font-size: 8px; line-height: 1.5; }
+    .local-note svg { flex: 0 0 auto; width: 13px; color: var(--cyan); }
+
+    .run-hero { margin-bottom: 12px; padding: 18px; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 18px; }
+    .run-title { display: flex; gap: 13px; align-items: center; }
+    .run-logo { width: 42px; height: 42px; border: 1px solid #38345a; border-radius: 12px; display: grid; place-items: center; color: #c4beff; background: #211f38; font-weight: 800; }
+    .run-title h2 { margin: 0; font-size: 16px; }
+    .run-title p { margin: 4px 0 0; color: var(--muted); font-size: 9px; }
+    .run-score { text-align: right; }
+    .run-score strong { font-size: 30px; letter-spacing: -.05em; }
+    .run-score span { display: block; margin-top: 2px; color: var(--green); font-size: 9px; }
+    .run-grid { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(330px, .65fr); gap: 12px; }
+    .dimension-grid { padding: 14px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; }
+    .dimension { padding: 12px; border: 1px solid var(--line-soft); border-radius: 9px; background: #0f151e; }
+    .dimension span { color: var(--muted); font-size: 8px; }
+    .dimension strong { display: block; margin: 7px 0; font-size: 16px; }
+    .dimension .micro-track { margin-top: 0; }
+    .evidence { padding: 0 14px 14px; }
+    .evidence-row { padding: 11px 2px; border-bottom: 1px solid var(--line-soft); display: grid; grid-template-columns: 1fr 75px 62px; align-items: center; gap: 10px; }
+    .evidence-row strong { display: block; font-size: 10px; }
+    .evidence-row small { display: block; margin-top: 3px; color: var(--muted); font-size: 8px; }
+    .evidence-row .bar { height: 4px; border-radius: 99px; background: #222b39; }
+    .evidence-row .bar i { display: block; height: 100%; border-radius: inherit; background: var(--cyan); }
+    .evidence-row b { color: #dfe4ec; font-size: 10px; text-align: right; }
+    .timeline { padding: 10px 16px 15px; }
+    .event { position: relative; padding: 7px 0 13px 21px; }
+    .event:before { content: ""; position: absolute; left: 5px; top: 12px; bottom: -2px; width: 1px; background: #2d3747; }
+    .event:last-child:before { display: none; }
+    .event:after { content: ""; position: absolute; left: 2px; top: 9px; width: 7px; height: 7px; border: 2px solid #111721; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 0 1px #3b5f5a; }
+    .event.warning:after { background: var(--amber); box-shadow: 0 0 0 1px #6b5636; }
+    .event strong { display: block; font-size: 9px; }
+    .event span { display: block; margin-top: 3px; color: var(--muted); font-size: 8px; line-height: 1.5; }
+    .event time { position: absolute; right: 0; top: 7px; color: #5d687b; font-size: 8px; }
+    .artifact { margin: 0 15px 15px; padding: 11px; border: 1px solid #2a3444; border-radius: 9px; display: flex; align-items: center; gap: 10px; color: #aeb7c5; background: #111822; font-size: 9px; }
+    .artifact svg { width: 15px; color: var(--violet-2); }
+    .artifact span { flex: 1; }
+
+    .backdrop { position: fixed; inset: 0; z-index: 20; opacity: 0; pointer-events: none; background: rgba(3, 5, 9, .62); backdrop-filter: blur(4px); transition: .2s ease; }
+    .drawer { position: fixed; z-index: 21; top: 0; right: 0; width: 445px; height: 100%; padding: 21px; border-left: 1px solid var(--line); transform: translateX(102%); background: #0e131b; box-shadow: -24px 0 70px #0008; transition: .24s ease; }
+    body.drawer-open .backdrop { opacity: 1; pointer-events: auto; }
+    body.drawer-open .drawer { transform: none; }
+    .drawer-head { display: flex; align-items: flex-start; justify-content: space-between; }
+    .drawer-head h2 { margin: 0; font-size: 18px; }
+    .drawer-head p { margin: 5px 0 0; color: var(--muted); font-size: 10px; }
+    .drawer .icon-button { margin-top: -3px; }
+    .drawer-section { margin-top: 23px; }
+    .quick-suite { margin-top: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; display: flex; align-items: center; gap: 11px; cursor: pointer; }
+    .quick-suite.selected { border-color: #5a51b1; background: #191a2a; }
+    .quick-suite .suite-icon { width: 32px; height: 32px; }
+    .quick-suite strong { display: block; font-size: 10px; }
+    .quick-suite span { display: block; margin-top: 3px; color: var(--muted); font-size: 8px; }
+    .drawer-footer { position: absolute; left: 21px; right: 21px; bottom: 21px; display: flex; gap: 8px; }
+    .drawer-footer .primary { flex: 1; }
+    .palette { position: fixed; z-index: 30; top: 18%; left: 50%; width: 520px; padding: 10px; border: 1px solid #343e50; border-radius: 13px; opacity: 0; pointer-events: none; transform: translate(-50%, -8px) scale(.98); background: #111720; box-shadow: 0 30px 90px #000b; transition: .16s ease; }
+    body.palette-open .backdrop { opacity: 1; pointer-events: auto; }
+    body.palette-open .palette { opacity: 1; pointer-events: auto; transform: translate(-50%, 0) scale(1); }
+    .palette-input { height: 43px; padding: 0 10px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 9px; }
+    .palette-input svg { width: 16px; color: var(--muted); }
+    .palette-input input { flex: 1; border: 0; outline: 0; color: var(--text); background: transparent; }
+    .palette-group { padding: 9px 4px 3px; color: #596579; font-size: 8px; letter-spacing: .1em; }
+    .palette-item { width: 100%; height: 39px; padding: 0 9px; border: 0; border-radius: 8px; display: flex; align-items: center; gap: 9px; color: #aeb8c7; background: transparent; cursor: pointer; text-align: left; }
+    .palette-item:hover { color: white; background: #1a2230; }
+    .palette-item svg { width: 15px; color: var(--violet-2); }
+    .palette-item span { flex: 1; }
+    .toast { position: fixed; z-index: 40; left: 50%; bottom: 24px; padding: 10px 14px; border: 1px solid #345348; border-radius: 9px; opacity: 0; transform: translate(-50%, 12px); color: #bdebdc; background: #12231f; box-shadow: var(--shadow); transition: .2s ease; pointer-events: none; font-size: 10px; }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+    @media (max-width: 1240px) {
+      .app { grid-template-columns: 208px minmax(0, 1fr); }
+      .sidebar { padding-left: 10px; padding-right: 10px; }
+      .stat-grid { grid-template-columns: repeat(2, 1fr); }
+      .overview-grid, .lower-grid { grid-template-columns: 1fr; }
+      .suite-grid { grid-template-columns: repeat(2, 1fr); }
+      .create-layout { grid-template-columns: 190px minmax(0, 1fr); }
+      .summary-card { grid-column: 2; position: static; }
+    }
+  </style>
+</head>
+<body>
+  <svg width="0" height="0" aria-hidden="true" style="position:absolute">
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2" fill="none" stroke="currentColor"/><rect x="14" y="3" width="7" height="7" rx="2" fill="none" stroke="currentColor"/><rect x="3" y="14" width="7" height="7" rx="2" fill="none" stroke="currentColor"/><rect x="14" y="14" width="7" height="7" rx="2" fill="none" stroke="currentColor"/></symbol>
+    <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5.5 9.1A2 2 0 0 0 6.2 21h11.6a2 2 0 0 0 1.7-2.9L14 9V3M7 16h10" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-library" viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v16H6.5A2.5 2.5 0 0 0 4 21V5.5ZM20 5.5A2.5 2.5 0 0 0 17.5 3H13v16h4.5A2.5 2.5 0 0 1 20 21V5.5Z" fill="none" stroke="currentColor" stroke-linejoin="round"/></symbol>
+    <symbol id="i-radar" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor"/><circle cx="12" cy="12" r="5" fill="none" stroke="currentColor"/><path d="M12 3v9l6 3" fill="none" stroke="currentColor"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/></symbol>
+    <symbol id="i-model" viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="12" rx="3" fill="none" stroke="currentColor"/><path d="M9 12h.01M15 12h.01M9 16h6M12 7V4M10 4h4" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20V7M2 20h21" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z" fill="none" stroke="currentColor" stroke-linejoin="round"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor"/><path d="m16 16 5 5" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z" fill="none" stroke="currentColor" stroke-linejoin="round"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor"/><path d="M12 7v5l3 2" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+    <symbol id="i-token" viewBox="0 0 24 24"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z" fill="none" stroke="currentColor"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9" fill="none" stroke="currentColor"/></symbol>
+    <symbol id="i-trend" viewBox="0 0 24 24"><path d="m4 16 5-5 4 4 7-8M15 7h5v5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="m13 2-8 12h7l-1 8 8-12h-7l1-8Z" fill="none" stroke="currentColor" stroke-linejoin="round"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2.8 20h18.4L12 3Z" fill="none" stroke="currentColor" stroke-linejoin="round"/><path d="M12 9v5M12 17h.01" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6V3Z" fill="none" stroke="currentColor" stroke-linejoin="round"/><path d="M14 3v5h4" fill="none" stroke="currentColor"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.8 2.7 8.2 7 10 4.3-1.8 7-5.2 7-10V6l-7-3Z" fill="none" stroke="currentColor" stroke-linejoin="round"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+  </svg>
+
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark"></div><div><strong>AgentBench</strong><small>LOCAL EVAL STUDIO</small></div></div>
+      <div class="nav-label">WORKSPACE</div>
+      <nav class="nav">
+        <button class="nav-button active" data-page="overview"><svg><use href="#i-grid"/></svg>总览</button>
+        <button class="nav-button" data-page="library"><svg><use href="#i-library"/></svg>测试库<span class="count">212</span></button>
+        <button class="nav-button" data-page="create"><svg><use href="#i-flask"/></svg>评测实验<span class="live-dot"></span></button>
+        <button class="nav-button" data-page="run"><svg><use href="#i-chart"/></svg>结果与证据</button>
+      </nav>
+      <div class="nav-label">MANAGE</div>
+      <nav class="nav">
+        <button class="nav-button" data-page="overview"><svg><use href="#i-model"/></svg>模型与 Agent</button>
+        <button class="nav-button" data-page="overview"><svg><use href="#i-radar"/></svg>能力画像</button>
+        <button class="nav-button" data-page="overview"><svg><use href="#i-settings"/></svg>环境设置</button>
+      </nav>
+      <div class="sidebar-spacer"></div>
+      <div class="system-card">
+        <header><span>本机运行环境</span><div class="health"><i></i>正常</div></header>
+        <div class="system-grid"><div><span>Agent 就绪</span><strong>7 / 9</strong></div><div><span>沙箱</span><strong>Docker</strong></div></div>
+      </div>
+      <div class="version"><span>Desktop 2.9 Concept</span><span>CN</span></div>
+    </aside>
+
+    <section class="workspace">
+      <header class="topbar">
+        <div class="breadcrumbs">AgentBench&nbsp; / &nbsp;<strong id="crumb">总览</strong></div>
+        <div class="top-spacer"></div>
+        <button class="command" id="openPalette"><svg><use href="#i-search"/></svg><span>搜索测试、模型或运行</span><kbd>Ctrl K</kbd></button>
+        <div class="live-pill"><i></i>1 个评测运行中</div>
+        <button class="primary" data-open-drawer><svg><use href="#i-plus"/></svg>新建评测</button>
+      </header>
+
+      <main class="viewport">
+        <section class="page active" id="page-overview">
+          <div class="page-head">
+            <div><div class="eyebrow">EVALUATION OVERVIEW</div><h1>模型评测工作台</h1><p>在本机统一编排模型、Agent、测试集与裁判，所有证据留存在你的设备上。</p></div>
+            <div class="head-actions"><button class="secondary" data-page-jump="library">浏览测试库</button><button class="primary" data-open-drawer><svg><use href="#i-play"/></svg>开始评测</button></div>
+          </div>
+
+          <div class="stat-grid">
+            <article class="card stat-card"><div class="stat-top"><span>已完成运行</span><svg><use href="#i-check"/></svg></div><strong>347</strong><span class="delta">+42 本周</span><div class="micro-track"><i style="width:72%"></i></div></article>
+            <article class="card stat-card"><div class="stat-top"><span>已覆盖模型</span><svg><use href="#i-model"/></svg></div><strong>8<small> 个</small></strong><span class="delta">6 个 Agent</span><div class="micro-track"><i style="width:62%;background:var(--cyan)"></i></div></article>
+            <article class="card stat-card"><div class="stat-top"><span>平均客观质量</span><svg><use href="#i-trend"/></svg></div><strong>76.8</strong><span class="delta">+3.4</span><div class="micro-track"><i style="width:77%"></i></div></article>
+            <article class="card stat-card"><div class="stat-top"><span>需要复核</span><svg><use href="#i-alert"/></svg></div><strong>15</strong><span class="delta down">4.1% 运行</span><div class="micro-track"><i style="width:28%;background:var(--amber)"></i></div></article>
+          </div>
+
+          <div class="overview-grid">
+            <article class="card panel">
+              <div class="panel-head"><div class="panel-title"><strong>评测质量趋势</strong><span>客观得分中位数 · 最近 30 天</span></div><div class="segmented"><button>7D</button><button class="active">30D</button><button>90D</button></div></div>
+              <div class="chart-wrap">
+                <div class="chart-legend"><span><i></i>DeepSeek V4 Pro</span><span><i></i>GPT-5.6 SOL</span></div>
+                <svg class="line-chart" viewBox="0 0 700 190" preserveAspectRatio="none">
+                  <defs><linearGradient id="areaFade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8275ff" stop-opacity=".18"/><stop offset="1" stop-color="#8275ff" stop-opacity="0"/></linearGradient></defs>
+                  <g class="chart-grid"><line x1="38" y1="25" x2="688" y2="25"/><line x1="38" y1="68" x2="688" y2="68"/><line x1="38" y1="111" x2="688" y2="111"/><line x1="38" y1="154" x2="688" y2="154"/></g>
+                  <g class="chart-label"><text x="4" y="29">100</text><text x="12" y="72">75</text><text x="12" y="115">50</text><text x="12" y="158">25</text><text x="38" y="182">07/10</text><text x="225" y="182">07/18</text><text x="430" y="182">07/27</text><text x="650" y="182">08/08</text></g>
+                  <path class="chart-area" d="M38 92 C90 80 125 83 165 68 S245 55 290 61 S375 36 420 43 S495 57 540 38 S625 27 688 32 L688 164 L38 164Z"/>
+                  <path class="line-a" d="M38 92 C90 80 125 83 165 68 S245 55 290 61 S375 36 420 43 S495 57 540 38 S625 27 688 32"/>
+                  <path class="line-b" d="M38 112 C95 104 118 89 170 96 S244 91 288 76 S365 72 420 70 S504 61 552 66 S631 52 688 58"/>
+                </svg>
+              </div>
+            </article>
+            <article class="card panel">
+              <div class="panel-head"><div class="panel-title"><strong>题库健康度</strong><span>依据本机历史自动发现</span></div><button class="quiet" data-page-jump="library">查看全部</button></div>
+              <div class="insight-list">
+                <div class="insight"><div class="insight-icon amber"><svg><use href="#i-alert"/></svg></div><div><strong>3 组测试区分度偏低</strong><p>跨文档、业务规则、安全加固出现批量满分。</p></div><em>P0</em></div>
+                <div class="insight"><div class="insight-icon"><svg><use href="#i-flask"/></svg></div><div><strong>数学 exact-match 可能误伤</strong><p>等价表达式需改为符号验证与证明义务评分。</p></div><em>P1</em></div>
+                <div class="insight"><div class="insight-icon cyan"><svg><use href="#i-trend"/></svg></div><div><strong>Ultra 调度保持区分度</strong><p>三轮提示与隐藏实例能够拉开解题稳定性。</p></div><em style="color:var(--cyan);background:#142925">健康</em></div>
+              </div>
+            </article>
+          </div>
+
+          <div class="lower-grid">
+            <article class="card panel">
+              <div class="panel-head"><div class="panel-title"><strong>最近运行</strong><span>实时状态与得分</span></div><button class="quiet" data-page-jump="run">全部证据</button></div>
+              <table class="table"><thead><tr><th>评测</th><th>参测组合</th><th>状态</th><th>用时</th><th>得分</th></tr></thead><tbody>
+                <tr><td><strong>Ultra · 隐藏资源调度</strong><small>第 3 轮 · 4 个隐藏实例</small></td><td><span class="agent"><i class="agent-logo">OC</i>MiMo V2.5 Pro</span></td><td><span class="status running"><i></i>运行中</span></td><td>18m 42s</td><td><span class="score">—</span></td></tr>
+                <tr><td><strong>高难快速摸底</strong><small>60 项 · 难度 4–5</small></td><td><span class="agent"><i class="agent-logo">RX</i>DeepSeek V4</span></td><td><span class="status done"><i></i>完成</span></td><td>43m 18s</td><td><span class="score">73.7</span></td></tr>
+                <tr><td><strong>崩溃一致性事件存储</strong><small>第 3 轮 · 强杀恢复</small></td><td><span class="agent"><i class="agent-logo">OC</i>MiMo V2.5 Pro</span></td><td><span class="status review"><i></i>待复核</span></td><td>24m 33s</td><td><span class="score">43.5</span></td></tr>
+              </tbody></table>
+            </article>
+            <article class="card panel">
+              <div class="panel-head"><div class="panel-title"><strong>最佳模型画像</strong><span>DeepSeek V4 Pro · 40 个有效样本</span></div><span class="tag">A</span></div>
+              <div class="radar-body"><svg class="radar" viewBox="0 0 300 235"><g transform="translate(150 113)"><polygon class="grid" points="0,-88 76,-44 76,44 0,88 -76,44 -76,-44"/><polygon class="grid" points="0,-59 51,-29 51,29 0,59 -51,29 -51,-29"/><polygon class="grid" points="0,-29 25,-15 25,15 0,29 -25,15 -25,-15"/><path class="axis" d="M0 0V-88M0 0 76-44M0 0 76 44M0 0V88M0 0-76 44M0 0-76-44"/><polygon class="shape" points="0,-75 68,-39 57,33 0,65 -61,35 -69,-40"/></g><text x="132" y="14">推理计算</text><text x="238" y="72">编码</text><text x="240" y="170">规划</text><text x="132" y="226">知识工作</text><text x="10" y="170">数据分析</text><text x="15" y="72">安全</text></svg></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="page" id="page-library">
+          <div class="page-head"><div><div class="eyebrow">BENCHMARK LIBRARY</div><h1>测试库与质量审计</h1><p>按能力、难度与执行环境管理测试，并直接查看历史区分度。</p></div><div class="head-actions"><button class="secondary">导入本地题包</button><button class="primary" data-open-drawer><svg><use href="#i-play"/></svg>用所选套件评测</button></div></div>
+          <div class="card filters"><label class="search-field"><svg><use href="#i-search"/></svg><input value="" placeholder="搜索 212 个测试项" /></label><button class="filter-chip active" data-filter="all">全部</button><button class="filter-chip" data-filter="reasoning">推理计算</button><button class="filter-chip" data-filter="coding">编码工程</button><button class="filter-chip" data-filter="planning">规划决策</button><span class="filter-info">已排除 Office 难度巡查</span></div>
+          <div class="suite-grid">
+            <article class="card suite-card suite-filter" data-type="reasoning"><div class="suite-top"><div class="suite-icon"><svg><use href="#i-bolt"/></svg></div><span class="tag">FOCUS</span></div><h3>专项 · 推理计算</h3><p>覆盖微积分、微分方程、无穷级数与线性代数，下一版升级符号等价验证。</p><div class="suite-meta"><span><svg><use href="#i-library"/></svg>20 项</span><span><svg><use href="#i-clock"/></svg>约 3 小时</span><span>难度 4–5</span></div></article>
+            <article class="card suite-card suite-filter" data-type="coding"><div class="suite-top"><div class="suite-icon cyan"><svg><use href="#i-flask"/></svg></div><span class="tag">FRONTIER</span></div><h3>高难快速摸底</h3><p>综合编码、安全、分析与 Agent 工作流；本轮将替换批量满分题。</p><div class="suite-meta"><span><svg><use href="#i-library"/></svg>60 项</span><span><svg><use href="#i-clock"/></svg>45–90 分</span><span>难度 4–5</span></div></article>
+            <article class="card suite-card suite-filter" data-type="reasoning"><div class="suite-top"><div class="suite-icon amber"><svg><use href="#i-file"/></svg></div><span class="tag soon">LOCAL IMPORT</span></div><h3>2025 考研数学一</h3><p>等待用户授权 PDF；保持 150 分卷面制，主观题按得分点与证明义务判分。</p><div class="suite-meta"><span><svg><use href="#i-shield"/></svg>本地内容</span><span><svg><use href="#i-clock"/></svg>180 分钟</span><span>即将加入</span></div></article>
+          </div>
+          <article class="card panel audit-card">
+            <div class="panel-head"><div class="panel-title"><strong>难度 4/5 区分度巡查</strong><span>客户端历史 · objective_quality · 不含 NCRE Office</span></div><div class="segmented"><button class="active">优先处理</button><button>全部 116 项</button></div></div>
+            <table class="table audit-table"><thead><tr><th>优先级</th><th>测试组</th><th>历史样本</th><th>客观满分率</th><th>主要问题</th><th>建议动作</th></tr></thead><tbody>
+              <tr><td><span class="priority p0">P0</span></td><td><strong>跨文档项目审查 01–15</strong><small>knowledge.cross-document</small></td><td>47 次 / 2 模型</td><td class="full-rate">100%</td><td>唯一键检索，可直接脚本联表</td><td>改为冲突证据链 + 不完整信息</td></tr>
+              <tr><td><span class="priority p0">P0</span></td><td><strong>业务规则模块 01–20</strong><small>coding.business-rules</small></td><td>72 次 / 3 模型</td><td class="full-rate">97%</td><td>仅 4 个小函数循环变体</td><td>升级为多模块状态与隐藏性质测试</td></tr>
+              <tr><td><span class="priority p0">P0</span></td><td><strong>安全加固 01–15</strong><small>security.hardening</small></td><td>23 次 / 2 模型</td><td class="full-rate">100%</td><td>3 类标准答案重复，测试面窄</td><td>攻击链、竞态与编码边界组合</td></tr>
+              <tr><td><span class="priority p1">P1</span></td><td><strong>多文件工单编排 09–15</strong><small>workflow.ticket-triage</small></td><td>4 次 / 1 模型</td><td class="full-rate">100%</td><td>同构文本批处理，规模不构成难度</td><td>加入状态依赖、幂等与失败恢复</td></tr>
+              <tr><td><span class="priority p1">P1</span></td><td><strong>部分高等数学短答案</strong><small>math.* · exact_match</small></td><td>81 次 / 3 模型</td><td>20%</td><td>低分混有格式不等价误判</td><td>CAS 等价 + 推导得分点</td></tr>
+              <tr><td><span class="priority p2">P2</span></td><td><strong>Ultra 隐藏资源调度</strong><small>ultra.hidden-general-resource-scheduler</small></td><td>多轮实测</td><td>—</td><td>隐藏实例与多目标质量有效</td><td>保留并继续扩充种子</td></tr>
+            </tbody></table>
+          </article>
+        </section>
+
+        <section class="page" id="page-create">
+          <div class="page-head"><div><div class="eyebrow">NEW EVALUATION</div><h1>创建本地评测</h1><p>清楚地组合测试套件、底层模型与执行 Agent，运行前即可预估规模。</p></div><div class="head-actions"><button class="secondary">保存草稿</button></div></div>
+          <div class="create-layout">
+            <aside class="card steps"><div class="step active"><b>1</b><div><strong>测试范围</strong><small>选择能力与强度</small></div></div><div class="step"><b>2</b><div><strong>参测组合</strong><small>模型 × Agent</small></div></div><div class="step"><b>3</b><div><strong>评分与运行</strong><small>裁判、并发、重复</small></div></div></aside>
+            <article class="card config-card">
+              <div class="panel-head"><div class="panel-title"><strong>评测配置</strong><span>所有任务均在本机 Agent 工作区执行</span></div><span class="tag">STEP 1–3</span></div>
+              <div class="section-body">
+                <div class="section-label"><span>测试套件</span><small>可在测试库预览全部题面</small></div>
+                <div class="select-tile"><div class="suite-icon cyan"><svg><use href="#i-flask"/></svg></div><div><strong>高难快速摸底 · 修订版</strong><span>42 项 · 难度 4–5 · 不含 Office · 约 55 分钟</span></div><i class="check"><svg><use href="#i-check"/></svg></i></div>
+                <div class="section-label" style="margin-top:18px"><span>参测组合</span><small>统一 Agent 做模型横评，原生 Agent 做产品能力横评</small></div>
+                <div class="participant-box"><div class="participant-head"><strong>参测者 01</strong><span>● 已检测</span></div><div class="field-row"><div class="fake-select"><span>DeepSeek V4 Pro</span><small>模型 ▾</small></div><div class="fake-select"><span>Reasonix CLI</span><small>Agent ▾</small></div></div><div class="connection"><span>模型来源：Reasonix 内置配置</span><b>模型覆盖可用</b></div></div>
+                <div class="participant-box"><div class="participant-head"><strong>参测者 02</strong><span>● 已检测</span></div><div class="field-row"><div class="fake-select"><span>GPT-5.6 SOL</span><small>模型 ▾</small></div><div class="fake-select"><span>Codex CLI</span><small>Agent ▾</small></div></div><div class="connection"><span>模型来源：Codex 已登录配置</span><b>原生工具可用</b></div></div>
+                <button class="add-participant">＋ 添加参测组合</button>
+                <div class="section-label" style="margin-top:18px"><span>评分模型</span><small>密钥不回显、不写入题包</small></div>
+                <div class="field-row"><div class="fake-select"><span>匿名裁判 · GPT-5.6 Luna</span><small>裁判 ▾</small></div><div class="fake-select"><span>双裁判 + 分歧复核</span><small>策略 ▾</small></div></div>
+              </div>
+            </article>
+            <aside class="card summary-card"><div class="panel-head"><div class="panel-title"><strong>运行摘要</strong><span>启动前检查</span></div></div><div class="summary-body"><div class="summary-score"><span>预计运行任务</span><strong>84</strong></div><div class="summary-list"><div><span>测试项</span><strong>42</strong></div><div><span>参测组合</span><strong>2</strong></div><div><span>重复次数</span><strong>1</strong></div><div><span>并发</span><strong>2</strong></div><div><span>预计用时</span><strong>55–90 分钟</strong></div></div><button class="primary" id="simulateRun"><svg><use href="#i-play"/></svg>创建并开始运行</button><div class="local-note"><svg><use href="#i-shield"/></svg><span>模型输出、工作区和评分证据只保存在本机 AgentBench 数据目录。</span></div></div></aside>
+          </div>
+        </section>
+
+        <section class="page" id="page-run">
+          <div class="page-head"><div><div class="eyebrow">RUN DETAIL / EVIDENCE</div><h1>运行详情与评分证据</h1><p>从最终分数逐层追溯到轮次、验证器、裁判理由和工作区产物。</p></div><div class="head-actions"><button class="secondary">打开工作区</button><button class="secondary">导出报告</button></div></div>
+          <article class="card run-hero"><div class="run-title"><div class="run-logo">OC</div><div><h2>隐藏实例通用资源调度器</h2><p>MiMo V2.5 Pro × OpenCode · 第 3 轮通过 · 2026/08/08 22:45</p></div></div><div class="run-score"><strong>68.6</strong><span>客观质量 99.5 · 轮次折扣后</span></div></article>
+          <div class="run-grid">
+            <div>
+              <article class="card panel"><div class="panel-head"><div class="panel-title"><strong>评分构成</strong><span>质量为主，时间与 Token 仅作轻量修正</span></div><span class="tag">BALANCED V2</span></div><div class="dimension-grid"><div class="dimension"><span>客观质量 · 94%</span><strong>99.5</strong><div class="micro-track"><i style="width:99.5%;background:var(--cyan)"></i></div></div><div class="dimension"><span>时间效率 · 3%</span><strong>100</strong><div class="micro-track"><i style="width:100%"></i></div></div><div class="dimension"><span>步骤效率 · 2%</span><strong>60.0</strong><div class="micro-track"><i style="width:60%;background:var(--amber)"></i></div></div><div class="dimension"><span>Token 效率 · 1%</span><strong>31.9</strong><div class="micro-track"><i style="width:32%;background:var(--amber)"></i></div></div></div></article>
+              <article class="card panel" style="margin-top:12px"><div class="panel-head"><div class="panel-title"><strong>验证证据</strong><span>隐藏数据只展示结论，不泄露答案</span></div><button class="quiet">展开全部</button></div><div class="evidence"><div class="evidence-row"><div><strong>约束正确性</strong><small>释放时间、截止期、机器日历、前置与资源容量</small></div><div class="bar"><i style="width:100%"></i></div><b>20 / 20</b></div><div class="evidence-row"><div><strong>隐藏实例可行率</strong><small>4 个未公开规模与扰动实例</small></div><div class="bar"><i style="width:100%"></i></div><b>4 / 4</b></div><div class="evidence-row"><div><strong>多目标解质量</strong><small>makespan → nonrenewable → weighted completion</small></div><div class="bar"><i style="width:96%"></i></div><b>28.8 / 30</b></div><div class="evidence-row"><div><strong>重复运行稳定性</strong><small>相同种子重复执行输出一致</small></div><div class="bar"><i style="width:100%"></i></div><b>10 / 10</b></div></div></article>
+            </div>
+            <aside>
+              <article class="card panel"><div class="panel-head"><div class="panel-title"><strong>执行时间线</strong><span>总用时 27m 01s</span></div></div><div class="timeline"><div class="event"><strong>第 1 轮开始</strong><span>原始任务与公开 checker</span><time>00:00</time></div><div class="event warning"><strong>未达到通过线</strong><span>隐藏实例 H-03 资源冲突</span><time>08:14</time></div><div class="event"><strong>第 2 轮提示</strong><span>强调机器切换与 setup 时间</span><time>08:15</time></div><div class="event warning"><strong>目标质量不足</strong><span>可行，但 makespan 超出参考上界</span><time>17:31</time></div><div class="event"><strong>第 3 轮通过</strong><span>4/4 隐藏实例通过，质量 99.5</span><time>27:01</time></div></div><div class="artifact"><svg><use href="#i-file"/></svg><span>scheduler.py · 18.4 KB</span><button class="quiet">查看</button></div></article>
+            </aside>
+          </div>
+        </section>
+      </main>
+    </section>
+  </div>
+
+  <div class="backdrop" id="backdrop"></div>
+  <aside class="drawer" aria-hidden="true"><div class="drawer-head"><div><h2>快速新建评测</h2><p>先选测试强度，再到完整配置页确认模型与 Agent。</p></div><button class="icon-button" id="closeDrawer"><svg width="15"><use href="#i-x"/></svg></button></div><div class="drawer-section"><div class="section-label">推荐套件</div><div class="quick-suite selected"><div class="suite-icon cyan"><svg><use href="#i-bolt"/></svg></div><div><strong>高难快速摸底 · 修订版</strong><span>42 项 · 难度 4–5 · 预计 55 分钟</span></div></div><div class="quick-suite"><div class="suite-icon"><svg><use href="#i-flask"/></svg></div><div><strong>AgentBench Ultra</strong><span>2 项 · 三轮渐进提示 · 数小时级</span></div></div><div class="quick-suite"><div class="suite-icon amber"><svg><use href="#i-library"/></svg></div><div><strong>专项 · 推理计算</strong><span>20 项 · 微积分、级数、线性代数</span></div></div></div><div class="drawer-section"><div class="section-label">运行位置</div><div class="text-input">C:\Users\…\AgentBench\workspaces <span style="color:var(--green)">本机</span></div></div><div class="drawer-footer"><button class="secondary" id="drawerCancel">取消</button><button class="primary" id="drawerContinue">继续配置</button></div></aside>
+  <section class="palette" aria-hidden="true"><div class="palette-input"><svg><use href="#i-search"/></svg><input id="paletteInput" placeholder="输入命令或页面名称…" /><kbd>Esc</kbd></div><div class="palette-group">快速前往</div><button class="palette-item" data-command-page="library"><svg><use href="#i-library"/></svg><span>测试库与质量审计</span><kbd>L</kbd></button><button class="palette-item" data-command-page="create"><svg><use href="#i-flask"/></svg><span>创建新评测</span><kbd>N</kbd></button><button class="palette-item" data-command-page="run"><svg><use href="#i-chart"/></svg><span>查看最近运行证据</span><kbd>R</kbd></button></section>
+  <div class="toast" id="toast">评测已创建，正在初始化本地工作区…</div>
+
+  <script>
+    const pageNames = { overview: '总览', library: '测试库', create: '新建评测', run: '运行证据' };
+    const navButtons = [...document.querySelectorAll('.nav-button[data-page]')];
+    const pages = [...document.querySelectorAll('.page')];
+    function showPage(name) {
+      pages.forEach(page => page.classList.toggle('active', page.id === `page-${name}`));
+      navButtons.forEach(button => button.classList.toggle('active', button.dataset.page === name));
+      document.getElementById('crumb').textContent = pageNames[name] || '总览';
+      document.querySelector('.viewport').scrollTop = 0;
+    }
+    navButtons.forEach(button => button.addEventListener('click', () => showPage(button.dataset.page)));
+    document.querySelectorAll('[data-page-jump]').forEach(button => button.addEventListener('click', () => showPage(button.dataset.pageJump)));
+    const initialPage = new URLSearchParams(location.search).get('page');
+    if (initialPage && pageNames[initialPage]) showPage(initialPage);
+
+    const closeOverlays = () => document.body.classList.remove('drawer-open', 'palette-open');
+    document.querySelectorAll('[data-open-drawer]').forEach(button => button.addEventListener('click', () => { closeOverlays(); document.body.classList.add('drawer-open'); }));
+    document.getElementById('closeDrawer').addEventListener('click', closeOverlays);
+    document.getElementById('drawerCancel').addEventListener('click', closeOverlays);
+    document.getElementById('backdrop').addEventListener('click', closeOverlays);
+    document.querySelectorAll('.quick-suite').forEach(tile => tile.addEventListener('click', () => { document.querySelectorAll('.quick-suite').forEach(item => item.classList.remove('selected')); tile.classList.add('selected'); }));
+    document.getElementById('drawerContinue').addEventListener('click', () => { closeOverlays(); showPage('create'); });
+
+    const openPalette = () => { closeOverlays(); document.body.classList.add('palette-open'); setTimeout(() => document.getElementById('paletteInput').focus(), 30); };
+    document.getElementById('openPalette').addEventListener('click', openPalette);
+    document.addEventListener('keydown', event => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); openPalette(); }
+      if (event.key === 'Escape') closeOverlays();
+    });
+    document.querySelectorAll('[data-command-page]').forEach(button => button.addEventListener('click', () => { closeOverlays(); showPage(button.dataset.commandPage); }));
+
+    document.querySelectorAll('.filter-chip').forEach(chip => chip.addEventListener('click', () => {
+      document.querySelectorAll('.filter-chip').forEach(item => item.classList.remove('active'));
+      chip.classList.add('active');
+      document.querySelectorAll('.suite-filter').forEach(card => { card.style.display = chip.dataset.filter === 'all' || card.dataset.type === chip.dataset.filter ? '' : 'none'; });
+    }));
+
+    const toast = document.getElementById('toast');
+    document.getElementById('simulateRun').addEventListener('click', () => { toast.classList.add('show'); setTimeout(() => toast.classList.remove('show'), 2400); });
+  </script>
+</body>
+</html>

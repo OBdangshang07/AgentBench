@@ -4,8 +4,12 @@ import { Link, useParams } from "react-router-dom";
 import { api, downloadUrl } from "../lib/api";
 import { formatDate, formatDuration, formatNumber } from "../lib/format";
 import { useApi } from "../lib/useApi";
-import type { Experiment, RunSummary } from "../types";
+import { useRunEvents } from "../lib/useRunEvents";
+import type { Experiment, RunDetail, RunSummary } from "../types";
 import { Button, Card, ErrorBlock, LoadingBlock, PageHeader, Score, StatusBadge } from "../components/ui";
+import { ExperimentLiveFocus } from "../components/LiveRunView";
+
+const ACTIVE_RUN_STATUSES = new Set(["queued", "preparing", "running", "validating", "judging"]);
 
 export default function ExperimentDetail() {
   const { experimentId = "" } = useParams();
@@ -25,6 +29,7 @@ export default function ExperimentDetail() {
   if (experiment.error || !experiment.data) return <ErrorBlock message={experiment.error ?? "实验不存在"} retry={() => void experiment.refresh()} />;
   const item = experiment.data;
   const summary = item.summary;
+  if (item.status === "running") return <ExperimentBroadcast item={item} runs={runs.data ?? []} actionError={actionError} onCancel={() => void action("cancel")} />;
   const finished = (summary?.completed ?? 0) + (summary?.failed ?? 0) + (summary?.blocked ?? 0);
   const progress = summary?.total ? Math.round((finished / summary.total) * 100) : 0;
   const completedRuns = runs.data?.filter((run) => run.score != null) ?? [];
@@ -90,4 +95,29 @@ export default function ExperimentDetail() {
       </Card>
     </div>
   );
+}
+
+function ExperimentBroadcast({ item, runs, actionError, onCancel }: { item: Experiment; runs: RunSummary[]; actionError: string; onCancel: () => void }) {
+  const focusSummary = runs.find((run) => ACTIVE_RUN_STATUSES.has(run.status)) ?? runs[0];
+  const focus = useApi<RunDetail>(focusSummary ? `/runs/${focusSummary.id}` : "", 1_500);
+  const active = Boolean(focus.data && ACTIVE_RUN_STATUSES.has(focus.data.status));
+  const live = useRunEvents(focusSummary?.id ?? "", focus.data?.events ?? [], active);
+  const finished = runs.filter((run) => !ACTIVE_RUN_STATUSES.has(run.status)).length;
+  const progress = runs.length ? Math.round(finished / runs.length * 100) : 0;
+  return <div className="page experiment-broadcast-page">
+    <Link to="/experiments" className="back-link"><ArrowLeft size={16} /> 返回实验列表</Link>
+    <div className="broadcast-page-head"><div><span><i /> LIVE EXPERIMENT</span><h1>{item.name}</h1><p>{item.suite_name} · {item.participants.length} 个参测组合 · 并发 {item.concurrency}</p></div><div><span className="broadcast-clock">{finished} / {runs.length} COMPLETED</span><Button variant="danger" onClick={onCancel}><Square size={15} /> 停止评测</Button></div></div>
+    {actionError && <div className="error-banner"><strong>操作失败</strong><span>{actionError}</span></div>}
+    {focus.loading || !focus.data ? <Card className="broadcast-loading"><LoadingBlock /></Card> : <ExperimentLiveFocus run={focus.data} events={live.events} streamState={live.streamState} />}
+    <section className="live-race-board">
+      <header><span>测试任务</span><span>当前状态</span><span>执行阶段</span><span>用时</span><span>实时分数</span></header>
+      {runs.slice(0, 8).map((run) => {
+        const isLive = ACTIVE_RUN_STATUSES.has(run.status);
+        const stage = run.status === "queued" ? 4 : run.status === "preparing" ? 16 : run.status === "running" ? 52 : run.status === "validating" ? 74 : run.status === "judging" ? 88 : 100;
+        return <Link className={isLive ? "live" : ""} to={`/runs/${run.id}`} key={run.id}><div><strong>{run.test_title}</strong><small>{run.model_name} × {run.runner_name} · ROUND {Math.max(1, run.attempt_count)}</small></div><span><i /> {run.status}</span><div className="live-race-track"><i style={{ left: `${stage}%` }} /></div><code>{formatDuration(run.duration_ms)}</code><Score value={run.score} /></Link>;
+      })}
+      {!runs.length && <div className="live-race-empty">任务正在编排，运行队列即将出现。</div>}
+      <footer><span>总进度</span><div className="progress-line"><i style={{ width: `${progress}%` }} /></div><strong>{progress}%</strong></footer>
+    </section>
+  </div>;
 }

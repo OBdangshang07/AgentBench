@@ -14,7 +14,7 @@ const runnerMeta: Record<Runner["runner_type"], { label: string; description: st
   gemini_cli: { label: "原生编码 Agent", description: "通过 Gemini CLI 的 stream-json 模式执行长上下文和项目任务。" },
   aider_cli: { label: "代码编辑 Agent", description: "通过 Aider 消息模式修改项目，适合代码库维护与隐藏测试。" },
   kimi_code_cli: { label: "原生编码 Agent", description: "通过 Kimi Code CLI 非交互模式执行长上下文与完整项目任务。" },
-  qoder_cli: { label: "原生编码 Agent", description: "通过 Qoder 非交互 CLI 执行；仅安装桌面 IDE 时会明确提示缺少自动评测 CLI。" },
+  qoder_cli: { label: "原生编码 Agent", description: "通过 Qoder 国内版非交互 CLI（qoderclicn）执行；仅安装桌面 IDE 时会明确提示缺少自动评测 CLI。" },
   command: { label: "兼容适配器", description: "使用参数数组接入任意非交互 CLI，不经过 Shell 字符串拼接。" },
 };
 
@@ -32,7 +32,7 @@ const modelSources: Array<{
   { value: "gemini-cli", label: "Gemini CLI", description: "识别本机 Gemini 能力", runnerType: "gemini_cli" },
   { value: "aider-cli", label: "Aider", description: "识别本机 Aider 能力", runnerType: "aider_cli" },
   { value: "kimi-code", label: "Kimi Code", description: "识别 Kimi Code CLI 模型或当前登录配置", runnerType: "kimi_code_cli" },
-  { value: "qoder-cli", label: "Qoder", description: "识别 Qoder 非交互 CLI；桌面版不会被误当成 CLI", runnerType: "qoder_cli" },
+  { value: "qoder-cli", label: "Qoder", description: "识别 Qoder 国内版非交互 CLI（qoderclicn）；桌面版不会被误当成 CLI", runnerType: "qoder_cli" },
 ];
 
 function discoveryValue(model: DiscoveredModel): string {

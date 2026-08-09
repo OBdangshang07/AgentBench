@@ -5,7 +5,10 @@ import {
   Bot,
   Box,
   Check,
+  Copy,
+  Eye,
   FlaskConical,
+  FolderOpen,
   Layers3,
   Play,
   Plus,
@@ -14,9 +17,12 @@ import {
 } from "lucide-react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../lib/api";
+import { copyText } from "../lib/clipboard";
 import { formatDate } from "../lib/format";
+import { openFolder } from "../lib/openPath";
 import { useApi } from "../lib/useApi";
-import type { Experiment, ModelConfig, Participant, Runner, Suite } from "../types";
+import type { Experiment, ModelConfig, Participant, Runner, Suite, SystemStatus } from "../types";
+import { Difficulty, SuiteDrawer } from "../components/SuiteDrawer";
 import { Button, Card, ErrorBlock, Field, LoadingBlock, Modal, PageHeader, Score, StatusBadge } from "../components/ui";
 
 export default function Experiments() {
@@ -75,22 +81,38 @@ export default function Experiments() {
   );
 }
 
-function Difficulty({ min = 1, max = 1 }: { min?: number; max?: number }) {
-  return <span className={`difficulty-dots ${max >= 6 ? "difficulty-dots-ultra" : ""}`} title={max >= 6 ? "Ultra 难度 6" : `难度 ${min}–${max}`}>{[1, 2, 3, 4, 5, 6].map((level) => <i className={level <= max ? "active" : ""} key={level} />)}</span>;
-}
-
 function CreateExperiment({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const models = useApi<ModelConfig[]>("/models");
   const runners = useApi<Runner[]>("/runners");
   const suites = useApi<Suite[]>("/suites");
+  const systemStatus = useApi<SystemStatus>("/system/status");
   const navigate = useNavigate();
   const [step, setStep] = useState(1);
   const [suiteId, setSuiteId] = useState("");
+  const [previewSuiteId, setPreviewSuiteId] = useState("");
   const [participants, setParticipants] = useState<Participant[]>([{ model_id: "", runner_id: "" }]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [workspaceHint, setWorkspaceHint] = useState("");
   const loading = models.loading || runners.loading || suites.loading;
   const selectedSuite = suites.data?.find((suite) => suite.id === suiteId);
+  const previewSuite = suites.data?.find((suite) => suite.id === previewSuiteId);
+  const workspacesDir = systemStatus.data?.workspaces_dir ?? "";
+
+  function flashWorkspaceHint(text: string) {
+    setWorkspaceHint(text);
+    window.setTimeout(() => setWorkspaceHint(""), 1800);
+  }
+
+  async function copyWorkspacesDir() {
+    if (!workspacesDir) return;
+    flashWorkspaceHint((await copyText(workspacesDir)) ? "已复制" : "复制失败");
+  }
+
+  async function openWorkspacesDir() {
+    if (!workspacesDir) return;
+    if (!(await openFolder(workspacesDir))) flashWorkspaceHint("当前环境不支持打开文件夹，可复制路径手动访问");
+  }
   const suiteGroups = useMemo(() => {
     const all = suites.data ?? [];
     return [
@@ -141,7 +163,7 @@ function CreateExperiment({ onClose, onSaved }: { onClose: () => void; onSaved: 
                 <div className="suite-group-heading"><strong>{group.label}</strong><span>{group.hint}</span></div>
                 <div className="suite-picker">
                   {group.items.map((suite) => (
-                    <button type="button" className={`suite-option${suiteId === suite.id ? " selected" : ""}${(suite.difficulty_max ?? 0) >= 6 ? " suite-option-ultra" : ""}${suite.name.startsWith("专项 ·") ? " suite-option-focus" : ""}`} onClick={() => setSuiteId(suite.id)} key={suite.id}>
+                    <div role="button" tabIndex={0} className={`suite-option${suiteId === suite.id ? " selected" : ""}${(suite.difficulty_max ?? 0) >= 6 ? " suite-option-ultra" : ""}${suite.name.startsWith("专项 ·") ? " suite-option-focus" : ""}`} onClick={() => setSuiteId(suite.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSuiteId(suite.id); } }} key={suite.id}>
                       <div className="suite-option-top"><span className="suite-version">{(suite.difficulty_max ?? 0) >= 6 ? "ULTRA · 3 ROUNDS" : suite.name.startsWith("专项 ·") ? "FOCUS" : `V${suite.version.split(".")[0]}`}</span>{suiteId === suite.id && <Check size={16} />}</div>
                       <strong>{suite.name}</strong><p>{suite.description}</p>
                       <div className="suite-facts">
@@ -150,11 +172,19 @@ function CreateExperiment({ onClose, onSaved }: { onClose: () => void; onSaved: 
                         <span><Box size={13} /> {suite.docker_case_count ? `${suite.docker_case_count} 题需 Docker` : "无需 Docker"}</span>
                         {Boolean(suite.judge_case_count) && <span><Sparkles size={13} /> {suite.judge_case_count} 题需裁判</span>}
                       </div>
-                    </button>
+                      <button type="button" className="suite-view-cases" onClick={(event) => { event.stopPropagation(); setPreviewSuiteId(suite.id); }}><Eye size={12} /> 查看题目</button>
+                    </div>
                   ))}
                 </div>
               </section>)}
             </div>
+            {workspacesDir && <div className="workspaces-row">
+              <span>AI 工作区</span>
+              <code title={workspacesDir}>{workspacesDir}</code>
+              <Button type="button" variant="secondary" onClick={() => void openWorkspacesDir()}><FolderOpen size={13} /> 打开文件夹</Button>
+              <Button type="button" variant="secondary" onClick={() => void copyWorkspacesDir()}><Copy size={13} /> 复制</Button>
+              {workspaceHint && <em className="copy-hint">{workspaceHint}</em>}
+            </div>}
           </div>}
 
           {step === 2 && <div className="wizard-body">
@@ -197,6 +227,7 @@ function CreateExperiment({ onClose, onSaved }: { onClose: () => void; onSaved: 
           </div>
         </form>
       )}
+      {previewSuite && <SuiteDrawer suiteId={previewSuite.id} suiteName={previewSuite.name} onClose={() => setPreviewSuiteId("")} />}
     </Modal>
   );
 }

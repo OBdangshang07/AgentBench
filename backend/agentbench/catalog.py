@@ -6,9 +6,18 @@ import random
 import textwrap
 import uuid
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from .db import Database, utc_now
+from .ncre_assets import blobs, blobs_paper02, blobs_paper03, exam_data_paper02, exam_data_paper03
+from .ncre_assets.exam_data import (
+    CHOICE_QUESTIONS,
+    EXAM_NAME,
+    PPT_FLOW_STEPS,
+    PPT_SLIDE_TITLES,
+    SOURCE_SUMMARY,
+)
 
 NAMESPACE = uuid.UUID("3a2259d0-189b-45fa-9caf-b729abdf2df1")
 
@@ -38,10 +47,578 @@ ULTRA_SUITE_ID = stable_id("suite", "v3-ultra-prototype")
 REASONING_SUITE_ID = stable_id("suite", "v2-reasoning-focus")
 PLANNING_SUITE_ID = stable_id("suite", "v2-planning-focus")
 CODING_SUITE_ID = stable_id("suite", "v2-coding-focus")
+NCRE_OFFICE_SUITE_ID = stable_id("suite", "ncre-office-paper-01")
+NCRE_OFFICE_PAPER02_SUITE_ID = stable_id("suite", "ncre-office-paper-02")
+NCRE_OFFICE_PAPER03_SUITE_ID = stable_id("suite", "ncre-office-paper-03")
+GAUNTLET_SUITE_ID = stable_id("suite", "v2-gauntlet")
+GAUNTLET_LITE_SUITE_ID = stable_id("suite", "v2-gauntlet-lite")
+
+_NCRE_ASSET_DIR = Path(__file__).resolve().parent / "ncre_assets"
 
 
 def _validator(kind: str, weight: float, **config: Any) -> dict[str, Any]:
     return {"type": kind, "weight": weight, "config": config}
+
+
+def _ncre_judge(name: str) -> str:
+    return (_NCRE_ASSET_DIR / name).read_text(encoding="utf-8")
+
+
+def _ncre_metrics(pairs: list[tuple[str, str, float]]) -> list[dict[str, Any]]:
+    return [{"key": key, "name": name, "weight": weight} for key, name, weight in pairs]
+
+
+def _ncre_metadata(
+    section: str,
+    exam_points: int,
+    estimated_minutes: int,
+    exam_paper: str,
+    source_summary: str,
+) -> dict[str, Any]:
+    return {
+        "difficulty": 4,
+        "estimated_minutes": estimated_minutes,
+        "capability": "office-application",
+        "exam": "ncre-office",
+        "exam_paper": exam_paper,
+        "exam_section": section,
+        "exam_points": exam_points,
+        "source": source_summary,
+        "internal_research_only": True,
+    }
+
+
+def _ncre_choice_instruction(exam_name: str, questions: list[tuple[str, str, dict[str, str]]]) -> str:
+    lines = [
+        f"{exam_name}选择题部分，共 20 题。请逐题作答，并将全部答案写入工作区根目录的 answers.json 文件。",
+        "answers.json 格式为 JSON 对象，键为题目编号 q01~q20，值为选项字母（A/B/C/D），"
+        '例如 {"q01": "A", "q02": "B", ...}。',
+        "",
+    ]
+    for qid, stem, options in questions:
+        lines.append(f"{qid}. {stem}")
+        for letter in sorted(options):
+            lines.append(f"{letter}. {options[letter]}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+_NCRE_PAPER01_WORD_METRICS = _ncre_metrics([
+    ("w1", "页面尺寸", 3),
+    ("w2", "页边距", 3),
+    ("w3", "页面背景色", 3),
+    ("w4", "全文微软雅黑", 3),
+    ("w5", "标题字号与颜色", 4),
+    ("w6", "对齐方式", 3),
+    ("w7", "首行缩进", 3),
+    ("w8", "段间距", 3),
+    ("w9", "合并文档等价产物", 5),
+])
+
+_NCRE_PAPER01_EXCEL_METRICS = _ncre_metrics([
+    ("e1", "套用表格样式", 3),
+    ("e2", "货币专用格式", 3),
+    ("e3", "图书名称 VLOOKUP", 5),
+    ("e4", "单价 VLOOKUP", 5),
+    ("e5", "小计公式", 4),
+    ("e6", "B3 总销售额", 3),
+    ("e7", "B4 MS Office 2012 销售额", 3),
+    ("e8", "B5 隆华书店 2011Q3 销售额", 2),
+    ("e9", "B6 月均销售额与格式", 2),
+])
+
+_NCRE_PAPER01_PPT_METRICS = _ncre_metrics([
+    ("p1", "7 张幻灯片", 1),
+    ("p2", "标题映射", 4),
+    ("p3", "大纲层级文本", 4),
+    ("p4", "首页版式", 2),
+    ("p5", "应用主题", 2),
+    ("p6", "销量统计表格", 4),
+    ("p7", "SmartArt 流程图", 2),
+    ("p8", "自定义放映", 1),
+])
+
+_NCRE_WORD_INSTRUCTION = (
+    f"{EXAM_NAME}Word 操作题（30 分）。工作区已提供邀请函文稿草稿 Word.docx 与 通讯录.csv（姓名,称谓，共 5 人）。"
+    "请完成以下操作：\n"
+    "1. 打开 Word.docx，将页面设为自定义纸张：宽 30 厘米、高 18 厘米；页边距上、下各 2 厘米，左、右各 3 厘米。\n"
+    "2. 为文档添加页面背景：原卷要求插入背景图片，因原素材图片缺失，降级要求为纯色填充，颜色值 #FDE9D9。\n"
+    "3. 全文字体设置为微软雅黑；第 1 段“大学生网络创业交流会”与第 2 段“邀请函”字号设为“一号”，"
+    "并将第 1 段文字设为蓝色。\n"
+    "4. 对齐方式：第 1、2 段（标题）居中；“校学生会外联部”与日期两段落右对齐。\n"
+    "5. 正文段落（正文第 4、5 段）设置首行缩进 2 字符；第 1、2 段设置段前、段后间距各 0.5 行。\n"
+    "6. 邮件合并（等价口径）：用 Python（如 python-docx）基于 Word.docx 与 通讯录.csv 生成合并文档 Word-邀请函.docx："
+    "通讯录中每位收件人各占一页（以分页符分隔），将正文中的“尊敬的(老师)：”替换为“尊敬的{姓名}：”。\n"
+    "最终工作区须存在 Word.docx（已完成格式设置）与 Word-邀请函.docx 两个文件。"
+)
+
+_NCRE_EXCEL_INSTRUCTION = (
+    f"{EXAM_NAME}Excel 操作题（30 分）。工作区已提供 Excel.xlsx，含三个工作表：订单明细表（第 2 行表头，"
+    "第 3 行起 23 行数据，图书名称、单价、小计列暂为空）、编号对照表（图书编号、图书名称、单价）、"
+    "统计报告（A 列统计项目、B 列待填）。请完成：\n"
+    "1. 将订单明细表的数据区域套用内置表格样式（创建为“表”对象，含标题行，覆盖全部数据行）。\n"
+    "2. 将单价列与小计列设置为货币专用格式（含 ￥ 符号、千位分隔符、两位小数）。\n"
+    "3. 在订单明细表“图书名称”列用 VLOOKUP 公式，根据图书编号从编号对照表第 2 列自动填入图书名称（精确匹配）。\n"
+    "4. 在“单价”列用 VLOOKUP 公式，根据图书编号从编号对照表第 3 列自动填入单价（精确匹配）。\n"
+    "5. 在“小计”列用公式计算每笔订单的销售额（单价 × 销量）。\n"
+    "6. 在统计报告 B3 计算所有订单的总销售金额；B4 计算《MS Office高级应用》图书 2012 年的总销售额；"
+    "B5 计算隆华书店 2011 年第 3 季度（7 月 1 日至 9 月 30 日）的总销售额；"
+    "B6 计算隆华书店 2011 年的每月平均销售额（保留 2 位小数，单元格显示两位小数格式）。\n"
+    "评分以单元格计算值为准，公式写法不限。完成后保存 Excel.xlsx。"
+)
+
+_NCRE_PPT_INSTRUCTION = (
+    f"{EXAM_NAME}PowerPoint 操作题（20 分）。工作区已提供素材文档 图书策划案.docx（含多级标题结构）。"
+    "请将其改造为演示文稿并保存为 PowerPoint.pptx，要求：\n"
+    "1. 共 7 张幻灯片，严格按素材顺序，标题依次为：" + "、".join(PPT_SLIDE_TITLES)
+    + "。素材中 Heading 1 作为每页幻灯片标题；Heading 2 作为该页一级文本内容；Heading 3 作为该页二级文本内容。\n"
+    "2. 第 1 页幻灯片版式设为“标题幻灯片”（Title Slide）。\n"
+    "3. 为演示文稿应用任意一个非默认的内置主题。\n"
+    "4. 第 6 页插入一个 6 行 5 列的表格，首行标题依次为：图书名称、出版社、作者、定价、销量（其余单元格内容自拟）。\n"
+    "5. 第 7 页插入 SmartArt 流程图，按顺序包含 7 个步骤：" + "、".join(PPT_FLOW_STEPS) + "。\n"
+    "6. 创建两个自定义放映方案：“放映方案1”放映第 1、2、4、7 页；“放映方案2”放映第 1、2、3、5、6 页。\n"
+    "完成后保存 PowerPoint.pptx。"
+)
+
+_NCRE_PAPER02_WORD_METRICS = _ncre_metrics([
+    ("w1", "第1页自定义纸张", 4),
+    ("w2", "第1页页边距", 3),
+    ("w3", "页面背景填充", 2),
+    ("w4", "主标题字体格式", 4),
+    ("w5", "第2页A4横向", 3),
+    ("w6", "报告人姓名输入", 2),
+    ("w7", "日程安排表", 5),
+    ("w8", "报名流程列表", 3),
+    ("w9", "报告人介绍排版", 4),
+])
+
+_NCRE_PAPER02_EXCEL_METRICS = _ncre_metrics([
+    ("e1", "文件与结构", 3),
+    ("e2", "数字格式", 3),
+    ("e3", "条件格式", 3),
+    ("e4", "总分与平均分", 5),
+    ("e5", "班级提取", 4),
+    ("e6", "分类汇总工作表", 5),
+    ("e7", "柱状分析图工作表", 4),
+    ("e8", "簇状柱形图", 3),
+])
+
+_NCRE_PAPER02_PPT_METRICS = _ncre_metrics([
+    ("p1", "文件与幻灯片数量", 2),
+    ("p2", "应用主题", 3),
+    ("p3", "标题页要素", 3),
+    ("p4", "内容板块与版式", 4),
+    ("p5", "图片数量", 2),
+    ("p6", "超链接数量", 4),
+    ("p7", "文件名", 2),
+])
+
+_NCRE_PAPER03_WORD_METRICS = _ncre_metrics([
+    ("w1", "删除西文空格", 3),
+    ("w2", "16开纸张与页边距", 2),
+    ("w3", "封面独占一页", 3),
+    ("w4", "咨询情况表与饼图", 5),
+    ("w5", "标题样式层级", 5),
+    ("w6", "超链接与脚注", 4),
+    ("w7", "正文两栏", 3),
+    ("w8", "目录域", 3),
+    ("w9", "页眉与页码", 2),
+])
+
+_NCRE_PAPER03_EXCEL_METRICS = _ncre_metrics([
+    ("e1", "两表导入与表格样式", 4),
+    ("e2", "千分位格式", 3),
+    ("e3", "比较数据合并排序", 3),
+    ("e4", "人口增长数列", 4),
+    ("e5", "比重变化列", 4),
+    ("e6", "统计指标表", 4),
+    ("e7", "超5000万地区降序榜", 4),
+    ("e8", "汇总分析透视降级", 4),
+])
+
+_NCRE_PAPER03_PPT_METRICS = _ncre_metrics([
+    ("p1", "课件合并与双主题", 3),
+    ("p2", "物质的状态新页", 3),
+    ("p3", "蒸发沸腾异同表格页", 3),
+    ("p4", "内部超链接", 4),
+    ("p5", "编号与页脚", 3),
+    ("p6", "幻灯片切换", 2),
+    ("p7", "文件名", 2),
+])
+
+_NCRE_PAPER02_WORD_INSTRUCTION = (
+    f"{exam_data_paper02.EXAM_NAME}Word 操作题（30 分）。工作区已提供海报文稿素材 WORD.docx"
+    "（第1页竖版海报文字，第2页活动细则与日程安排）。请完成以下操作：\n"
+    "1. 第1页设置自定义纸张：宽 27 厘米、高 35 厘米；页边距上、下各 5 厘米，左、右各 3 厘米。"
+    "在“主办：校学工处”段后插入分页符使第2页单独成页，第2页纸张设为 A4 横向、普通页边距。\n"
+    "2. 为文档设置页面背景纯色填充，颜色值 #FFF2CC（原卷要求插入背景图片，因素材缺失降级为纯色填充）。\n"
+    "3. 文字格式：主标题“领慧讲堂”为微软雅黑、62 磅、红色；“就业讲座”为黑体、小初（36 磅）、深蓝色；"
+    "报告题目、报告人等明细行为华文行楷、二号（22 磅）、白色；第2页标题为黑体、二号、居中。\n"
+    "4. 主标题与第2页标题居中对齐；第1页各明细段落设置段前、段后间距各 0.5 行。\n"
+    "5. 在第1页“报告人：”后输入 赵蕈。\n"
+    "6. 在第2页插入 4 行 3 列日程安排表：首行标题为 时间、主题、报告人；数据行依次为 "
+    "18:30-19:00 签到（报告人为空）、19:00-19:20 大学生职场定位和职业准备 王老师、"
+    "19:20-21:10 大学生人生规划 特约专家、21:10-21:30 现场提问 王老师。\n"
+    "7. 将报名流程以编号列表呈现：学工处报名、确认坐席、领取资料、领取门票（原卷 SmartArt 流程图降级为编号列表）。\n"
+    "8. 报告人介绍段设置两端对齐与首行缩进 2 字符（原卷首字下沉降级为普通段落）。\n"
+    "完成后保存 WORD.docx。"
+)
+
+_NCRE_PAPER02_EXCEL_INSTRUCTION = (
+    f"{exam_data_paper02.EXAM_NAME}Excel 操作题（30 分）。工作区已提供 Excel.xlsx"
+    "（单个工作表“成绩表”：A 列学号、B 列姓名、C 列班级待填、D~J 列为语文、数学、英语、物理、化学、生物、政治 "
+    "7 科成绩，第 1 行表头，第 2~13 行共 12 名学生数据）与参考数据 成绩单.csv。请完成：\n"
+    "1. 将学号列设为文本格式；7 科成绩列与平均分列数字格式设为保留两位小数（0.00）。\n"
+    "2. 条件格式：语文、数学、英语三列，单元格值大于等于 110 时填充浅红色（如 FFC7CE）；"
+    "物理、化学、生物、政治四列，单元格值大于 95 时字体设为蓝色（如 0000FF）。\n"
+    "3. K 列用 SUM 公式计算每位学生 7 科总分（K2:K13）；L 列用 AVERAGE 公式计算平均分（L2:L13，两位小数格式）。\n"
+    "4. C 列班级用文本函数从学号第 3、4 位提取并拼接“班”字（如 =TEXT(MID(A2,3,2),\"0\")&\"班\"），结果为 1班/2班/3班。\n"
+    "5. 复制“成绩表”为新工作表并重命名为含“分类汇总”的名称（如“成绩单分类汇总”），将该表标签颜色设为蓝色（如 0070C0），"
+    "并按班级分类汇总计算每班每科平均分（每班一个分组）。\n"
+    "6. 新建工作表“柱状分析图”，插入簇状柱形图：分类（X轴）为 7 个科目，数据系列为 3 个班级的各科平均分（取自分类汇总结果）。\n"
+    "评分以单元格计算值与工作簿结构为准。完成后保存 Excel.xlsx。"
+)
+
+_NCRE_PAPER02_PPT_INSTRUCTION = (
+    f"{exam_data_paper02.EXAM_NAME}PowerPoint 操作题（20 分）。工作区已提供素材文档 水资源素材大纲.docx"
+    "（含“水的知识、水的应用、节水工作”三大板块多级大纲）。请新建演示文稿并保存为 水资源利用与节水.pptx，要求：\n"
+    "1. 应用一个非默认主题。\n"
+    "2. 第1张为“标题幻灯片”版式：主标题 水资源利用与节水，副标题或正文含制作单位 北京节水展馆 与制作日期（如 2013年5月18日）。\n"
+    "3. 共不少于 5 张幻灯片（建议 6 张），按素材大纲顺序覆盖三大板块：水的知识、水的应用、节水工作，内容取材于素材大纲。\n"
+    "4. 全套幻灯片至少使用 3 种不同版式（如标题幻灯片、标题和内容、两栏内容、仅标题）。\n"
+    "5. 至少插入 2 张图片（占位图即可）与 2 个超链接（可链接本文档其它幻灯片或外部网址）。\n"
+    "完成后保存 水资源利用与节水.pptx。"
+)
+
+_NCRE_PAPER03_WORD_INSTRUCTION = (
+    f"{exam_data_paper03.EXAM_NAME}Word 操作题（30 分）。工作区已提供素材 年报.docx"
+    "（《2012年北京市政府信息公开工作年度报告》长文档）与 咨询情况表.csv。请完成以下操作：\n"
+    "1. 删除文档中汉字与西文、数字之间的半角空格（如“1085 条”改为“1085条”）。\n"
+    "2. 页面设置为 16 开纸张：宽 18.4 厘米、高 26 厘米；页边距上 3.2 厘米、下 3 厘米、左右各 2.5 厘米。\n"
+    "3. 封面（报告标题、“北京市统计局　国家统计局北京调查总队”、“二〇一三年三月”三段）独占一页且标题居中。\n"
+    "4. 将咨询情况的蓝色文字段转换为 4 行 3 列表格：表头 咨询方式/人次/所占比例(%)，数据行 现场咨询 93 5.04、"
+    "电话咨询 1515 82.07、网上咨询 238 12.89、合计 1846 100（与 咨询情况表.csv 一致）；套用内置表格样式，"
+    "并在表格后插入饼图（分类为咨询方式、数值为人次数、数据标签仅显示百分比）。\n"
+    "5. 将“一、二、……”开头的段落设为标题 1 样式，“（一）（二）……”开头的段落设为标题 2 样式，"
+    "“1、2、……”开头的段落设为标题 3 样式。\n"
+    "6. 将引言中红色文字“统计局队政府网站”设为超链接，指向 http://www.bjstats.gov.cn/，"
+    "并在该处添加脚注（注释文字：北京市统计局、国家统计局北京调查总队官方网站）。\n"
+    "7. 除封面与目录页外，正文设置为两栏。\n"
+    "8. 在封面与正文之间插入目录域（含 1-3 级标题）。\n"
+    "9. 正文部分设置奇偶页不同页眉：奇数页页码靠右、偶数页页码靠左，页眉含页码域。\n"
+    "完成后保存 年报.docx。"
+)
+
+_NCRE_PAPER03_EXCEL_INSTRUCTION = (
+    f"{exam_data_paper03.EXAM_NAME}Excel 操作题（30 分）。工作区已提供素材 第五次普查数据.csv 与 第六次普查数据.csv"
+    "（各 31 个地区，列：地区/人口数(人)/比重(%)）。请新建工作簿保存为 Excel.xlsx，完成：\n"
+    "1. 创建“第五次普查数据”与“第六次普查数据”两个工作表，分别从两份 CSV 导入数据（首行为表头，自 A1 开始，"
+    "不改变原行序），并为两表数据区域套用内置表格样式（创建含标题行的表格对象，样式使偶数行带底纹）。\n"
+    "2. 两表人口数列数字格式设为千分位整数（#,##0）。\n"
+    "3. 新建工作表“比较数据”合并两次普查数据：A1 为列标题 地区，31 个地区按地区名升序排列，"
+    "其后依次为 2000年人口数、2000年比重(%)、2010年人口数、2010年比重(%)。\n"
+    "4. 在“比较数据”表新增两列：人口增长数（=2010年人口数−2000年人口数）、"
+    "比重变化（=2010年比重−2000年比重，百分点，保留两位小数）。\n"
+    "5. 新建工作表“统计指标”，包含五项统计：地区数、2000年全国合计人口数、2010年全国合计人口数、"
+    "2010年人口超过 5000 万的地区数、上述地区 2010 年人口平均数（建议用 COUNT/AVERAGEIF 等公式实现）。\n"
+    "6. 新建工作表“透视分析”：提取 2010 年人口数大于 5000 万的地区，按 2010 年人口数降序排列，"
+    "列出 地区、2010年人口数、2010年比重(%)、人口增长数（原卷数据透视表降级为扁平汇总）。\n"
+    "评分以单元格计算值为准，全国合计口径为 31 地区人口求和。完成后保存 Excel.xlsx。"
+)
+
+_NCRE_PAPER03_PPT_INSTRUCTION = (
+    f"{exam_data_paper03.EXAM_NAME}PowerPoint 操作题（20 分）。工作区已提供两个课件片段 第1-2节.pptx 与 第3-5节.pptx"
+    "（北师大版八年级上册 第一章 物态及其变化，两份课件主题不同）。请整合为一份完整课件并保存为 物理课件.pptx，要求：\n"
+    "1. 将两个课件的全部 6 页按顺序合并（第1-3页来自第1-2节，第4-6页来自第3-5节），"
+    "保留各页版式与主题归属（整合后需引用 2 个不同的幻灯片母版/主题）。\n"
+    "2. 在第 3 张之后插入一张“仅标题”版式幻灯片，标题为 物质的状态（插入后为第 4 张）。\n"
+    "3. 在第 6 张之后插入一张“标题和内容”版式幻灯片，标题为 蒸发和沸腾的异同点（插入后为第 7 张），"
+    "内容区放置 4 行 3 列对比表：表头 项目/蒸发/沸腾；数据行 发生部位（液体表面/液体内部和表面同时）、"
+    "温度条件（任何温度/达到沸点）、剧烈程度（缓慢/剧烈）。\n"
+    "4. 在第 4 张添加文字“返回第2节熔化和凝固”并设置超链接到第 3 张幻灯片；"
+    "在第 7 张添加文字“返回第4节升华和凝华”并设置超链接到第 6 张幻灯片。\n"
+    "5. 除第 1 张外为其余幻灯片添加幻灯片编号，并为所有幻灯片设置页脚文字 第一章 物态及其变化。\n"
+    "6. 为所有幻灯片设置同一种切换方式。\n"
+    "7. 最终共 9 张幻灯片（第 9 张可为 谢谢观看 结束页）。\n"
+    "完成后保存 物理课件.pptx。"
+)
+
+_NCRE_OPERATION_LIMITS = {
+    "max_steps": 40,
+    "timeout_seconds": 2700,
+    "validator_timeout_seconds": 300,
+    "token_budget": 60000,
+    "network": "disabled",
+    "docker_image": "agentbench/office-validator:1.0",
+}
+
+
+_NCRE_SECTION_PLAN = {
+    "choice": (20, 15),
+    "word": (30, 35),
+    "excel": (30, 35),
+    "ppt": (20, 30),
+}
+
+_NCRE_PAPER_SPECS: list[dict[str, Any]] = [
+    {
+        "paper_no": "01",
+        "exam_paper": "2016-03-paper-01",
+        "exam_name": EXAM_NAME,
+        "source_summary": SOURCE_SUMMARY,
+        "choice_questions": CHOICE_QUESTIONS,
+        "instructions": {
+            "word": _NCRE_WORD_INSTRUCTION,
+            "excel": _NCRE_EXCEL_INSTRUCTION,
+            "ppt": _NCRE_PPT_INSTRUCTION,
+        },
+        "metrics": {
+            "word": _NCRE_PAPER01_WORD_METRICS,
+            "excel": _NCRE_PAPER01_EXCEL_METRICS,
+            "ppt": _NCRE_PAPER01_PPT_METRICS,
+        },
+        "judges": {
+            "choice": "judge_choice.py",
+            "word": "judge_word.py",
+            "excel": "judge_excel.py",
+            "ppt": "judge_ppt.py",
+        },
+        "initial_files": {
+            "word": {
+                "Word.docx": "base64:" + blobs.WORD_DOCX_B64,
+                "通讯录.csv": blobs.CONTACTS_CSV,
+            },
+            "excel": {"Excel.xlsx": "base64:" + blobs.EXCEL_XLSX_B64},
+            "ppt": {"图书策划案.docx": "base64:" + blobs.PPT_SOURCE_DOCX_B64},
+        },
+        "file_checks": {
+            "choice": [("answers.json", 5)],
+            "word": [("Word-邀请函.docx", 3), ("Word.docx", 2)],
+            "excel": [("Excel.xlsx", 5)],
+            "ppt": [("PowerPoint.pptx", 5)],
+        },
+        "titles": {
+            "choice": (
+                "NCRE二级MS Office真题卷1 · 选择题（20题）",
+                "NCRE 二级 MS Office 高级应用 2016年3月真题第1套选择题部分，答案写入 answers.json。",
+            ),
+            "word": (
+                "NCRE二级MS Office真题卷1 · Word 邀请函排版与合并",
+                "对邀请函草稿完成页面、字体、段落格式设置，并生成等价邮件合并文档 Word-邀请函.docx。",
+            ),
+            "excel": (
+                "NCRE二级MS Office真题卷1 · Excel 图书销售统计",
+                "对订单明细套用表格与货币格式、VLOOKUP 填充与小计公式，并在统计报告计算四项统计值。",
+            ),
+            "ppt": (
+                "NCRE二级MS Office真题卷1 · PowerPoint 图书策划案改造",
+                "将多级标题素材文档改造为 7 页演示文稿：版式、主题、表格、SmartArt 与自定义放映。",
+            ),
+        },
+    },
+    {
+        "paper_no": "02",
+        "exam_paper": "classic-set2-paper-02",
+        "exam_name": exam_data_paper02.EXAM_NAME,
+        "source_summary": exam_data_paper02.SOURCE_SUMMARY,
+        "choice_questions": exam_data_paper02.CHOICE_QUESTIONS,
+        "instructions": {
+            "word": _NCRE_PAPER02_WORD_INSTRUCTION,
+            "excel": _NCRE_PAPER02_EXCEL_INSTRUCTION,
+            "ppt": _NCRE_PAPER02_PPT_INSTRUCTION,
+        },
+        "metrics": {
+            "word": _NCRE_PAPER02_WORD_METRICS,
+            "excel": _NCRE_PAPER02_EXCEL_METRICS,
+            "ppt": _NCRE_PAPER02_PPT_METRICS,
+        },
+        "judges": {
+            "choice": "judge_choice_paper02.py",
+            "word": "judge_word_paper02.py",
+            "excel": "judge_excel_paper02.py",
+            "ppt": "judge_ppt_paper02.py",
+        },
+        "initial_files": {
+            "word": {"WORD.docx": "base64:" + blobs_paper02.PAPER02_WORD_DOCX_B64},
+            "excel": {
+                "Excel.xlsx": "base64:" + blobs_paper02.PAPER02_EXCEL_XLSX_B64,
+                "成绩单.csv": blobs_paper02.PAPER02_GRADES_CSV,
+            },
+            "ppt": {"水资源素材大纲.docx": "base64:" + blobs_paper02.PAPER02_PPT_SOURCE_DOCX_B64},
+        },
+        "file_checks": {
+            "choice": [("answers.json", 5)],
+            "word": [("WORD.docx", 5)],
+            "excel": [("Excel.xlsx", 5)],
+            "ppt": [("水资源利用与节水.pptx", 5)],
+        },
+        "titles": {
+            "choice": (
+                "NCRE二级MS Office真题卷2 · 选择题（20题）",
+                "NCRE 二级 MS Office 高级应用经典题库第2套选择题部分，答案写入 answers.json。",
+            ),
+            "word": (
+                "NCRE二级MS Office真题卷2 · Word 领慧讲堂海报制作",
+                "对海报素材完成双页纸张、背景、文字格式设置，并插入日程表与报名流程列表。",
+            ),
+            "excel": (
+                "NCRE二级MS Office真题卷2 · Excel 学生成绩单统计",
+                "对成绩单完成格式与条件格式、总分平均分、班级提取、分类汇总与柱状图分析。",
+            ),
+            "ppt": (
+                "NCRE二级MS Office真题卷2 · PowerPoint 水资源利用与节水",
+                "根据素材大纲新建节水科普演示文稿：主题、标题页、多版式、图片与超链接。",
+            ),
+        },
+    },
+    {
+        "paper_no": "03",
+        "exam_paper": "classic-set4-paper-03",
+        "exam_name": exam_data_paper03.EXAM_NAME,
+        "source_summary": exam_data_paper03.SOURCE_SUMMARY,
+        "choice_questions": exam_data_paper03.CHOICE_QUESTIONS,
+        "instructions": {
+            "word": _NCRE_PAPER03_WORD_INSTRUCTION,
+            "excel": _NCRE_PAPER03_EXCEL_INSTRUCTION,
+            "ppt": _NCRE_PAPER03_PPT_INSTRUCTION,
+        },
+        "metrics": {
+            "word": _NCRE_PAPER03_WORD_METRICS,
+            "excel": _NCRE_PAPER03_EXCEL_METRICS,
+            "ppt": _NCRE_PAPER03_PPT_METRICS,
+        },
+        "judges": {
+            "choice": "judge_choice_paper03.py",
+            "word": "judge_word_paper03.py",
+            "excel": "judge_excel_paper03.py",
+            "ppt": "judge_ppt_paper03.py",
+        },
+        "initial_files": {
+            "word": {
+                "年报.docx": "base64:" + blobs_paper03.PAPER03_REPORT_DOCX_B64,
+                "咨询情况表.csv": blobs_paper03.PAPER03_CONSULT_CSV,
+            },
+            "excel": {
+                "第五次普查数据.csv": blobs_paper03.PAPER03_CENSUS_2000_CSV,
+                "第六次普查数据.csv": blobs_paper03.PAPER03_CENSUS_2010_CSV,
+            },
+            "ppt": {
+                "第1-2节.pptx": "base64:" + blobs_paper03.PAPER03_COURSEWARE_A_PPTX_B64,
+                "第3-5节.pptx": "base64:" + blobs_paper03.PAPER03_COURSEWARE_B_PPTX_B64,
+            },
+        },
+        "file_checks": {
+            "choice": [("answers.json", 5)],
+            "word": [("年报.docx", 5)],
+            "excel": [("Excel.xlsx", 5)],
+            "ppt": [("物理课件.pptx", 5)],
+        },
+        "titles": {
+            "choice": (
+                "NCRE二级MS Office真题卷3 · 选择题（20题）",
+                "NCRE 二级 MS Office 高级应用经典题库第4套选择题部分，答案写入 answers.json。",
+            ),
+            "word": (
+                "NCRE二级MS Office真题卷3 · Word 统计工作年报排版",
+                "对年报长文档完成封面、标题样式、目录、表格与饼图、分栏与页眉页脚排版。",
+            ),
+            "excel": (
+                "NCRE二级MS Office真题卷3 · Excel 人口普查数据整合",
+                "导入两次普查分地区数据，完成表格化、合并比较、统计指标与降序榜分析。",
+            ),
+            "ppt": (
+                "NCRE二级MS Office真题卷3 · PowerPoint 物理课件整合",
+                "将两个不同主题的课件片段合并为 9 页课件：新增页、对比表、内部超链接与页脚。",
+            ),
+        },
+    },
+]
+
+
+def _build_ncre_paper_cases(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    paper_no = spec["paper_no"]
+    choice_judge = spec["judges"]["choice"]
+    cases: list[dict[str, Any]] = []
+    title, description = spec["titles"]["choice"]
+    cases.append(
+        {
+            "slug": f"ncre.office.paper{paper_no}.choice",
+            "version": "1.0.0",
+            "category": "office-exam",
+            "title": title,
+            "description": description,
+            "instruction": _ncre_choice_instruction(spec["exam_name"], spec["choice_questions"]),
+            "tools": ["filesystem"],
+            "limits": {
+                "max_steps": 12,
+                "timeout_seconds": 900,
+                "token_budget": 16000,
+                "docker_image": "agentbench/office-validator:1.0",
+            },
+            "validators": [
+                _validator(
+                    "command_metrics",
+                    90,
+                    command=f"python {{private_root}}/{choice_judge}",
+                    metrics=_ncre_metrics(
+                        [(f"q{i:02d}", f"选择题 {i:02d}", 1) for i in range(1, 21)]
+                    ),
+                    private_files={choice_judge: _ncre_judge(choice_judge)},
+                ),
+                _validator("file_exists", 5, path="answers.json"),
+                _validator("forbidden_paths", 5, paths=["../**"]),
+            ],
+            "tags": ["ncre", "office-exam", "choice"],
+            "initial_files": {},
+            "metadata": _ncre_metadata(
+                "choice", 20, 15, spec["exam_paper"], spec["source_summary"]
+            ),
+        }
+    )
+    for section, tag in (("word", "word"), ("excel", "excel"), ("ppt", "powerpoint")):
+        judge = spec["judges"][section]
+        validators: list[dict[str, Any]] = [
+            _validator(
+                "command_metrics",
+                90,
+                command=f"python {{private_root}}/{judge}",
+                metrics=spec["metrics"][section],
+                private_files={judge: _ncre_judge(judge)},
+            ),
+        ]
+        validators.extend(
+            _validator("file_exists", weight, path=path)
+            for path, weight in spec["file_checks"][section]
+        )
+        validators.append(_validator("forbidden_paths", 5, paths=["../**"]))
+        title, description = spec["titles"][section]
+        exam_points, estimated_minutes = _NCRE_SECTION_PLAN[section]
+        cases.append(
+            {
+                "slug": f"ncre.office.paper{paper_no}.{section}",
+                "version": "1.0.0",
+                "category": "office-exam",
+                "title": title,
+                "description": description,
+                "instruction": spec["instructions"][section],
+                "tools": ["filesystem", "shell"],
+                "limits": dict(_NCRE_OPERATION_LIMITS),
+                "validators": validators,
+                "tags": ["ncre", "office-exam", tag],
+                "initial_files": spec["initial_files"][section],
+                "metadata": _ncre_metadata(
+                    section, exam_points, estimated_minutes, spec["exam_paper"], spec["source_summary"]
+                ),
+            }
+        )
+    return cases
+
+
+def _build_ncre_office_cases() -> list[dict[str, Any]]:
+    cases: list[dict[str, Any]] = []
+    for spec in _NCRE_PAPER_SPECS:
+        cases.extend(_build_ncre_paper_cases(spec))
+    return cases
 
 
 def build_catalog() -> list[dict[str, Any]]:
@@ -189,6 +766,11 @@ def build_catalog() -> list[dict[str, Any]]:
     cases.extend(_build_advanced_coding_cases())
     cases.extend(_build_security_cases())
     cases.extend(_build_planning_cases())
+    from .v3_catalog import upgrade_v3_cases
+
+    cases = upgrade_v3_cases(cases)
+    # NCRE 二级真题卷追加在末尾，避免影响上方基于索引的套件切片。
+    cases.extend(_build_ncre_office_cases())
     return cases
 
 
@@ -2427,15 +3009,12 @@ def seed_builtin_data(database: Database) -> None:
             QODER_RUNNER_ID,
             "Qoder CLI",
             "qoder_cli",
-            "qodercli",
+            "qoderclicn",
             [
                 "--print",
                 "--output-format",
                 "json",
-                "--mode",
-                "agent",
-                "--workspace",
-                "{workspace}",
+                "--dangerously-skip-permissions",
                 "{prompt}",
             ],
             "",
@@ -2566,6 +3145,85 @@ def seed_builtin_data(database: Database) -> None:
     reasoning_focus = base_case_ids[25:50]
     planning_focus = base_case_ids[185:200]
     coding_focus = base_case_ids[150:170]
+    slug_to_case_id = {
+        definition["slug"]: case_id for definition, case_id in zip(cases, case_ids, strict=True)
+    }
+
+    def _ncre_paper_members(paper_no: str) -> list[str]:
+        return [
+            slug_to_case_id[f"ncre.office.paper{paper_no}.{section}"]
+            for section in ("choice", "word", "excel", "ppt")
+        ]
+
+    def _case_needs_docker(definition: dict[str, Any]) -> bool:
+        limits = definition.get("limits") or {}
+        if limits.get("docker_image"):
+            return True
+        return any(
+            validator.get("type") in {"command", "command_metrics"}
+            for validator in definition.get("validators") or []
+        )
+
+    def _select_gauntlet_members() -> list[str]:
+        d5_ids: list[str] = []
+        d4_buckets: dict[str, list[str]] = {
+            category: []
+            for category in ("data-analysis", "agentic-workflow", "security", "reasoning")
+        }
+        for definition, case_id in zip(base_cases, base_case_ids, strict=True):
+            if definition["category"] == "office-exam":
+                continue
+            difficulty = (definition.get("metadata") or {}).get("difficulty")
+            if difficulty == 5:
+                d5_ids.append(case_id)
+            elif difficulty == 4:
+                bucket = d4_buckets.get(definition["category"])
+                if bucket is not None:
+                    bucket.append(case_id)
+        members = list(d5_ids)
+        for category, quota in (
+            ("data-analysis", 4),
+            ("agentic-workflow", 2),
+            ("security", 1),
+            ("reasoning", 1),
+        ):
+            members.extend(d4_buckets[category][:quota])
+        return members
+
+    def _select_gauntlet_lite_members() -> list[str]:
+        # 免 Docker 池按域配额抽取；V3 规划使用内置约束验证器，无需 Docker。
+        # reasoning 取 20、planning/knowledge-work 各取 15，保持 50 题高难快速摸底。
+        buckets: dict[str, list[str]] = {
+            category: []
+            for category in ("reasoning", "planning", "knowledge-work", "agentic-workflow")
+        }
+        for definition, case_id in zip(base_cases, base_case_ids, strict=True):
+            metadata = definition.get("metadata") or {}
+            if int(metadata.get("difficulty") or 0) < 4:
+                continue
+            if definition["category"] == "office-exam" or _case_needs_docker(definition):
+                continue
+            bucket = buckets.get(definition["category"])
+            if bucket is not None:
+                bucket.append(case_id)
+        members: list[str] = []
+        for category, quota in (
+            ("reasoning", 20),
+            ("planning", 15),
+            ("knowledge-work", 15),
+            ("agentic-workflow", 7),
+        ):
+            members.extend(buckets[category][:quota])
+        return members
+
+    gauntlet_members = _select_gauntlet_members()
+    gauntlet_docker_count = sum(
+        _case_needs_docker(definition)
+        for definition, case_id in zip(base_cases, base_case_ids, strict=True)
+        if case_id in set(gauntlet_members)
+    )
+    gauntlet_lite_members = _select_gauntlet_lite_members()
+
     suites = [
         (FULL_SUITE_ID, "AgentBench V1 完整基准", "100 个四领域基础测试", "1.0.0", base_case_ids[:100]),
         (
@@ -2599,7 +3257,7 @@ def seed_builtin_data(database: Database) -> None:
         (
             V2_FULL_SUITE_ID,
             "AgentBench V2 全量基准",
-            "200 个从基础稳定性到前沿 Agent 能力的完整分层测试",
+            "212 个从基础稳定性到前沿 Agent 能力的完整分层测试",
             "2.0.0",
             base_case_ids,
         ),
@@ -2630,6 +3288,49 @@ def seed_builtin_data(database: Database) -> None:
             "20 道纯编码题：多文件业务规则实现、边界处理与自动化验证",
             "2.4.1",
             coding_focus,
+        ),
+        (
+            NCRE_OFFICE_SUITE_ID,
+            "NCRE二级 MS Office 真题卷1",
+            "NCRE 二级 MS Office 高级应用 2016年3月真题第1套：选择题 + Word/Excel/PowerPoint 操作题",
+            "2.5.0",
+            _ncre_paper_members("01"),
+        ),
+        (
+            NCRE_OFFICE_PAPER02_SUITE_ID,
+            "NCRE二级 MS Office 真题卷2",
+            "NCRE 二级 MS Office 高级应用经典题库第2套（多期无纸化考试流转使用，重构版）："
+            "选择题 + Word/Excel/PowerPoint 操作题，需 Docker",
+            "2.5.0",
+            _ncre_paper_members("02"),
+        ),
+        (
+            NCRE_OFFICE_PAPER03_SUITE_ID,
+            "NCRE二级 MS Office 真题卷3",
+            "NCRE 二级 MS Office 高级应用经典题库第4套（多期无纸化考试流转使用，重构版）："
+            "选择题 + Word/Excel/PowerPoint 操作题，需 Docker",
+            "2.5.0",
+            _ncre_paper_members("03"),
+        ),
+        (
+            GAUNTLET_SUITE_ID,
+            "高难快速摸底",
+            f"{len(gauntlet_members)} 道难度 5 为主、难度 4 补足的高难快速摸底：覆盖 reasoning、"
+            "planning、knowledge-work、software-engineering、security、data-analysis、"
+            f"agentic-workflow 七域；基础指令与工具域无高难题故不覆盖；含 {gauntlet_docker_count} "
+            "道需 Docker 题；适合新发布大模型快速测水平",
+            "2.6.0",
+            gauntlet_members,
+        ),
+        (
+            GAUNTLET_LITE_SUITE_ID,
+            "高难快速摸底 · 免 Docker",
+            f"{len(gauntlet_lite_members)} 道难度≥4 且完全免 Docker 的高难快速摸底：覆盖 "
+            "reasoning、planning、knowledge-work 三域（software-engineering、security、"
+            "data-analysis 与高难 agentic-workflow 依赖 Docker，基础指令与工具域无高难题，"
+            "故均不覆盖）；适合新发布大模型在无 Docker 环境下快速测水平",
+            "3.0.0",
+            gauntlet_lite_members,
         ),
     ]
     for suite_id, name, description, version, members in suites:

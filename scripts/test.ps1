@@ -3,7 +3,8 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $projectRoot
 & ".venv\Scripts\python.exe" -m ruff check backend
 if ($LASTEXITCODE -ne 0) { throw "Ruff failed with exit code $LASTEXITCODE" }
-& ".venv\Scripts\python.exe" -m pytest backend
+$pytestBaseTemp = Join-Path $projectRoot (".pytest-tmp\release-" + $PID)
+& ".venv\Scripts\python.exe" -m pytest backend --basetemp $pytestBaseTemp
 if ($LASTEXITCODE -ne 0) { throw "Pytest failed with exit code $LASTEXITCODE" }
 
 $node = Get-Command node -ErrorAction SilentlyContinue

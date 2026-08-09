@@ -1,5 +1,5 @@
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:43765/api/v1";
-export const APP_VERSION = "2.4.1";
+export const APP_VERSION = "3.0.0";
 
 let compatibleBackend = false;
 let compatibilityCheck: Promise<void> | null = null;
@@ -49,6 +49,20 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(response.status, body.detail ?? "请求失败");
   }
   if (response.status === 204) return undefined as T;
+  return response.json() as Promise<T>;
+}
+
+export async function apiUpload<T>(path: string, body: BodyInit, contentType: string): Promise<T> {
+  await ensureCompatibleBackend();
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": contentType },
+    body,
+  });
+  if (!response.ok) {
+    const value = await response.json().catch(() => ({ detail: response.statusText })) as { detail?: string };
+    throw new ApiError(response.status, value.detail ?? "上传失败");
+  }
   return response.json() as Promise<T>;
 }
 

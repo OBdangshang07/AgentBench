@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import keyword
 import math
 import re
 import shutil
@@ -20,6 +21,8 @@ QUALITY_WEIGHT = 94.0
 TIME_WEIGHT = 3.0
 STEP_WEIGHT = 2.0
 TOKEN_WEIGHT = 1.0
+CURRENT_SCORING_PROFILE = "balanced-v3"
+SUPPORTED_SCORING_PROFILES = {"balanced-v2", CURRENT_SCORING_PROFILE}
 
 
 @dataclass(slots=True)
@@ -57,7 +60,10 @@ class ScoringEngine:
         tokens_input: int,
         tokens_output: int,
         judge_callback: JudgeCallback | None = None,
+        scoring_profile: str = CURRENT_SCORING_PROFILE,
     ) -> ScoreResult:
+        if scoring_profile not in SUPPORTED_SCORING_PROFILES:
+            raise ValueError(f"Unsupported scoring profile: {scoring_profile}")
         results: list[ValidationResult] = []
         for validator_index, validator in enumerate(definition.get("validators") or []):
             kind = str(validator["type"])
@@ -80,6 +86,12 @@ class ScoringEngine:
                 produced = self._validate_command_metrics(
                     weight, config, workspace, definition
                 )
+            elif kind == "symbolic_json":
+                produced = [
+                    self._validate_symbolic_json(weight, config, final_answer, workspace)
+                ]
+            elif kind == "constraint_plan":
+                produced = self._validate_constraint_plan(weight, config, workspace)
             else:
                 produced = [
                     self._validate(kind, weight, config, final_answer, workspace, definition)
@@ -100,7 +112,7 @@ class ScoringEngine:
                 item.evidence = {
                     **item.evidence,
                     "declared_weight": item.weight,
-                    "scoring_profile": "balanced-v2",
+                    "scoring_profile": scoring_profile,
                 }
                 item.weight = round(item.weight * quality_scale, 4)
 
@@ -130,7 +142,7 @@ class ScoringEngine:
                     "note": "超过建议时间后继续运行，仅按对数曲线轻微扣分"
                     if time_ratio > 1.0
                     else "在建议时间内完成",
-                    "scoring_profile": "balanced-v2",
+                    "scoring_profile": scoring_profile,
                 },
             )
         )
@@ -148,7 +160,7 @@ class ScoringEngine:
                     "steps": max(0, steps),
                     "max_steps": max_steps,
                     "budget_used_percent": round(step_ratio * 100, 2),
-                    "scoring_profile": "balanced-v2",
+                    "scoring_profile": scoring_profile,
                 },
             )
         )
@@ -182,11 +194,11 @@ class ScoringEngine:
                     "note": None
                     if tokens_reported
                     else "Token 未上报或任务未声明预算，使用中性分",
-                    "scoring_profile": "balanced-v2",
+                    "scoring_profile": scoring_profile,
                 },
             )
         )
-        dimensions = self._dimensions(results)
+        dimensions = self._dimensions(results, scoring_profile)
         if any(item.status == "environment_unavailable" for item in results):
             return ScoreResult(None, "environment_unavailable", results, dimensions)
         if any(item.status == "needs_review" for item in results):
@@ -324,6 +336,318 @@ class ScoringEngine:
             WorkspaceViolation,
         ) as exc:
             return ValidationResult(kind, weight, 0, "failed", {"error": str(exc)})
+
+    def _validate_symbolic_json(
+        self,
+        weight: float,
+        config: dict[str, Any],
+        final_answer: str,
+        workspace: Workspace,
+    ) -> ValidationResult:
+        try:
+            import sympy
+            from sympy import E, cos, exp, log, pi, simplify, sin, sqrt, symbols
+
+            path = config.get("path")
+            raw = workspace.read_file(str(path)).lstrip("\ufeff") if path else final_answer
+            actual = json.loads(raw)
+            fields = config.get("fields") or {}
+            if not isinstance(actual, dict) or not isinstance(fields, dict) or not fields:
+                raise ValueError("symbolic_json requires a JSON object and field specifications")
+            allowed_functions = {
+                "sin": sin,
+                "cos": cos,
+                "exp": exp,
+                "log": log,
+                "ln": log,
+                "sqrt": sqrt,
+                "pi": pi,
+                "E": E,
+            }
+            field_scores: dict[str, float] = {}
+            field_evidence: dict[str, Any] = {}
+            weighted_total = 0.0
+            declared_total = 0.0
+            for dotted_path, raw_spec in fields.items():
+                spec = raw_spec if isinstance(raw_spec, dict) else {"expected": raw_spec}
+                field_weight = max(0.0, float(spec.get("weight", 1)))
+                declared_total += field_weight
+                value: Any = actual
+                try:
+                    for part in str(dotted_path).split("."):
+                        value = value[int(part)] if isinstance(value, list) else value[part]
+                except (KeyError, IndexError, TypeError, ValueError):
+                    field_scores[str(dotted_path)] = 0.0
+                    field_evidence[str(dotted_path)] = {"reason": "missing"}
+                    continue
+                expected = spec.get("expected")
+                kind = str(spec.get("kind", "literal"))
+                if kind == "expression":
+                    variables = [str(item) for item in spec.get("variables") or ["x"]]
+                    symbol_values = symbols(" ".join(variables), real=True)
+                    if not isinstance(symbol_values, tuple):
+                        symbol_values = (symbol_values,)
+                    local_dict = {
+                        **allowed_functions,
+                        **dict(zip(variables, symbol_values, strict=True)),
+                    }
+                    keyword_aliases = {
+                        name: f"agentbench_variable_{index}"
+                        for index, name in enumerate(variables)
+                        if keyword.iskeyword(name)
+                    }
+                    parse_locals = {
+                        **local_dict,
+                        **{
+                            alias: local_dict[name]
+                            for name, alias in keyword_aliases.items()
+                        },
+                    }
+
+                    def parse_expression(
+                        candidate: Any,
+                        allowed_locals=local_dict,
+                        aliases=keyword_aliases,
+                        parser_locals=parse_locals,
+                    ):
+                        text = str(candidate).strip().replace("^", "**")
+                        if len(text) > 2000 or "__" in text or "." in text:
+                            raise ValueError("unsafe symbolic expression")
+                        names = set(re.findall(r"[A-Za-z][A-Za-z0-9]*", text))
+                        if not names.issubset(allowed_locals):
+                            raise ValueError(
+                                f"unsupported symbolic names: {sorted(names - set(allowed_locals))}"
+                            )
+                        for name, alias in aliases.items():
+                            text = re.sub(rf"\b{re.escape(name)}\b", alias, text)
+                        return sympy.sympify(text, locals=parser_locals)
+
+                    candidate_expr = parse_expression(value)
+                    expected_expr = parse_expression(expected)
+                    equivalent = simplify(candidate_expr - expected_expr) == 0
+                    method = "symbolic_simplify"
+                    if not equivalent:
+                        comparisons = 0
+                        equivalent = True
+                        for sample_index, base in enumerate([0.17, 0.43, 0.91, 1.37, 2.11]):
+                            substitutions = {
+                                symbol: base + position * 0.31 + sample_index * 0.07
+                                for position, symbol in enumerate(symbol_values)
+                            }
+                            try:
+                                delta = complex(
+                                    (candidate_expr - expected_expr).evalf(
+                                        40, subs=substitutions
+                                    )
+                                )
+                            except (TypeError, ValueError, ZeroDivisionError):
+                                continue
+                            if not math.isfinite(delta.real) or not math.isfinite(delta.imag):
+                                continue
+                            comparisons += 1
+                            if abs(delta) > 1e-9:
+                                equivalent = False
+                                break
+                        equivalent = equivalent and comparisons >= 3
+                        method = "private_numeric_sampling"
+                    score = 100.0 if equivalent else 0.0
+                    field_evidence[str(dotted_path)] = {
+                        "equivalent": equivalent,
+                        "method": method,
+                        "variables": variables,
+                    }
+                else:
+                    normalized_actual = str(value).strip().casefold()
+                    accepted = [expected, *(spec.get("accepted") or [])]
+                    equivalent = normalized_actual in {
+                        str(item).strip().casefold() for item in accepted
+                    }
+                    score = 100.0 if equivalent else 0.0
+                    field_evidence[str(dotted_path)] = {"matched": equivalent}
+                field_scores[str(dotted_path)] = score
+                weighted_total += score * field_weight
+            score = weighted_total / declared_total if declared_total else 0.0
+            return self._graded(
+                "symbolic_json",
+                weight,
+                score,
+                {"field_scores": field_scores, "field_evidence": field_evidence},
+            )
+        except (ImportError, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+            return self._graded("symbolic_json", weight, 0.0, {"error": str(exc)})
+
+    def _validate_constraint_plan(
+        self,
+        weight: float,
+        config: dict[str, Any],
+        workspace: Workspace,
+    ) -> list[ValidationResult]:
+        metric_specs = [
+            ("coverage", "计划覆盖与接口", 10.0),
+            ("dependencies", "依赖时序", 20.0),
+            ("resources", "资源容量", 20.0),
+            ("budget_deadline", "预算、期限与发布窗口", 20.0),
+            ("safety_controls", "人工兜底与回滚", 15.0),
+            ("objective_quality", "可计算方案质量", 15.0),
+        ]
+        scores = {key: 0.0 for key, _name, _metric_weight in metric_specs}
+        details: dict[str, Any] = {}
+        try:
+            plan_path = str(config.get("path") or "deliverables/plan.json")
+            scenario_path = str(config.get("scenario_path") or "scenario.json")
+            plan = json.loads(workspace.read_file(plan_path).lstrip("\ufeff"))
+            scenario = json.loads(workspace.read_file(scenario_path).lstrip("\ufeff"))
+            task_specs = {str(item["id"]): item for item in scenario["tasks"]}
+            if not isinstance(plan, dict) or not task_specs:
+                raise ValueError("invalid constraint plan payload")
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            details["bootstrap"] = {"error": str(exc)}
+            plan = {}
+            scenario = {}
+            task_specs = {}
+
+        scheduled: dict[str, dict[str, Any]] = {}
+        try:
+            if plan.get("scenario_id") != scenario.get("scenario_id"):
+                raise ValueError("scenario id mismatch")
+            raw_tasks = plan.get("tasks")
+            if not isinstance(raw_tasks, list) or len(raw_tasks) != len(task_specs):
+                raise ValueError("task coverage mismatch")
+            for item in raw_tasks:
+                if not isinstance(item, dict) or set(item) != {"id", "mode", "start"}:
+                    raise ValueError("each scheduled task must contain id, mode and start")
+                task_id = str(item["id"])
+                if task_id not in task_specs or task_id in scheduled:
+                    raise ValueError("unknown or duplicate task")
+                mode_name = str(item["mode"])
+                mode = task_specs[task_id]["modes"][mode_name]
+                if type(item["start"]) is not int or item["start"] < 0:
+                    raise ValueError("start must be a non-negative integer")
+                duration = int(mode["duration"])
+                scheduled[task_id] = {
+                    **item,
+                    "duration": duration,
+                    "cost": int(mode["cost"]),
+                    "finish": int(item["start"]) + duration,
+                }
+            if set(scheduled) != set(task_specs):
+                raise ValueError("not all tasks are scheduled")
+            scores["coverage"] = 100.0
+            details["coverage"] = {"scheduled_tasks": len(scheduled)}
+        except (KeyError, TypeError, ValueError) as exc:
+            details["coverage"] = {"error": str(exc)}
+
+        try:
+            if set(scheduled) != set(task_specs):
+                raise ValueError("coverage must pass before dependency validation")
+            for task_id, item in scheduled.items():
+                for dependency in task_specs[task_id].get("depends_on") or []:
+                    if item["start"] < scheduled[str(dependency)]["finish"]:
+                        raise ValueError(f"{task_id} starts before dependency {dependency}")
+            scores["dependencies"] = 100.0
+            details["dependencies"] = {"valid": True}
+        except (KeyError, TypeError, ValueError) as exc:
+            details["dependencies"] = {"error": str(exc)}
+
+        try:
+            if set(scheduled) != set(task_specs):
+                raise ValueError("coverage must pass before resource validation")
+            capacities = {
+                str(name): int(value)
+                for name, value in scenario["resource_capacity"].items()
+            }
+            makespan = max(item["finish"] for item in scheduled.values())
+            peak = {name: 0 for name in capacities}
+            for moment in range(makespan):
+                used = {name: 0 for name in capacities}
+                for task_id, item in scheduled.items():
+                    if item["start"] <= moment < item["finish"]:
+                        for resource, amount in task_specs[task_id]["resources"].items():
+                            used[str(resource)] += int(amount)
+                for name, capacity in capacities.items():
+                    peak[name] = max(peak[name], used[name])
+                    if used[name] > capacity:
+                        raise ValueError(f"{name} exceeds capacity at {moment}")
+            scores["resources"] = 100.0
+            details["resources"] = {"peak": peak}
+        except (KeyError, TypeError, ValueError) as exc:
+            details["resources"] = {"error": str(exc)}
+
+        try:
+            total_cost = sum(item["cost"] for item in scheduled.values())
+            makespan = max(item["finish"] for item in scheduled.values())
+            rollout = scheduled["H"]
+            rollout_window = scenario["rollout_window"]
+            if total_cost > int(scenario["budget"]):
+                raise ValueError("budget exceeded")
+            if makespan > int(scenario["deadline"]):
+                raise ValueError("deadline exceeded")
+            if rollout["start"] < int(rollout_window["earliest_start"]):
+                raise ValueError("rollout starts before its window")
+            if rollout["finish"] > int(rollout_window["latest_finish"]):
+                raise ValueError("rollout finishes after its window")
+            scores["budget_deadline"] = 100.0
+            details["budget_deadline"] = {"cost": total_cost, "makespan": makespan}
+        except (KeyError, TypeError, ValueError) as exc:
+            details["budget_deadline"] = {"error": str(exc)}
+
+        try:
+            rollback = plan["rollback"]
+            requirements = scenario["requirements"]
+            if rollback.get("human_override") is not True:
+                raise ValueError("human override is required")
+            if not 0 < int(rollback["max_minutes"]) <= int(
+                requirements["rollback_minutes_max"]
+            ):
+                raise ValueError("rollback time exceeds the limit")
+            if len(str(rollback["owner"]).strip()) < 3:
+                raise ValueError("rollback owner is missing")
+            if len(str(rollback["trigger"]).strip()) < 20:
+                raise ValueError("rollback trigger is not actionable")
+            contingencies = plan["contingencies"]
+            if not isinstance(contingencies, list) or len(contingencies) < int(
+                requirements["minimum_contingencies"]
+            ):
+                raise ValueError("insufficient contingencies")
+            if any(len(str(item).strip()) < 25 for item in contingencies):
+                raise ValueError("contingencies are too vague")
+            scores["safety_controls"] = 100.0
+            details["safety_controls"] = {"contingencies": len(contingencies)}
+        except (KeyError, TypeError, ValueError) as exc:
+            details["safety_controls"] = {"error": str(exc)}
+
+        try:
+            makespan = max(item["finish"] for item in scheduled.values())
+            total_cost = sum(item["cost"] for item in scheduled.values())
+            reserve = int(scenario["budget"]) - total_cost
+            tradeoffs = plan["tradeoffs"]
+            if makespan > 16 or reserve < 4:
+                raise ValueError("plan misses the calibrated quality frontier")
+            if not isinstance(tradeoffs, list) or len(tradeoffs) < 2:
+                raise ValueError("tradeoffs are missing")
+            if any(len(str(item).strip()) < 30 for item in tradeoffs):
+                raise ValueError("tradeoffs are too vague")
+            scores["objective_quality"] = 100.0
+            details["objective_quality"] = {
+                "makespan": makespan,
+                "budget_reserve": reserve,
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            details["objective_quality"] = {"error": str(exc)}
+
+        return [
+            ValidationResult(
+                name,
+                weight * metric_weight / 100.0,
+                scores[key],
+                "passed" if scores[key] == 100 else "failed",
+                {
+                    "metric_key": key,
+                    "detail": details.get(key) or details.get("bootstrap"),
+                },
+            )
+            for key, name, metric_weight in metric_specs
+        ]
 
     def _command_result(
         self,
@@ -612,7 +936,9 @@ class ScoringEngine:
         return 0.0
 
     @staticmethod
-    def _dimensions(results: list[ValidationResult]) -> list[ValidationResult]:
+    def _dimensions(
+        results: list[ValidationResult], scoring_profile: str
+    ) -> list[ValidationResult]:
         groups = {
             "objective_quality": [
                 item
@@ -657,7 +983,7 @@ class ScoringEngine:
                     {
                         "components": [item.validator_type for item in items],
                         "contribution": round(score * weight / 100.0, 2),
-                        "scoring_profile": "balanced-v2",
+                        "scoring_profile": scoring_profile,
                     },
                 )
             )

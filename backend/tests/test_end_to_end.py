@@ -29,7 +29,11 @@ def test_mock_experiment_runs_to_completion(settings, suite_id, expected_count):
             )
         )
         service.start_experiment(experiment["id"])
-        deadline = time.monotonic() + 15
+        # The 20-case suite normally needs around 20 seconds including worker
+        # scheduling on Windows, and can be slower while the full suite is
+        # competing for CPU and disk. Keep this as a bounded completion check
+        # without making the release gate sensitive to normal host load.
+        deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             current = service.get_experiment(experiment["id"])
             if current["status"] == "completed":

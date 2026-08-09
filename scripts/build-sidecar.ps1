@@ -9,6 +9,11 @@ if (-not (Test-Path $packagingPython)) {
   $packagingPython = ".venv\Scripts\python.exe"
 }
 
+& $packagingPython -m pip install ".\backend"
+if ($LASTEXITCODE -ne 0) {
+  throw "Backend dependency installation failed with exit code $LASTEXITCODE"
+}
+
 & $packagingPython -m PyInstaller `
   --noconfirm `
   --clean `
@@ -16,6 +21,7 @@ if (-not (Test-Path $packagingPython)) {
   --name $sidecarName `
   --collect-all keyring `
   --collect-all uvicorn `
+  --add-data "backend\agentbench\ncre_assets;agentbench\ncre_assets" `
   ".\backend\agentbench_entry.py"
 if ($LASTEXITCODE -ne 0) {
   throw "PyInstaller failed with exit code $LASTEXITCODE"

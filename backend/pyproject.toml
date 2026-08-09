@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentbench-desktop-backend"
-version = "2.3.0"
+version = "3.0.0"
 description = "Local AgentBench Desktop API, agent runtime and scoring service"
 requires-python = ">=3.11,<3.15"
 dependencies = [
@@ -15,7 +15,9 @@ dependencies = [
   "PyYAML>=6.0,<7",
   "jsonschema>=4.23,<5",
   "keyring>=25.6,<26",
-  "platformdirs>=4.3,<5"
+  "platformdirs>=4.3,<5",
+  "sympy>=1.13,<2",
+  "pypdf>=5.1,<6"
 ]
 
 [project.optional-dependencies]
@@ -24,7 +26,10 @@ dev = [
   "pytest-asyncio>=0.25,<1",
   "pytest-cov>=6,<7",
   "ruff>=0.9,<1",
-  "pyinstaller>=6.11,<7"
+  "pyinstaller>=6.11,<7",
+  "openpyxl>=3.1,<4",
+  "python-docx>=1.1,<2",
+  "python-pptx>=1.0,<2"
 ]
 
 [project.scripts]

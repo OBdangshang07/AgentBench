@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 
-export function useApi<T>(path: string | null, refreshMs?: number) {
+export function useApi<T>(path: string | null, refreshMs?: number | ((data: T | null) => number | undefined)) {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(Boolean(path));
   const [error, setError] = useState<string | null>(null);
@@ -19,12 +19,14 @@ export function useApi<T>(path: string | null, refreshMs?: number) {
     }
   }, [path]);
 
+  const interval = typeof refreshMs === "function" ? refreshMs(data) : refreshMs;
+
   useEffect(() => {
     void refresh();
-    if (!refreshMs || !path) return;
-    const handle = window.setInterval(() => void refresh(), refreshMs);
+    if (!interval || !path) return;
+    const handle = window.setInterval(() => void refresh(), interval);
     return () => window.clearInterval(handle);
-  }, [path, refresh, refreshMs]);
+  }, [path, refresh, interval]);
 
   return { data, loading, error, refresh, setData };
 }

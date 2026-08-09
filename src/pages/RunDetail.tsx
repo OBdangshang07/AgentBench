@@ -1,11 +1,15 @@
 import { useState, type FormEvent } from "react";
-import { ArrowLeft, Box, Clock3, Coins, FileCode2, Footprints, RefreshCw, Sparkles, Target, Terminal, Timer, Waypoints } from "lucide-react";
+import { ArrowLeft, Box, Clock3, Coins, Copy, FileCode2, FileDown, FileText, FolderOpen, Footprints, RefreshCw, Sparkles, Target, Terminal, Timer, Waypoints } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { api, downloadUrl } from "../lib/api";
+import { copyText } from "../lib/clipboard";
 import { formatDate, formatDuration, formatNumber } from "../lib/format";
+import { openFolder } from "../lib/openPath";
 import { useApi } from "../lib/useApi";
+import { useRunEvents } from "../lib/useRunEvents";
 import type { RunDetail } from "../types";
 import { Button, Card, ErrorBlock, Field, LoadingBlock, Modal, PageHeader, Score, StatusBadge } from "../components/ui";
+import { LiveRunSession } from "../components/LiveRunView";
 
 const eventNames: Record<string, string> = {
   "run.started": "运行开始",
@@ -46,6 +50,7 @@ const validatorNames: Record<string, string> = {
   file_contains: "文件关键内容",
   forbidden_paths: "安全边界",
   command: "隐藏命令验证",
+  command_metrics: "要点验证",
   ai_rubric: "匿名裁判",
   time_efficiency: "完成时效",
   step_efficiency: "步骤效率",
@@ -53,14 +58,30 @@ const validatorNames: Record<string, string> = {
   efficiency: "旧版步骤效率",
 };
 
+const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "cancelled", "needs_review", "environment_unavailable", "interrupted"]);
+
 export default function RunDetailPage() {
   const { runId = "" } = useParams();
-  const state = useApi<RunDetail>(`/runs/${runId}`, 2_000);
+  const state = useApi<RunDetail>(`/runs/${runId}`, (run) => (run && TERMINAL_RUN_STATUSES.has(run.status) ? 0 : 2_000));
+  const active = Boolean(state.data && !TERMINAL_RUN_STATUSES.has(state.data.status));
+  const live = useRunEvents(runId, state.data?.events ?? [], active);
   const [reviewing, setReviewing] = useState(false);
+  const [workspaceHint, setWorkspaceHint] = useState("");
+  function flashWorkspaceHint(text: string) {
+    setWorkspaceHint(text);
+    window.setTimeout(() => setWorkspaceHint(""), 1800);
+  }
   async function retry() { await api(`/runs/${runId}/retry`, { method: "POST" }); await state.refresh(); }
   if (state.loading) return <LoadingBlock />;
   if (state.error || !state.data) return <ErrorBlock message={state.error ?? "运行不存在"} retry={() => void state.refresh()} />;
   const run = state.data;
+  if (active) return <div className="page live-run-page">
+    <Link to={`/experiments/${run.experiment_id}`} className="back-link"><ArrowLeft size={16} /> 返回实验直播</Link>
+    <LiveRunSession run={run} events={live.events} streamState={live.streamState} />
+  </div>;
+  const questionInstruction = run.test_definition?.instruction?.trim() ? run.test_definition.instruction : "";
+  const questionMaterials = run.materials ?? [];
+  const showQuestion = Boolean(questionInstruction) || questionMaterials.length > 0;
   const dimensions = run.score_dimensions ?? [];
   const objective = dimensions.find((item) => item.dimension === "objective_quality");
   const time = dimensions.find((item) => item.dimension === "time_efficiency");
@@ -82,6 +103,11 @@ export default function RunDetailPage() {
         <Card><span>执行耗时</span><strong>{formatDuration(run.duration_ms)}</strong><small><Timer size={13} /> {run.steps} 个 Agent 步骤</small></Card>
         <Card><span>Token / 费用</span><strong>{formatNumber(run.tokens_input + run.tokens_output)}</strong><small>${Number(run.cost_usd ?? 0).toFixed(5)} · {costNote}</small></Card>
       </div>
+      {showQuestion && <Card className="run-question-card">
+        <div className="card-header"><div><span className="section-kicker">EXAM QUESTION</span><h2>题目</h2></div><FileText size={18} /></div>
+        {questionInstruction && <pre className="run-question-instruction">{questionInstruction}</pre>}
+        {questionMaterials.length > 0 && <div className="artifact-list">{questionMaterials.map((material) => <a key={material.name} href={downloadUrl(`/runs/${run.id}/materials/${encodeURIComponent(material.name)}`)}><FileDown size={16} /><div><strong>{material.name}</strong><span>{formatNumber(material.size_bytes)} bytes</span></div></a>)}</div>}
+      </Card>}
       {dimensions.length > 0 && <Card className="score-composition-card">
         <div className="card-header"><div><span className="section-kicker">BALANCED SCORE</span><h2>综合评分构成</h2></div><small>质量 94% · 时间 3% · 步骤 2% · Token 1%</small></div>
         <div className="score-dimension-grid">
@@ -115,6 +141,19 @@ export default function RunDetailPage() {
           <div className="timeline">{run.events.map((event) => <div className="timeline-event" key={event.id}><div className="timeline-dot" /><div className="timeline-card"><header><strong>{eventNames[event.event_type] ?? event.event_type}</strong><span>#{event.seq}</span></header><pre>{JSON.stringify(event.payload, null, 2)}</pre></div></div>)}</div>
         </Card>
         <div className="detail-side">
+          <Card className="workspace-path-card">
+            <div className="card-header"><div><span className="section-kicker">WORKSPACE</span><h2>工作区</h2></div><FolderOpen size={18} /></div>
+            <div className="workspace-card-body">
+              {run.workspace_path
+                ? <code className="workspace-path-value" title={run.workspace_path}>{run.workspace_path}</code>
+                : <span className="workspace-path-value workspace-empty">尚未创建</span>}
+              <div className="workspace-actions">
+                {run.workspace_path && <Button variant="secondary" onClick={() => { void copyText(run.workspace_path!).then((ok) => flashWorkspaceHint(ok ? "已复制" : "复制失败")); }}><Copy size={13} /> 复制</Button>}
+                {run.workspace_path && <Button variant="secondary" onClick={() => { void openFolder(run.workspace_path!).then((ok) => { if (!ok) flashWorkspaceHint("当前环境不支持打开文件夹，可复制路径手动访问"); }); }}>打开</Button>}
+                {workspaceHint && <em className="copy-hint">{workspaceHint}</em>}
+              </div>
+            </div>
+          </Card>
           <Card>
             <div className="card-header"><div><span className="section-kicker">SCORE EVIDENCE</span><h2>评分证据</h2></div></div>
             <div className="validator-list">{run.validators.map((validator) => <div className="validator-card" key={validator.id}><div><span className="validator-label">{validatorNames[validator.validator_type] ?? validator.validator_type}</span><Score value={validator.score} /></div><div className="weight-bar"><i style={{ width: `${validator.score}%` }} /></div><small>权重 {validator.weight.toFixed(1)}% · {validator.status === "partial" ? "部分达成" : validator.status}</small><details><summary>查看评分证据</summary><pre>{JSON.stringify(validator.evidence, null, 2)}</pre></details></div>)}</div>

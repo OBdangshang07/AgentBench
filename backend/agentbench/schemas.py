@@ -101,6 +101,8 @@ class TestCaseImport(BaseModel):
     validators: list[dict[str, Any]]
     rubric: dict[str, Any] | None = None
     tags: list[str] = Field(default_factory=list)
+    # initial_files values are UTF-8 text, except values prefixed with "base64:"
+    # which are decoded as raw bytes (used for binary assets like .docx/.xlsx/.pptx).
     initial_files: dict[str, str] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -113,6 +115,11 @@ class ManualScoreUpdate(BaseModel):
 class AppSettingUpdate(BaseModel):
     judge_model_id: str | None = None
     judge_runner_id: str | None = None
+    judge_model_id_secondary: str | None = None
+    judge_runner_id_secondary: str | None = None
+    judge_model_id_tiebreaker: str | None = None
+    judge_runner_id_tiebreaker: str | None = None
+    judge_disagreement_threshold: float | None = Field(default=None, ge=0, le=100)
     allow_native_cli: bool | None = None
     default_concurrency: int | None = Field(default=None, ge=1, le=8)
     default_max_runtime_seconds: int | None = Field(default=None, ge=0, le=86400)

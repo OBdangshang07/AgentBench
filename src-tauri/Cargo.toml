@@ -1,6 +1,6 @@
 [package]
 name = "agentbench-desktop"
-version = "2.4.1"
+version = "3.0.0"
 description = "Local AI Agent evaluation desktop client"
 authors = ["AgentBench"]
 edition = "2021"
@@ -14,6 +14,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
 
 [profile.release]
 panic = "abort"
