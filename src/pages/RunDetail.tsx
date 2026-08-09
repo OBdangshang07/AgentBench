@@ -1,172 +1,116 @@
 import { useState, type FormEvent } from "react";
-import { ArrowLeft, Box, Clock3, Coins, Copy, FileCode2, FileDown, FileText, FolderOpen, Footprints, RefreshCw, Sparkles, Target, Terminal, Timer, Waypoints } from "lucide-react";
-import { Link, useParams } from "react-router-dom";
+import { ArrowLeft, ChevronLeft, ChevronRight, Copy, FileCode2, FileDown, FileText, FolderOpen, RefreshCw } from "lucide-react";
+import { Link, useLocation, useParams } from "react-router-dom";
+import { BroadcastFrame } from "../components/BroadcastFrame";
+import { LiveRunSession } from "../components/LiveRunView";
+import { Button, ErrorBlock, Field, LoadingBlock, Modal } from "../components/ui";
 import { api, downloadUrl } from "../lib/api";
 import { copyText } from "../lib/clipboard";
-import { formatDate, formatDuration, formatNumber } from "../lib/format";
+import { formatDuration, formatNumber } from "../lib/format";
 import { openFolder } from "../lib/openPath";
 import { useApi } from "../lib/useApi";
 import { useRunEvents } from "../lib/useRunEvents";
-import type { RunDetail } from "../types";
-import { Button, Card, ErrorBlock, Field, LoadingBlock, Modal, PageHeader, Score, StatusBadge } from "../components/ui";
-import { LiveRunSession } from "../components/LiveRunView";
-
-const eventNames: Record<string, string> = {
-  "run.started": "运行开始",
-  "run.environment_ready": "环境已准备",
-  "model.requested": "请求模型",
-  "model.responded": "模型响应",
-  "tool.requested": "调用工具",
-  "tool.completed": "工具完成",
-  "native_cli.started": "启动原生 Agent",
-  "native_cli.event": "Agent 事件",
-  "attempt.started": "挑战轮次开始",
-  "attempt.completed": "挑战轮次完成",
-  "attempt.retry_scheduled": "进入下一轮提示",
-  "run.validating": "开始验证",
-  "validator.completed": "验证器完成",
-  "artifact.created": "产物已记录",
-  "judge.completed": "裁判完成",
-  "run.completed": "运行完成",
-  "run.failed": "运行失败",
-};
-
-const dimensionMeta: Record<string, { label: string; description: string; icon: typeof Target }> = {
-  objective_quality: { label: "客观质量", description: "格式、内容、产物与隐藏验证", icon: Target },
-  judge_quality: { label: "匿名裁判", description: "Rubric 主观质量判断", icon: Sparkles },
-  time_efficiency: { label: "完成时效", description: "按本题时间预算归一化", icon: Clock3 },
-  step_efficiency: { label: "步骤效率", description: "按 Agent 最大步数归一化", icon: Footprints },
-  token_efficiency: { label: "Token 效率", description: "按本题 Token 预算归一化", icon: Coins },
-};
-
-const validatorNames: Record<string, string> = {
-  exact_match: "精确答案",
-  contains: "关键内容",
-  regex: "格式规则",
-  json_schema: "JSON 结构",
-  json_file: "JSON 产物",
-  file_exists: "文件存在",
-  file_content: "文件内容",
-  file_contains: "文件关键内容",
-  forbidden_paths: "安全边界",
-  command: "隐藏命令验证",
-  command_metrics: "要点验证",
-  ai_rubric: "匿名裁判",
-  time_efficiency: "完成时效",
-  step_efficiency: "步骤效率",
-  token_efficiency: "Token 效率",
-  efficiency: "旧版步骤效率",
-};
+import type { RunDetail, RunSummary, ScoreDimension } from "../types";
 
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "cancelled", "needs_review", "environment_unavailable", "interrupted"]);
 
+const eventNames: Record<string, string> = {
+  "run.started": "初始化隔离工作区", "run.environment_ready": "环境已准备", "model.requested": "请求模型", "model.responded": "模型响应", "tool.requested": "调用工具", "tool.completed": "工具完成", "native_cli.started": "启动原生 Agent", "native_cli.event": "Agent 事件", "attempt.started": "挑战轮次开始", "attempt.completed": "挑战轮次完成", "attempt.retry_scheduled": "进入下一轮提示", "run.validating": "开始验证", "validator.completed": "验证器完成", "artifact.created": "产物已记录", "judge.completed": "匿名裁判完成", "run.completed": "运行完成", "run.failed": "运行失败",
+};
+
+const dimensionNames: Record<string, { label: string; note: string }> = {
+  objective_quality: { label: "客观质量", note: "确定性与私有验证" }, judge_quality: { label: "匿名裁判", note: "Rubric 得分点" }, time_efficiency: { label: "时间效率", note: "及格线后轻量修正" }, step_efficiency: { label: "步骤效率", note: "轮次与工具调用" }, token_efficiency: { label: "Token 效率", note: "总上下文消耗" },
+};
+
+const validatorNames: Record<string, string> = {
+  exact_match: "精确答案", contains: "关键内容", regex: "格式规则", json_schema: "JSON 结构", json_file: "JSON 产物", symbolic_json: "结构化数学答案", file_exists: "文件存在", file_content: "文件内容", file_contains: "文件关键内容", forbidden_paths: "安全边界", command: "隐藏命令验证", command_metrics: "私有指标验证", ai_rubric: "匿名裁判", time_efficiency: "完成时效", step_efficiency: "步骤效率", token_efficiency: "Token 效率", efficiency: "旧版步骤效率",
+};
+
+function evidenceText(evidence: Record<string, unknown>) {
+  for (const key of ["summary", "reason", "detail", "message"]) {
+    const value = evidence[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  const visible = Object.entries(evidence).find(([, value]) => typeof value === "string" || typeof value === "number" || typeof value === "boolean");
+  return visible ? `${visible[0]} = ${String(visible[1])}` : "隐藏数据仅展示评分结论，不泄露答案";
+}
+
+function pickDimensions(dimensions: ScoreDimension[], run: RunDetail) {
+  const fallback: ScoreDimension[] = [
+    { id: "objective", dimension: "objective_quality", score: run.objective_score ?? run.score ?? 0, weight: 94, evidence: {} },
+    { id: "time", dimension: "time_efficiency", score: run.time_score ?? 100, weight: 3, evidence: {} },
+    { id: "step", dimension: "step_efficiency", score: run.step_score ?? 100, weight: 2, evidence: {} },
+    { id: "token", dimension: "token_efficiency", score: run.token_score ?? 100, weight: 1, evidence: {} },
+  ];
+  return (dimensions.length ? dimensions : fallback).slice(0, 4);
+}
+
 export default function RunDetailPage() {
   const { runId = "" } = useParams();
+  const location = useLocation();
   const state = useApi<RunDetail>(`/runs/${runId}`, (run) => (run && TERMINAL_RUN_STATUSES.has(run.status) ? 0 : 2_000));
+  const siblings = useApi<RunSummary[]>(state.data ? `/runs?experiment_id=${state.data.experiment_id}&limit=1000` : null, state.data && !TERMINAL_RUN_STATUSES.has(state.data.status) ? 2_000 : 0);
   const active = Boolean(state.data && !TERMINAL_RUN_STATUSES.has(state.data.status));
   const live = useRunEvents(runId, state.data?.events ?? [], active);
   const [reviewing, setReviewing] = useState(false);
   const [workspaceHint, setWorkspaceHint] = useState("");
-  function flashWorkspaceHint(text: string) {
-    setWorkspaceHint(text);
-    window.setTimeout(() => setWorkspaceHint(""), 1800);
-  }
   async function retry() { await api(`/runs/${runId}/retry`, { method: "POST" }); await state.refresh(); }
   if (state.loading) return <LoadingBlock />;
   if (state.error || !state.data) return <ErrorBlock message={state.error ?? "运行不存在"} retry={() => void state.refresh()} />;
   const run = state.data;
-  if (active) return <div className="page live-run-page">
-    <Link to={`/experiments/${run.experiment_id}`} className="back-link"><ArrowLeft size={16} /> 返回实验直播</Link>
-    <LiveRunSession run={run} events={live.events} streamState={live.streamState} />
-  </div>;
-  const questionInstruction = run.test_definition?.instruction?.trim() ? run.test_definition.instruction : "";
-  const questionMaterials = run.materials ?? [];
-  const showQuestion = Boolean(questionInstruction) || questionMaterials.length > 0;
-  const dimensions = run.score_dimensions ?? [];
-  const objective = dimensions.find((item) => item.dimension === "objective_quality");
-  const time = dimensions.find((item) => item.dimension === "time_efficiency");
-  const finalAttempt = run.attempts?.at(-1);
-  const costNote = run.cost_source === "reported"
-    ? "Agent 实际上报"
-    : run.cost_source === "configured"
-      ? "按模型单价估算"
-      : run.cost_source === "unpriced"
-        ? "已统计 Token，待配置单价"
-        : "Agent 未提供用量";
+  const routeState = location.state as { from?: string } | null;
+  const backTo = routeState?.from ?? `/experiments/${run.experiment_id}`;
+  const orderedSiblings = [...(siblings.data ?? [])].sort((left, right) => {
+    const leftNumber = Number(left.test_title.match(/第\s*(\d+)\s*题/)?.[1] ?? Number.MAX_SAFE_INTEGER);
+    const rightNumber = Number(right.test_title.match(/第\s*(\d+)\s*题/)?.[1] ?? Number.MAX_SAFE_INTEGER);
+    return leftNumber - rightNumber || left.created_at.localeCompare(right.created_at);
+  });
+  const siblingIndex = orderedSiblings.findIndex((item) => item.id === run.id);
+  const previousRun = siblingIndex > 0 ? orderedSiblings[siblingIndex - 1] : undefined;
+  const nextRun = siblingIndex >= 0 && siblingIndex < orderedSiblings.length - 1 ? orderedSiblings[siblingIndex + 1] : undefined;
+  const previousTo = previousRun ? `/runs/${previousRun.id}` : undefined;
+  const nextTo = nextRun ? `/runs/${nextRun.id}` : undefined;
+  if (active) return <BroadcastFrame backTo={backTo} previousTo={previousTo} nextTo={nextTo}><div className="live-run-page"><LiveRunSession run={run} events={live.events} streamState={live.streamState} /></div></BroadcastFrame>;
+
+  const dimensions = pickDimensions(run.score_dimensions ?? [], run);
+  const attempts = run.attempts?.length ? run.attempts : [];
+  const passedAttempt = attempts.find((item) => item.passed) ?? attempts.at(-1);
+  const eventTrace = run.events.filter((event) => ["run.started", "attempt.started", "attempt.completed", "attempt.retry_scheduled", "run.validating", "judge.completed", "run.completed", "run.failed"].includes(event.event_type)).slice(-6);
+  const questionInstruction = run.test_definition?.instruction?.trim() ?? "";
+  const materials = run.materials ?? [];
+  const showQuestion = Boolean(questionInstruction) || materials.length > 0;
+
+  function flash(text: string) { setWorkspaceHint(text); window.setTimeout(() => setWorkspaceHint(""), 1800); }
+
   return (
-    <div className="page">
-      <Link to={`/experiments/${run.experiment_id}`} className="back-link"><ArrowLeft size={16} /> 返回实验</Link>
-      <PageHeader eyebrow={`${run.model_name} × ${run.runner_name}`} title={run.test_title} description={`${run.category} · 第 ${run.repetition} 次运行 · ${formatDate(run.created_at)}`} actions={<><Button variant="ghost" onClick={() => setReviewing(true)}>人工复核</Button><Button variant="secondary" onClick={() => void retry()}><RefreshCw size={15} /> 重试运行</Button></>} />
-      <div className="run-overview run-detail-overview">
-        <Card><span>最终状态</span><StatusBadge status={run.status} /><small>{run.error_code ?? (run.passed === false ? "三轮内未达到及格线" : "流程完整")}</small></Card>
-        <Card><span>综合得分</span><Score value={run.score} large /><small>{objective ? `质量 ${objective.score.toFixed(1)} · 时效 ${time?.score.toFixed(1) ?? "—"}${finalAttempt && finalAttempt.multiplier < 1 ? ` · 轮次 ×${finalAttempt.multiplier.toFixed(2)}` : ""}` : `${run.validators.length} 个评分分量`}</small></Card>
-        <Card><span>执行耗时</span><strong>{formatDuration(run.duration_ms)}</strong><small><Timer size={13} /> {run.steps} 个 Agent 步骤</small></Card>
-        <Card><span>Token / 费用</span><strong>{formatNumber(run.tokens_input + run.tokens_output)}</strong><small>${Number(run.cost_usd ?? 0).toFixed(5)} · {costNote}</small></Card>
-      </div>
-      {showQuestion && <Card className="run-question-card">
-        <div className="card-header"><div><span className="section-kicker">EXAM QUESTION</span><h2>题目</h2></div><FileText size={18} /></div>
-        {questionInstruction && <pre className="run-question-instruction">{questionInstruction}</pre>}
-        {questionMaterials.length > 0 && <div className="artifact-list">{questionMaterials.map((material) => <a key={material.name} href={downloadUrl(`/runs/${run.id}/materials/${encodeURIComponent(material.name)}`)}><FileDown size={16} /><div><strong>{material.name}</strong><span>{formatNumber(material.size_bytes)} bytes</span></div></a>)}</div>}
-      </Card>}
-      {dimensions.length > 0 && <Card className="score-composition-card">
-        <div className="card-header"><div><span className="section-kicker">BALANCED SCORE</span><h2>综合评分构成</h2></div><small>质量 94% · 时间 3% · 步骤 2% · Token 1%</small></div>
-        <div className="score-dimension-grid">
-          {dimensions.map((dimension) => {
-            const meta = dimensionMeta[dimension.dimension] ?? { label: dimension.dimension, description: "评分维度", icon: Target };
-            const Icon = meta.icon;
-            const contribution = dimension.score * dimension.weight / 100;
-            return <div className={`score-dimension score-dimension-${dimension.dimension}`} key={dimension.id}>
-              <div className="score-dimension-icon"><Icon size={17} /></div><div><span>{meta.label}</span><strong>{dimension.score.toFixed(1)}</strong><small>{meta.description}</small></div><div className="score-contribution"><b>+{contribution.toFixed(2)}</b><small>权重 {dimension.weight.toFixed(1)}%</small></div>
-            </div>;
-          })}
-        </div>
-        <div className="score-method-note"><Sparkles size={15} /><span>效率只做轻量区分；即使速度最快、Token 最少，也无法弥补质量失败。Token 未可靠上报时使用中性分，避免统计口径差异造成虚假优势。</span></div>
-      </Card>}
-      {Boolean(run.attempts?.length) && <Card className="attempt-history-card">
-        <div className="card-header"><div><span className="section-kicker">ULTRA ATTEMPTS</span><h2>挑战轮次</h2></div><small>工作区连续保留 · 环境错误不消耗能力机会</small></div>
-        <div className="attempt-grid">
-          {run.attempts.map((attempt) => <div className={`attempt-card ${attempt.passed ? "attempt-passed" : ""}`} key={attempt.id}>
-            <header><div><span>第 {attempt.attempt_no} 轮</span><strong>×{attempt.multiplier.toFixed(2)}</strong></div><StatusBadge status={attempt.passed ? "passed" : attempt.status} /></header>
-            <div className="attempt-score-line"><div><span>原始分</span><Score value={attempt.raw_score} /></div><div><span>计入分</span><Score value={attempt.adjusted_score} /></div></div>
-            <small>{formatDuration(attempt.duration_ms)} · {attempt.steps} 步 · {formatNumber(attempt.tokens_input + attempt.tokens_output)} Token</small>
-            {attempt.error_message && <p className="attempt-error">{attempt.error_code} · {attempt.error_message}</p>}
-            {attempt.attempt_no > 1 && <details><summary>查看本轮分级提示</summary><pre>{attempt.prompt}</pre></details>}
-          </div>)}
-        </div>
-      </Card>}
-      {run.error_message && <div className="error-banner"><strong>{run.error_code}</strong><span>{run.error_message}</span></div>}
-      <div className="run-detail-grid">
-        <Card>
-          <div className="card-header"><div><span className="section-kicker">TRACE</span><h2>Agent 轨迹</h2></div><Waypoints size={18} /></div>
-          <div className="timeline">{run.events.map((event) => <div className="timeline-event" key={event.id}><div className="timeline-dot" /><div className="timeline-card"><header><strong>{eventNames[event.event_type] ?? event.event_type}</strong><span>#{event.seq}</span></header><pre>{JSON.stringify(event.payload, null, 2)}</pre></div></div>)}</div>
-        </Card>
-        <div className="detail-side">
-          <Card className="workspace-path-card">
-            <div className="card-header"><div><span className="section-kicker">WORKSPACE</span><h2>工作区</h2></div><FolderOpen size={18} /></div>
-            <div className="workspace-card-body">
-              {run.workspace_path
-                ? <code className="workspace-path-value" title={run.workspace_path}>{run.workspace_path}</code>
-                : <span className="workspace-path-value workspace-empty">尚未创建</span>}
-              <div className="workspace-actions">
-                {run.workspace_path && <Button variant="secondary" onClick={() => { void copyText(run.workspace_path!).then((ok) => flashWorkspaceHint(ok ? "已复制" : "复制失败")); }}><Copy size={13} /> 复制</Button>}
-                {run.workspace_path && <Button variant="secondary" onClick={() => { void openFolder(run.workspace_path!).then((ok) => { if (!ok) flashWorkspaceHint("当前环境不支持打开文件夹，可复制路径手动访问"); }); }}>打开</Button>}
-                {workspaceHint && <em className="copy-hint">{workspaceHint}</em>}
-              </div>
-            </div>
-          </Card>
-          <Card>
-            <div className="card-header"><div><span className="section-kicker">SCORE EVIDENCE</span><h2>评分证据</h2></div></div>
-            <div className="validator-list">{run.validators.map((validator) => <div className="validator-card" key={validator.id}><div><span className="validator-label">{validatorNames[validator.validator_type] ?? validator.validator_type}</span><Score value={validator.score} /></div><div className="weight-bar"><i style={{ width: `${validator.score}%` }} /></div><small>权重 {validator.weight.toFixed(1)}% · {validator.status === "partial" ? "部分达成" : validator.status}</small><details><summary>查看评分证据</summary><pre>{JSON.stringify(validator.evidence, null, 2)}</pre></details></div>)}</div>
-          </Card>
-          <Card>
-            <div className="card-header"><div><span className="section-kicker">DELIVERABLES</span><h2>工作区产物</h2></div><Box size={18} /></div>
-            {run.artifacts.length ? <div className="artifact-list">{run.artifacts.map((artifact) => <a key={artifact.id} href={downloadUrl(`/runs/${run.id}/artifacts/${artifact.id}`)}><FileCode2 size={16} /><div><strong>{artifact.path}</strong><span>{formatNumber(artifact.size)} bytes</span></div></a>)}</div> : <div className="inline-empty">没有文件产物</div>}
-          </Card>
-          <Card>
-            <div className="card-header"><div><span className="section-kicker">FINAL</span><h2>最终回答</h2></div><Terminal size={18} /></div>
-            <pre className="final-answer">{run.final_answer || "没有最终文本回答"}</pre>
-          </Card>
-        </div>
+    <div className="ab-view ab-evidence-view">
+      <header className="ab-view-header">
+        <div className="ab-view-title"><span className="ab-view-index">04 / EVIDENCE</span><div><h1>证据账本</h1><p>从最终分数追溯到轮次、验证义务、裁判理由和工作区产物。</p></div></div>
+        <div className="ab-header-meta"><Link className="ab-ghost-button" to={backTo}><ArrowLeft size={13} />返回实验</Link><Link className={`ab-ghost-button${!previousTo ? " disabled" : ""}`} to={previousTo ?? backTo} state={{ from: backTo }} aria-disabled={!previousTo}><ChevronLeft size={13} />上一题</Link><Link className={`ab-ghost-button${!nextTo ? " disabled" : ""}`} to={nextTo ?? backTo} state={{ from: backTo }} aria-disabled={!nextTo}>下一题<ChevronRight size={13} /></Link><span className="ab-meta-pill">RUN / {run.id.slice(0, 8)}</span>{run.workspace_path && <button className="ab-ghost-button" type="button" onClick={() => void openFolder(run.workspace_path!)}><FolderOpen size={13} />打开工作区</button>}<a className="ab-ghost-button" href={downloadUrl(`/experiments/${run.experiment_id}/export?format=html`)}><FileDown size={13} />导出报告</a></div>
+      </header>
+
+      <div className="ab-run-layout">
+        <aside className="ab-attempt-pane">
+          <div className="ab-run-id"><code>{run.category.toUpperCase()} / {run.id.slice(0, 8).toUpperCase()}</code><h3>{run.test_title}</h3><span>{run.model_name} × {run.runner_name}</span></div>
+          <div className="ab-pane-label">ATTEMPT TRACE</div>
+          {attempts.length ? attempts.map((attempt) => <div className={`ab-attempt${attempt.passed ? " pass" : ""}`} key={attempt.id}><strong>ROUND {String(attempt.attempt_no).padStart(2, "0")}</strong><p>{attempt.attempt_no === 1 ? "原始题面与公开 checker" : `第 ${attempt.attempt_no} 轮分级提示，质量上限 ×${attempt.multiplier.toFixed(2)}`}</p><span>{attempt.adjusted_score?.toFixed(1) ?? "—"} · {attempt.passed ? "PASSED" : attempt.status.toUpperCase()}</span></div>) : <div className={`ab-attempt${run.passed ? " pass" : ""}`}><strong>ROUND 01</strong><p>单轮任务与公开题面</p><span>{run.score?.toFixed(1) ?? "—"} · {run.passed ? "PASSED" : run.status.toUpperCase()}</span></div>}
+          <div className="ab-outline-group"><div className="ab-pane-label">SECTIONS</div><button className="ab-outline-button active" type="button">评分构成</button><button className="ab-outline-button" type="button">验证义务</button><button className="ab-outline-button" type="button">执行事件</button><button className="ab-outline-button" type="button">产物与日志</button></div>
+          <div className="ab-attempt-actions"><button type="button" onClick={() => setReviewing(true)}>人工复核</button><button type="button" onClick={() => void retry()}><RefreshCw size={11} />重试运行</button><Link to={backTo}><ArrowLeft size={11} />返回实验</Link></div>
+        </aside>
+
+        <section className="ab-evidence-canvas">
+          <div className="ab-score-hero"><div><div className="ab-big-score"><strong>{run.score?.toFixed(1) ?? "—"}</strong><span>/ 100</span></div><div className="ab-score-caption"><b>第 {Math.max(1, passedAttempt?.attempt_no ?? run.attempt_count)} 轮{run.passed ? "通过" : "完成"}</b> · 原始质量 {passedAttempt?.raw_score?.toFixed(1) ?? run.objective_score?.toFixed(1) ?? "—"}{passedAttempt && passedAttempt.multiplier < 1 ? " · 轮次折扣后" : " · 证据已固化"}</div></div><div className="ab-score-stack">{dimensions.map((dimension) => { const meta = dimensionNames[dimension.dimension] ?? { label: dimension.dimension, note: "评分维度" }; return <div className="ab-score-part" key={dimension.id}><label>{meta.label} · {dimension.weight.toFixed(0)}%</label><strong>{dimension.score.toFixed(1)}</strong><small>{meta.note}</small><i className="ab-vertical-meter"><i style={{ height: `${Math.max(0, Math.min(100, dimension.score))}%` }} /></i></div>; })}</div></div>
+          <div className="ab-proof-ledger"><div className="ab-ledger-title"><h3>验证义务 / PROOF OBLIGATIONS</h3><span>隐藏数据仅展示摘要，不泄露答案</span></div>{run.validators.length ? run.validators.map((validator, index) => <div className="ab-proof-item" key={validator.id}><i className="ab-proof-index">{String(index + 1).padStart(2, "0")}</i><div className="ab-proof-copy"><strong>{validatorNames[validator.validator_type] ?? validator.validator_type}</strong><small>{evidenceText(validator.evidence)}</small></div><code className="ab-proof-evidence">status = {validator.status}</code><b className="ab-proof-score">{validator.score.toFixed(1)} / 100</b></div>) : <div className="ab-proof-empty">这条历史运行没有独立验证器记录，最终分数来自兼容评分路径。</div>}</div>
+          {showQuestion && <section className="ab-question-evidence"><div className="ab-ledger-title"><h3>题目 / <span>EXAM QUESTION</span></h3><span>本次运行收到的公开任务</span></div>{questionInstruction && <pre>{questionInstruction}</pre>}{materials.length > 0 && <div className="ab-materials">{materials.map((material) => <a key={material.name} href={downloadUrl(`/runs/${run.id}/materials/${encodeURIComponent(material.name)}`)}><FileText size={13} /><span>{material.name}</span><b>{formatNumber(material.size_bytes)} bytes</b></a>)}</div>}</section>}
+        </section>
+
+        <aside className="ab-context-pane">
+          <section className="ab-context-block"><label>EXECUTION COST</label><div className="ab-cost-grid"><div><span>总用时</span><strong>{formatDuration(run.duration_ms)}</strong></div><div><span>轮次</span><strong>{Math.max(1, run.attempt_count)} / {Math.max(1, attempts.length || run.attempt_count)}</strong></div><div><span>输入 Token</span><strong>{formatNumber(run.tokens_input)}</strong></div><div><span>输出 Token</span><strong>{formatNumber(run.tokens_output)}</strong></div></div></section>
+          <section className="ab-context-block"><label>EVENT TRACE</label>{eventTrace.length ? eventTrace.map((event) => <div className={`ab-context-event${event.event_type.includes("failed") || event.event_type.includes("retry") ? " warn" : ""}`} key={event.id}><strong>{eventNames[event.event_type] ?? event.event_type}</strong><span>{typeof event.payload.summary === "string" ? event.payload.summary : `EVENT #${event.seq}`}</span></div>) : <div className="ab-muted">没有结构化事件记录</div>}</section>
+          <section className="ab-context-block"><label>ARTIFACTS</label>{run.artifacts.length ? run.artifacts.slice(0, 6).map((artifact) => <a className="ab-artifact-row" key={artifact.id} href={downloadUrl(`/runs/${run.id}/artifacts/${artifact.id}`)}><FileCode2 size={13} /><span>{artifact.path} · {formatNumber(artifact.size)} B</span><b>查看</b></a>) : <div className="ab-muted">没有文件产物</div>}</section>
+          {run.final_answer && <section className="ab-context-block"><label>FINAL ANSWER</label><pre className="ab-final-answer">{run.final_answer}</pre></section>}
+          {run.workspace_path && <section className="ab-context-block"><label>WORKSPACE</label><code className="ab-workspace-path">{run.workspace_path}</code><button className="ab-mini-button wide" type="button" onClick={() => void copyText(run.workspace_path!).then((ok) => flash(ok ? "已复制" : "复制失败"))}><Copy size={11} />复制路径</button>{workspaceHint && <span className="ab-copy-hint">{workspaceHint}</span>}</section>}
+        </aside>
       </div>
       {reviewing && <ReviewModal runId={run.id} currentScore={run.score} onClose={() => setReviewing(false)} onSaved={() => { setReviewing(false); void state.refresh(); }} />}
     </div>
@@ -179,10 +123,8 @@ function ReviewModal({ runId, currentScore, onClose, onSaved }: { runId: string;
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError("");
     const form = new FormData(event.currentTarget);
-    try {
-      await api(`/runs/${runId}/manual-score`, { method: "POST", body: JSON.stringify({ score: Number(form.get("score")), reason: form.get("reason") }) });
-      onSaved();
-    } catch (value) { setError(value instanceof Error ? value.message : "复核保存失败"); setBusy(false); }
+    try { await api(`/runs/${runId}/manual-score`, { method: "POST", body: JSON.stringify({ score: Number(form.get("score")), reason: form.get("reason") }) }); onSaved(); }
+    catch (value) { setError(value instanceof Error ? value.message : "复核保存失败"); setBusy(false); }
   }
-  return <Modal title="人工复核评分" description="人工分数将作为显式覆盖记录写入审计日志，不会删除原验证证据。" onClose={onClose}><form className="form-grid one-column" onSubmit={(event) => void submit(event)}><Field label="最终分数"><input name="score" type="number" min="0" max="100" step="0.1" defaultValue={currentScore ?? 0} required /></Field><Field label="复核理由"><textarea name="reason" rows={5} minLength={3} required placeholder="说明为什么需要覆盖，以及依据了哪些证据。" /></Field>{error && <div className="form-error">{error}</div>}<div className="modal-actions"><Button type="button" variant="ghost" onClick={onClose}>取消</Button><Button type="submit" busy={busy}>保存复核</Button></div></form></Modal>;
+  return <Modal title="人工复核评分" description="人工分数将作为显式覆盖记录写入审计日志，不会删除原验证证据。" onClose={onClose}><form className="form-grid one-column" onSubmit={(event) => void submit(event)}><Field label="最终分数"><input name="score" type="number" min="0" max="100" step="0.1" defaultValue={currentScore ?? 0} required /></Field><Field label="复核理由"><textarea name="reason" rows={5} minLength={3} required placeholder="说明覆盖依据。" /></Field>{error && <div className="form-error">{error}</div>}<div className="modal-actions"><Button type="button" variant="ghost" onClick={onClose}>取消</Button><Button type="submit" busy={busy}>保存复核</Button></div></form></Modal>;
 }

@@ -8,8 +8,16 @@ export function useRunEvents(runId: string, initial: RunEvent[], active: boolean
   const [events, setEvents] = useState<RunEvent[]>(initial);
   const [streamState, setStreamState] = useState<StreamState>(active ? "connecting" : "idle");
   const cursor = useRef(initial.at(-1)?.seq ?? 0);
+  const currentRunId = useRef(runId);
 
   useEffect(() => {
+    if (currentRunId.current !== runId) {
+      currentRunId.current = runId;
+      cursor.current = initial.at(-1)?.seq ?? 0;
+      setEvents(initial);
+      setStreamState(active ? "connecting" : "idle");
+      return;
+    }
     setEvents((current) => {
       const merged = new Map(current.map((event) => [event.seq, event]));
       for (const event of initial) merged.set(event.seq, event);
@@ -20,7 +28,7 @@ export function useRunEvents(runId: string, initial: RunEvent[], active: boolean
       }
       return next;
     });
-  }, [initial]);
+  }, [active, initial, runId]);
 
   useEffect(() => {
     if (!active || !runId || typeof EventSource === "undefined") {

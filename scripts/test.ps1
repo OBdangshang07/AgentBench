@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $projectRoot
-& ".venv\Scripts\python.exe" -m ruff check backend
+& ".venv\Scripts\python.exe" -m ruff check backend\agentbench backend\tests
 if ($LASTEXITCODE -ne 0) { throw "Ruff failed with exit code $LASTEXITCODE" }
 $pytestBaseTemp = Join-Path $projectRoot (".pytest-tmp\release-" + $PID)
 & ".venv\Scripts\python.exe" -m pytest backend --basetemp $pytestBaseTemp

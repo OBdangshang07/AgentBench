@@ -5,6 +5,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .pytest-tmp/
+backend/.codex-test-tmp/
 .pytest-v3-*/
 .ruff_cache/
 .coverage

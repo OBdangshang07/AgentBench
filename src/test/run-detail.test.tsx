@@ -47,7 +47,9 @@ function renderRunPage(run: RunDetail) {
     const url = String(input);
     let value: unknown = {};
     if (url.endsWith("/health")) {
-      value = { name: "AgentBench Desktop", version: "3.0.0" };
+      value = { name: "AgentBench Desktop", version: "3.1.1" };
+    } else if (url.includes("/runs?experiment_id=")) {
+      value = [run];
     } else if (url.includes("/runs/run-1")) {
       value = run;
     }
@@ -99,5 +101,20 @@ describe("RunDetail exam question card", () => {
     await screen.findByText("NCRE 表格题");
     expect(screen.queryByText("EXAM QUESTION")).not.toBeInTheDocument();
     expect(screen.queryByText("题目")).not.toBeInTheDocument();
+  });
+
+  it("always exposes a return-to-experiment link", async () => {
+    renderRunPage(makeRun());
+
+    const returnLinks = await screen.findAllByRole("link", { name: /返回实验/ });
+    expect(returnLinks.length).toBeGreaterThan(0);
+    expect(returnLinks[0]).toHaveAttribute("href", "/experiments/exp-1");
+  });
+
+  it("keeps the return link in the active single-run broadcast", async () => {
+    renderRunPage(makeRun({ status: "running", completed_at: null }));
+
+    expect(await screen.findByRole("link", { name: /返回实验/ })).toHaveAttribute("href", "/experiments/exp-1");
+    expect(screen.getByText("单任务追踪")).toBeInTheDocument();
   });
 });

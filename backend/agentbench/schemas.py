@@ -107,6 +107,17 @@ class TestCaseImport(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class MathQuestionUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    question_text: str | None = Field(default=None, max_length=40_000)
+    answer: str | None = Field(default=None, max_length=8_000)
+    accepted_answers: list[str] | None = Field(default=None, max_length=40)
+    variables: list[str] | None = Field(default=None, max_length=20)
+    solution_obligations: list[str] | None = Field(default=None, max_length=30)
+    review_status: Literal["needs_review", "confirmed"] | None = None
+
+
 class ManualScoreUpdate(BaseModel):
     score: float = Field(ge=0, le=100)
     reason: str = Field(min_length=3, max_length=1000)

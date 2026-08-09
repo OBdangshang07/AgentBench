@@ -26,7 +26,7 @@ describe("model discovery picker", () => {
       const url = String(input);
       let value: unknown = [];
       if (url.endsWith("/health")) {
-        value = { name: "AgentBench Desktop", version: "3.0.0" };
+        value = { name: "AgentBench Desktop", version: "3.1.1" };
       } else if (url.endsWith("/models/discover")) {
         value = {
           source: "codex-cli",

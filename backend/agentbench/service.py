@@ -11,6 +11,7 @@ import statistics
 import subprocess
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from pathlib import Path
@@ -29,7 +30,15 @@ from .execution import (
     resolve_cli_install_plan,
     run_native_cli,
 )
-from .math_exam import get_math_import, import_math_pdf, list_math_imports
+from .math_exam import (
+    MATH_EXAM_ID,
+    build_published_math_cases,
+    get_math_import,
+    import_math_pdf,
+    list_math_imports,
+    mark_math_import_published,
+    update_math_question,
+)
 from .model_clients import (
     AnthropicClient,
     MockModelClient,
@@ -248,6 +257,7 @@ def public_definition(definition: dict[str, Any]) -> dict[str, Any]:
             "file_contains": {"text"},
             "json_file": {"expected"},
             "symbolic_json": {"fields"},
+            "ai_rubric": {"reference_answer", "accepted_answers", "solution_obligations"},
         }.get(kind, set())
         for key in sensitive_keys:
             hidden = config.pop(key, None) is not None or hidden
@@ -784,6 +794,115 @@ class EvaluationService:
     def get_math_paper_import(self, import_id: str) -> dict[str, Any]:
         return get_math_import(self.settings.data_dir, import_id)
 
+    def _math_experiment_score(self, experiment_id: str) -> dict[str, float] | None:
+        rows = self.database.fetch_all(
+            "SELECT r.score,t.definition_json FROM runs r "
+            "JOIN test_cases t ON t.id=r.test_case_id WHERE r.experiment_id=?",
+            (experiment_id,),
+        )
+        weighted_sum = 0.0
+        point_sum = 0.0
+        found_math = False
+        for row in rows:
+            metadata = (_json(row["definition_json"], {}).get("metadata") or {})
+            if metadata.get("exam") != MATH_EXAM_ID:
+                continue
+            found_math = True
+            if row.get("score") is None:
+                continue
+            points = float(metadata.get("points") or 0)
+            if points <= 0:
+                continue
+            weighted_sum += float(row["score"]) * points
+            point_sum += points
+        if not found_math or point_sum <= 0:
+            return None
+        raw_percentage = weighted_sum / point_sum
+        percentage = round(raw_percentage, 2)
+        return {
+            "weighted_score": percentage,
+            "exam_score": round(raw_percentage * 1.5, 2),
+            "exam_total": 150.0,
+        }
+
+    def update_math_paper_question(
+        self, import_id: str, number: int, changes: dict[str, Any]
+    ) -> dict[str, Any]:
+        manifest = update_math_question(self.settings.data_dir, import_id, number, changes)
+        self.database.insert_audit(
+            "math_paper.question_updated",
+            "math_paper_import",
+            import_id,
+            {"question_no": number, "review_status": changes.get("review_status")},
+        )
+        return manifest
+
+    def publish_math_paper(self, import_id: str) -> dict[str, Any]:
+        manifest = get_math_import(self.settings.data_dir, import_id)
+        if manifest.get("status") == "published":
+            return manifest
+        cases_by_lane = build_published_math_cases(manifest)
+        year = int(manifest["year"])
+        now = utc_now()
+        published_suites: list[dict[str, Any]] = []
+        case_ids: list[str] = []
+        with self.database.transaction() as connection:
+            for lane, cases in cases_by_lane.items():
+                lane_name = "闭卷推理" if lane == "closed-book" else "工具增强"
+                suite_id = str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"agentbench:math-suite:{year}:{lane}",
+                    )
+                )
+                connection.execute(
+                    "INSERT INTO test_suites(id,name,description,version,builtin,created_at) "
+                    "VALUES (?,?,?,?,0,?) ON CONFLICT(id) DO UPDATE SET "
+                    "name=excluded.name,description=excluded.description,version=excluded.version",
+                    (
+                        suite_id,
+                        f"{year} 考研数学一 · {lane_name}",
+                        "22 道经人工校对的正式真题。"
+                        + ("仅允许统一 Agent 参测，以保证工具完全禁用。" if lane == "closed-book" else "允许 Agent 使用其可用工具。"),
+                        f"{year}.1",
+                        now,
+                    ),
+                )
+                connection.execute("DELETE FROM suite_cases WHERE suite_id=?", (suite_id,))
+                for position, case in enumerate(cases):
+                    definition = case["definition"]
+                    self._validate_definition(definition)
+                    definition_json = json.dumps(definition, ensure_ascii=False)
+                    connection.execute(
+                        "INSERT INTO test_cases(id,slug,version,category,title,description,definition_json,builtin,enabled,created_at) "
+                        "VALUES (?,?,?,?,?,?,?,0,1,?) ON CONFLICT(id) DO UPDATE SET "
+                        "title=excluded.title,description=excluded.description,definition_json=excluded.definition_json,enabled=1",
+                        (
+                            case["id"], case["slug"], case["version"], case["category"],
+                            case["title"], case["description"], definition_json, now,
+                        ),
+                    )
+                    connection.execute(
+                        "INSERT INTO suite_cases(suite_id,test_case_id,position) VALUES (?,?,?)",
+                        (suite_id, case["id"], position),
+                    )
+                    case_ids.append(case["id"])
+                published_suites.append(
+                    {"id": suite_id, "lane": lane, "name": f"{year} 考研数学一 · {lane_name}", "case_count": len(cases)}
+                )
+        for case_id in case_ids:
+            self.database.sync_test_case_revisions(case_id)
+        published = mark_math_import_published(
+            self.settings.data_dir, import_id, published_suites
+        )
+        self.database.insert_audit(
+            "math_paper.published",
+            "math_paper_import",
+            import_id,
+            {"suite_ids": [item["id"] for item in published_suites]},
+        )
+        return published
+
     def list_test_cases(
         self, category: str | None = None, query: str | None = None, limit: int = 500
     ) -> list[dict[str, Any]]:
@@ -1111,6 +1230,10 @@ class EvaluationService:
         )
         for row in rows:
             row["participants"] = _json(row.pop("participants_json"), [])
+            math_score = self._math_experiment_score(row["id"])
+            if math_score:
+                row["avg_score"] = math_score["weighted_score"]
+                row.update(math_score)
         return rows
 
     def get_experiment(self, experiment_id: str) -> dict[str, Any]:
@@ -1139,6 +1262,10 @@ class EvaluationService:
             "FROM runs WHERE experiment_id=?",
             (experiment_id,),
         )
+        math_score = self._math_experiment_score(experiment_id)
+        if math_score and row["summary"]:
+            row["summary"]["avg_score"] = math_score["weighted_score"]
+            row["summary"].update(math_score)
         return row
 
     def start_experiment(self, experiment_id: str) -> dict[str, Any]:
@@ -1207,6 +1334,15 @@ class EvaluationService:
             for row in definitions
             for validator in (_json(row["definition_json"], {}).get("validators") or [])
         ]
+        native_incompatible = any(
+            (_json(row["definition_json"], {}).get("metadata") or {}).get(
+                "native_agent_compatible"
+            )
+            is False
+            for row in definitions
+        )
+        if native_runners and native_incompatible:
+            errors.append("所选闭卷测试要求完全禁用工具，仅允许统一 Agent 参测")
         requires_docker = any(item.get("type") == "command" for item in validators)
         requires_judge = any(item.get("type") == "ai_rubric" for item in validators)
         if requires_docker and not self.docker.available:
@@ -1510,9 +1646,13 @@ class EvaluationService:
         self.executor.submit(self._run_with_semaphore, run_id, threading.Semaphore(1))
         return self.get_run(run_id)
 
-    def rejudge_run(self, run_id: str) -> dict[str, Any]:
-        """Re-run judge scoring only: reuse the stored final_answer, never re-run the
-        candidate model or rebuild the workspace."""
+    def rejudge_run(self, run_id: str, *, reuse_judge: bool = False) -> dict[str, Any]:
+        """Re-score a stored answer without re-running the candidate model.
+
+        ``reuse_judge`` is used by deterministic batch revalidation after a parser or
+        checker update.  Existing AI-rubric evidence is retained in that mode so a
+        historical repair does not create fresh judge cost or change a judge opinion.
+        """
         run = self.get_run(run_id)
         if run["status"] not in {"needs_review", "completed"}:
             raise ValueError("run_not_rejudgeable")
@@ -1539,8 +1679,57 @@ class EvaluationService:
                 (run_id, seq, event_type, json.dumps(payload, ensure_ascii=False), utc_now()),
             )
 
-        event_sink("rejudge.started", {"previous_status": run["status"]})
-        judge_callback = self._judge_callback(run, definition, workspace, event_sink)
+        previous_score = run.get("score")
+        event_sink(
+            "rejudge.started",
+            {
+                "previous_status": run["status"],
+                "previous_score": previous_score,
+                "judge_mode": "reuse" if reuse_judge else "fresh",
+            },
+        )
+        fresh_judge_callback = self._judge_callback(run, definition, workspace, event_sink)
+        if reuse_judge:
+            stored_judges = self.database.fetch_all(
+                "SELECT score,status,evidence_json FROM validator_results "
+                "WHERE run_id=? AND validator_type='ai_rubric' ORDER BY created_at,id",
+                (run_id,),
+            )
+            stored_judge_index = 0
+
+            def reused_judge_callback(
+                config: dict[str, Any], weight: float
+            ) -> ValidationResult:
+                nonlocal stored_judge_index
+                if stored_judge_index < len(stored_judges):
+                    stored = stored_judges[stored_judge_index]
+                    stored_judge_index += 1
+                    evidence = _json(stored.get("evidence_json"), {})
+                    evidence = {
+                        **evidence,
+                        "reused_for_revalidation": True,
+                        "source_run_id": run_id,
+                    }
+                    return ValidationResult(
+                        "ai_rubric",
+                        weight,
+                        float(stored.get("score") or 0),
+                        str(stored.get("status") or "needs_review"),
+                        evidence,
+                    )
+                if fresh_judge_callback is not None:
+                    return fresh_judge_callback(config, weight)
+                return ValidationResult(
+                    "ai_rubric",
+                    weight,
+                    0,
+                    "needs_review",
+                    {"reason": "No reusable or configured judge is available"},
+                )
+
+            judge_callback = reused_judge_callback
+        else:
+            judge_callback = fresh_judge_callback
         score = self.scoring.score(
             definition=definition,
             final_answer=final_answer,
@@ -1656,16 +1845,84 @@ class EvaluationService:
             "run.rejudged",
             {
                 "status": final_status,
+                "previous_score": previous_score,
                 "score": adjusted_score,
                 "raw_score": score.score,
                 "passed": passed,
+                "judge_mode": "reuse" if reuse_judge else "fresh",
             },
         )
         self.database.insert_audit(
-            "run.rejudged", "run", run_id, {"status": final_status, "score": adjusted_score}
+            "run.rejudged",
+            "run",
+            run_id,
+            {
+                "status": final_status,
+                "previous_score": previous_score,
+                "score": adjusted_score,
+                "judge_mode": "reuse" if reuse_judge else "fresh",
+            },
         )
         self._refresh_experiment(run["experiment_id"])
         return self.get_run(run_id)
+
+    def rejudge_experiment(
+        self, experiment_id: str, *, scope: str = "structured"
+    ) -> dict[str, Any]:
+        """Batch-revalidate stored experiment answers with an auditable score delta."""
+        before = self.get_experiment(experiment_id)
+        rows = self.database.fetch_all(
+            "SELECT id,status,final_answer FROM runs WHERE experiment_id=? ORDER BY created_at,id",
+            (experiment_id,),
+        )
+        updated: list[dict[str, Any]] = []
+        skipped = 0
+        failures: list[dict[str, str]] = []
+        for row in rows:
+            if row["status"] not in {"needs_review", "completed"} or not (
+                row.get("final_answer") or ""
+            ).strip():
+                skipped += 1
+                continue
+            run = self.get_run(row["id"])
+            definition, _revision = self._definition_for_run(run)
+            validators = definition.get("validators") or []
+            if scope == "structured" and not any(
+                validator.get("type") == "symbolic_json" for validator in validators
+            ):
+                skipped += 1
+                continue
+            old_score = run.get("score")
+            try:
+                result = self.rejudge_run(row["id"], reuse_judge=True)
+                updated.append(
+                    {
+                        "run_id": row["id"],
+                        "previous_score": old_score,
+                        "score": result.get("score"),
+                        "passed": result.get("passed"),
+                    }
+                )
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                failures.append({"run_id": row["id"], "error": str(exc)})
+        after = self.get_experiment(experiment_id)
+        payload = {
+            "experiment_id": experiment_id,
+            "scope": scope,
+            "updated": len(updated),
+            "skipped": skipped,
+            "failed": len(failures),
+            "previous_score": (before.get("summary") or {}).get("avg_score"),
+            "score": (after.get("summary") or {}).get("avg_score"),
+            "previous_exam_score": (before.get("summary") or {}).get("exam_score"),
+            "exam_score": (after.get("summary") or {}).get("exam_score"),
+            "runs": updated,
+            "failures": failures,
+        }
+        self.database.insert_audit(
+            "experiment.rejudged", "experiment", experiment_id, payload
+        )
+        return payload
 
     def _run_with_semaphore(self, run_id: str, semaphore: threading.Semaphore) -> None:
         with semaphore:
@@ -2949,9 +3206,9 @@ class EvaluationService:
     def dashboard(self) -> dict[str, Any]:
         stats = (
             self.database.fetch_one(
-                "SELECT COUNT(*) total_runs,SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) active_runs,"
+                "SELECT COUNT(*) total_runs,COALESCE(SUM(CASE WHEN status='running' THEN 1 ELSE 0 END),0) active_runs,"
                 "AVG(score) avg_score,SUM(cost_usd) total_cost,SUM(tokens_input+tokens_output) total_tokens,"
-                "SUM(CASE WHEN cost_source='unpriced' THEN 1 ELSE 0 END) unpriced_runs "
+                "COALESCE(SUM(CASE WHEN cost_source='unpriced' THEN 1 ELSE 0 END),0) unpriced_runs "
                 "FROM runs"
             )
             or {}

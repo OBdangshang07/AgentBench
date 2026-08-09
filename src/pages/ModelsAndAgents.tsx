@@ -3,7 +3,7 @@ import { Archive, ArchiveRestore, Bot, CheckCircle2, CircleDollarSign, Cpu, Down
 import { api } from "../lib/api";
 import { useApi } from "../lib/useApi";
 import type { DiscoveredModel, ModelConfig, ModelDiscoveryResult, ModelSource, Runner, RunnerInstallJob } from "../types";
-import { Button, Card, ErrorBlock, Field, LoadingBlock, Modal, PageHeader } from "../components/ui";
+import { Button, Card, ErrorBlock, Field, LoadingBlock, Modal } from "../components/ui";
 
 const runnerMeta: Record<Runner["runner_type"], { label: string; description: string }> = {
   unified: { label: "公平基准", description: "平台统一控制工具、步骤和工作区，适合比较底层模型本身。" },
@@ -51,27 +51,25 @@ export default function ModelsAndAgents() {
   const runners = useApi<Runner[]>("/runners", 10_000);
 
   return (
-    <div className="page">
-      <PageHeader
-        eyebrow="PARTICIPANTS"
-        title="参测配置"
-        description="先配置“测谁”，再选择“让它怎样工作”。模型身份与 Agent Runner 相互独立，可自由组合。"
-        actions={
-          <Button onClick={() => (tab === "models" ? setModelModal(true) : setRunnerModal(true))}>
-            <Plus size={16} /> {tab === "models" ? "添加模型" : "添加 Runner"}
-          </Button>
-        }
-      />
-      <div className="segmented">
-        <button className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}><Cpu size={16} /> 1. 参测模型</button>
-        <button className={tab === "runners" ? "active" : ""} onClick={() => setTab("runners")}><TerminalSquare size={16} /> 2. 执行 Agent</button>
+    <div className="ab-view ab-secondary-view ab-participants-view">
+      <header className="ab-view-header">
+        <div className="ab-view-title"><span className="ab-view-index">05 / PARTICIPANTS</span><div><h1>参测配置</h1><p>模型身份与执行 Agent 独立建档，在评测编排中形成可审计组合。</p></div></div>
+        <div className="ab-header-meta"><span className="ab-meta-pill"><i />{models.data?.filter((model) => model.enabled).length ?? 0} MODELS · {runners.data?.filter((runner) => runner.capability.installed).length ?? 0} AGENTS READY</span><button className="ab-run-button" type="button" onClick={() => (tab === "models" ? setModelModal(true) : setRunnerModal(true))}><Plus size={14} />{tab === "models" ? "添加模型" : "添加 Runner"}</button></div>
+      </header>
+      <div className="ab-secondary-layout">
+        <aside className="ab-section-pane">
+          <div className="ab-pane-label">PARTICIPANT LAYERS</div>
+          <button className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}><span><Cpu size={15} /></span><div><strong>参测模型</strong><small>身份、接口与底层模型</small></div><b>{models.data?.filter((model) => model.enabled).length ?? "—"}</b></button>
+          <button className={tab === "runners" ? "active" : ""} onClick={() => setTab("runners")}><span><TerminalSquare size={15} /></span><div><strong>执行 Agent</strong><small>工具链与本机运行能力</small></div><b>{runners.data?.length ?? "—"}</b></button>
+          <section className="ab-side-contract"><label>COMBINATION RULE</label><strong>MODEL × AGENT</strong><p>一个模型可复用多个 Agent；赛道、工具权限与结果会分别留证。</p></section>
+        </aside>
+        <main className="ab-secondary-canvas">
+          <div className="ab-canvas-intro"><span>{tab === "models" ? "MODEL REGISTRY" : "RUNNER REGISTRY"}</span><div><h2>{tab === "models" ? "模型身份账本" : "本机 Agent 矩阵"}</h2><p>{tab === "models" ? "管理被测模型、来源、上下文窗口和计费映射。" : "检测 CLI、版本、工具能力与快捷安装状态。"}</p></div><b>{tab === "models" ? `${models.data?.filter((model) => model.enabled).length ?? 0} ACTIVE` : `${runners.data?.filter((runner) => runner.capability.installed).length ?? 0} READY`}</b></div>
+          <div className="ab-secondary-scroll">
+            {tab === "models" ? <ModelsPanel state={models} /> : <RunnersPanel state={runners} />}
+          </div>
+        </main>
       </div>
-
-      {tab === "models" ? (
-        <ModelsPanel state={models} />
-      ) : (
-        <RunnersPanel state={runners} />
-      )}
 
       {modelModal && <ModelModal runners={runners.data ?? []} onClose={() => setModelModal(false)} onSaved={() => { setModelModal(false); void models.refresh(); }} />}
       {runnerModal && <RunnerModal onClose={() => setRunnerModal(false)} onSaved={() => { setRunnerModal(false); void runners.refresh(); }} />}

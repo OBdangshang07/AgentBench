@@ -241,6 +241,104 @@ def test_symbolic_json_accepts_equivalent_math_and_awards_partial_credit(tmp_pat
     assert partial.dimensions[0].score == 25.0
 
 
+def test_symbolic_json_recovers_fenced_final_answer_without_relaxing_correctness(
+    tmp_path,
+) -> None:
+    engine = ScoringEngine(DockerExecutor(executable="missing-docker"))
+    workspace = Workspace(tmp_path / "workspace")
+    definition = {
+        "limits": {"max_steps": 10, "time_target_seconds": 600},
+        "validators": [
+            {
+                "type": "symbolic_json",
+                "weight": 100,
+                "config": {
+                    "fields": {
+                        "answer": {"kind": "literal", "expected": "B", "weight": 1}
+                    }
+                },
+            }
+        ],
+    }
+
+    recovered = engine.score(
+        definition=definition,
+        final_answer='推导过程略。\n\n```json\n{"answer":"B"}\n```',
+        workspace=workspace,
+        steps=1,
+        duration_ms=1000,
+        tokens_input=10,
+        tokens_output=10,
+    )
+    recovered_validator = recovered.components[0]
+    assert recovered_validator.score == 100.0
+    assert recovered_validator.evidence["answer_format"]["mode"] == "json_code_fence"
+    assert recovered_validator.evidence["answer_format"]["format_compliant"] is False
+
+    wrong = engine.score(
+        definition=definition,
+        final_answer='解释文字 {"answer":"A"}',
+        workspace=workspace,
+        steps=1,
+        duration_ms=1000,
+        tokens_input=10,
+        tokens_output=10,
+    )
+    assert wrong.components[0].score == 0.0
+
+
+def test_symbolic_json_accepts_common_final_equation_notation_but_rejects_wrong_math(
+    tmp_path,
+) -> None:
+    engine = ScoringEngine(DockerExecutor(executable="missing-docker"))
+    workspace = Workspace(tmp_path / "workspace-natural-math")
+    examples = [
+        ("4/3 - 2 sin 1", "4/3 - 2*sin(1)", 100.0),
+        (
+            "∫_0^1 1/[(x+1)(x^2-2x+2)] dx = (3 ln 2 + π) / 10",
+            "3*log(2)/10 + pi/10",
+            100.0,
+        ),
+        (
+            "f(u) = 1/2·(ln u)² + 2 ln u + 1",
+            "log(u)**2/2 + 2*log(u) + 1",
+            100.0,
+        ),
+        ("I = -2π/√3", "sqrt(2)*pi/4 - 1", 0.0),
+    ]
+
+    for index, (candidate, expected, expected_score) in enumerate(examples):
+        definition = {
+            "limits": {"max_steps": 10, "time_target_seconds": 600},
+            "validators": [
+                {
+                    "type": "symbolic_json",
+                    "weight": 100,
+                    "config": {
+                        "fields": {
+                            "final_answer": {
+                                "kind": "expression",
+                                "expected": expected,
+                                "variables": ["u"],
+                                "weight": 1,
+                            }
+                        }
+                    },
+                }
+            ],
+        }
+        scored = engine.score(
+            definition=definition,
+            final_answer=json.dumps({"final_answer": candidate}, ensure_ascii=False),
+            workspace=workspace,
+            steps=index + 1,
+            duration_ms=1000,
+            tokens_input=10,
+            tokens_output=10,
+        )
+        assert scored.components[0].score == expected_score
+
+
 def test_all_v3_math_reference_answers_satisfy_symbolic_validators(tmp_path) -> None:
     engine = ScoringEngine(DockerExecutor(executable="missing-docker"))
     math_cases = [

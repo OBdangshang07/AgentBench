@@ -58,6 +58,8 @@ function displayEvent(event: RunEvent): DisplayEvent {
   if (event.event_type === "live.heartbeat") {
     return { tone: "activity", title: "Agent 会话保持活跃", detail: `${formatDuration(number(payload.elapsed_ms))} · ${number(payload.workspace_files)} 个工作区文件` };
   }
+  if (event.event_type === "live.phase") return { tone: "activity", title: text(payload.summary, "执行阶段已推进"), detail: text(payload.detail, text(payload.phase, `事件 #${event.seq}`)) };
+  if (event.event_type === "live.activity") return { tone: "activity", title: text(payload.summary, "Agent 正在处理公开任务"), detail: text(payload.detail, text(payload.status, `事件 #${event.seq}`)) };
   if (event.event_type === "model.requested") return { tone: "activity", title: "请求模型继续决策", detail: `Agent step ${number(payload.step)}` };
   if (event.event_type === "model.responded") return { tone: "activity", title: text(payload.summary, "模型已生成下一项操作"), detail: `Agent step ${number(payload.step)}` };
   if (event.event_type === "tool.requested") return { tone: "activity", title: `调用 ${text(payload.name, "工具")}`, detail: `Agent step ${number(payload.step)}` };
@@ -71,7 +73,26 @@ function displayEvent(event: RunEvent): DisplayEvent {
   if (event.event_type === "run.completed") return { tone: "good", title: "评测运行完成", detail: `最终得分 ${number(payload.score).toFixed(1)}` };
   if (event.event_type === "run.failed") return { tone: "warning", title: "运行未正常完成", detail: `${text(payload.code)} ${text(payload.message)}`.trim() };
   if (event.event_type === "native_cli.started") return { tone: "activity", title: "原生 Agent 已启动", detail: text(payload.runner_type, "native CLI") };
+  if (event.event_type === "native_cli.event") return { tone: "activity", title: text(payload.summary, "原生 Agent 产生新活动"), detail: text(payload.detail, text(payload.type, `事件 #${event.seq}`)) };
   return { tone: "activity", title: text(payload.summary, event.event_type), detail: text(payload.detail, `事件 #${event.seq}`) };
+}
+
+function taskLens(run: RunDetail) {
+  const category = run.category.toLowerCase();
+  if (category.includes("math")) return { code: "MATH EXAM", title: "数学答题通道", action: "解析题面 → 计算 → 提交答案" };
+  if (category.includes("office") || category.includes("ncre")) return { code: "OFFICE TASK", title: "Office 实操通道", action: "读取素材 → 编辑文档 → 结构验证" };
+  if (category.includes("software") || category.includes("code") || category.includes("engineering")) return { code: "CODE TASK", title: "工程执行通道", action: "检查仓库 → 修改文件 → 运行测试" };
+  return { code: "AGENT TASK", title: "Agent 工作流通道", action: "理解约束 → 调用工具 → 固化证据" };
+}
+
+function publicTaskBrief(run: RunDetail) {
+  const instruction = run.test_definition?.instruction?.trim() ?? "";
+  if (!instruction) return "公开题面已装载，等待 Agent 产生可验证活动。";
+  return instruction
+    .replace(/请独立作答[\s\S]*$/u, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 260);
 }
 
 function elapsedFor(run: RunSummary, now: number): number {
@@ -129,16 +150,22 @@ export function ExperimentLiveFocus({ run, events, streamState }: { run: RunDeta
   const views = events.map(displayEvent);
   const focus = [...views].reverse().find((event) => event.title !== "Agent 会话保持活跃") ?? { tone: "activity" as const, title: "正在准备 Agent 工作区", detail: "等待首个工具或命令事件" };
   const usage = eventUsage(events);
+  const lens = taskLens(run);
+  const taskBrief = publicTaskBrief(run);
+  const fileChanges = events.filter((event) => event.event_type === "live.file_change").length;
+  const validations = events.filter((event) => event.event_type === "validator.completed").length;
+  const phase = run.status === "judging" ? 4 : run.status === "validating" ? 3 : run.status === "running" ? 2 : run.status === "preparing" ? 1 : run.status === "completed" ? 5 : 0;
   return <div className="experiment-live-focus">
     <section className="live-theater">
       <header><span><Radio size={14} /> ON AIR · <strong>{run.test_title}</strong></span><small>{streamLabel(streamState)}</small></header>
       <div className="live-theater-body">
         <div className="live-focus-stage">
-          <div className="live-now-label"><span>WHAT THE AGENT IS DOING NOW</span><b>ROUND {Math.max(1, run.attempt_count)} / STEP {Math.max(run.steps, usage.steps)}</b></div>
+          <div className="live-now-label"><span>{lens.code} / WHAT THE AGENT IS DOING NOW</span><b>ROUND {Math.max(1, run.attempt_count)} / STEP {Math.max(run.steps, usage.steps)}</b></div>
           <h2>{focus.title}</h2><p>{focus.detail}</p>
           <div className={`live-action-summary live-feed-${focus.tone}`}><Activity size={16} /><div><strong>{focus.title}</strong><span>{focus.detail}</span></div><code>SAFE EVENT</code></div>
+          <div className="live-public-task"><div><label>{lens.title}</label><strong>{run.test_title}</strong><p>{taskBrief}</p></div><aside><span>{lens.action}</span><b>{events.length}</b><small>安全事件</small><b>{fileChanges}</b><small>文件变化</small><b>{validations}</b><small>验证完成</small></aside></div>
           <TerminalFeed events={events} />
-          <div className="live-phase-strip"><span className="done">准备环境</span><span className="done">Agent 执行</span><span className={run.status === "validating" ? "live" : ""}>公开验证</span><span className={run.status === "judging" ? "live" : ""}>匿名裁判</span><span>结果证据</span></div>
+          <div className="live-phase-strip"><span className={phase > 1 ? "done" : phase === 1 ? "live" : ""}>准备环境</span><span className={phase > 2 ? "done" : phase === 2 ? "live" : ""}>Agent 执行</span><span className={phase > 3 ? "done" : phase === 3 ? "live" : ""}>公开验证</span><span className={phase > 4 ? "done" : phase === 4 ? "live" : ""}>匿名裁判</span><span className={phase === 5 ? "done" : ""}>结果证据</span></div>
         </div>
         <div className="live-activity-column"><header><strong>结构化行为流</strong><small>最新在上</small></header><Feed events={events} limit={8} /><div className="live-safety-note"><ShieldCheck size={13} /><span>已过滤密钥、系统提示、私有验证内容与 Chain-of-Thought。</span></div></div>
       </div>
@@ -165,8 +192,8 @@ export function LiveRunSession({ run, events, streamState }: { run: RunDetail; e
   const validators = run.test_definition?.validators ?? [];
   return <div className={`live-session ${audience ? "live-audience" : ""}`}>
     <header className="live-session-head">
-      <div><span><Radio size={13} /> LIVE AGENT SESSION</span><h1>{run.test_title}</h1><p>{run.model_name} × {run.runner_name} · ROUND {Math.max(1, run.attempt_count)} · 工作区连续保留</p></div>
-      <div className="live-session-controls"><span className="live-stream-chip"><i /> {streamLabel(streamState)}</span><button className="button button-secondary" type="button" onClick={() => setAudience((value) => !value)}>{audience ? <EyeOff size={14} /> : <Eye size={14} />}{audience ? "退出观众模式" : "观众模式"}</button></div>
+      <div className="broadcast-page-title"><span>LIVE 02 / AGENT SESSION</span><div><h1>{run.test_title}</h1><p>{run.model_name} × {run.runner_name} · ROUND {Math.max(1, run.attempt_count)} · 工作区连续保留</p></div></div>
+      <div className="live-session-controls"><span className="broadcast-record-badge"><i />LIVE SESSION</span><time>{formatDuration(elapsedFor(run, now))}</time><span className="live-stream-chip"><i /> {streamLabel(streamState)}</span><button className="button button-secondary" type="button" onClick={() => setAudience((value) => !value)}>{audience ? <EyeOff size={14} /> : <Eye size={14} />}{audience ? "退出观众模式" : "观众模式"}</button></div>
     </header>
     <div className="live-session-layout">
       <aside className="live-obligations">

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import Database, utc_now
+from .math_builtin import build_builtin_math_cases
 from .ncre_assets import blobs, blobs_paper02, blobs_paper03, exam_data_paper02, exam_data_paper03
 from .ncre_assets.exam_data import (
     CHOICE_QUESTIONS,
@@ -52,6 +53,8 @@ NCRE_OFFICE_PAPER02_SUITE_ID = stable_id("suite", "ncre-office-paper-02")
 NCRE_OFFICE_PAPER03_SUITE_ID = stable_id("suite", "ncre-office-paper-03")
 GAUNTLET_SUITE_ID = stable_id("suite", "v2-gauntlet")
 GAUNTLET_LITE_SUITE_ID = stable_id("suite", "v2-gauntlet-lite")
+MATH_2025_CLOSED_SUITE_ID = stable_id("suite", "postgraduate-math-2025-math1-closed")
+MATH_2025_TOOL_SUITE_ID = stable_id("suite", "postgraduate-math-2025-math1-tools")
 
 _NCRE_ASSET_DIR = Path(__file__).resolve().parent / "ncre_assets"
 
@@ -3082,7 +3085,10 @@ def seed_builtin_data(database: Database) -> None:
     case_ids: list[str] = []
     base_cases = build_catalog()
     ultra_cases = build_ultra_catalog()
-    cases = base_cases + ultra_cases
+    math_cases_by_lane = build_builtin_math_cases()
+    math_closed_cases = [item["definition"] for item in math_cases_by_lane["closed-book"]]
+    math_tool_cases = [item["definition"] for item in math_cases_by_lane["tool-augmented"]]
+    cases = base_cases + ultra_cases + math_closed_cases + math_tool_cases
     for definition in cases:
         case_id = stable_id("case", f"{definition['slug']}@{definition['version']}")
         case_ids.append(case_id)
@@ -3121,7 +3127,12 @@ def seed_builtin_data(database: Database) -> None:
     )
 
     base_case_ids = case_ids[: len(base_cases)]
-    ultra_case_ids = case_ids[len(base_cases) :]
+    ultra_start = len(base_cases)
+    math_closed_start = ultra_start + len(ultra_cases)
+    math_tool_start = math_closed_start + len(math_closed_cases)
+    ultra_case_ids = case_ids[ultra_start:math_closed_start]
+    math_closed_ids = case_ids[math_closed_start:math_tool_start]
+    math_tool_ids = case_ids[math_tool_start:]
     quick_v2 = (
         base_case_ids[:4]
         + base_case_ids[25:29]
@@ -3288,6 +3299,20 @@ def seed_builtin_data(database: Database) -> None:
             "20 道纯编码题：多文件业务规则实现、边界处理与自动化验证",
             "2.4.1",
             coding_focus,
+        ),
+        (
+            MATH_2025_CLOSED_SUITE_ID,
+            "2025 考研数学（一）· 闭卷推理",
+            "用户提供的 2025 数学一真题与解析，22 题、满分 150 分；禁用工具的纯推理赛道。",
+            "2025.1",
+            math_closed_ids,
+        ),
+        (
+            MATH_2025_TOOL_SUITE_ID,
+            "2025 考研数学（一）· 工具增强",
+            "用户提供的 2025 数学一真题与解析，22 题、满分 150 分；允许 Agent 使用本地工具。",
+            "2025.1",
+            math_tool_ids,
         ),
         (
             NCRE_OFFICE_SUITE_ID,

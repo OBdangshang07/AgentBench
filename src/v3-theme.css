@@ -428,6 +428,14 @@ select { color-scheme: dark; }
 .live-action-summary strong { display: block; color: #d4d9da; font-size: 8px; }
 .live-action-summary span { display: block; margin-top: 2px; color: #6e7869; font-size: 7px; }
 .live-action-summary code { color: #8f9d75; font-size: 6px; }
+.live-public-task { margin: 0 0 11px; min-height: 76px; padding: 10px 11px; border: 1px solid #283139; border-radius: 8px; display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: 14px; background-color: #0b1014; background-image: radial-gradient(#27313a 1px, transparent 1px); background-size: 15px 15px; }
+.live-public-task label { color: #caff3d; font: 6px var(--font-mono); letter-spacing: .12em; }
+.live-public-task strong { display: block; margin-top: 5px; color: #dce1e2; font-size: 9px; }
+.live-public-task p { margin: 4px 0 0; color: #69747b; font-size: 7px; line-height: 1.5; }
+.live-public-task aside { padding-left: 12px; border-left: 1px solid #29323a; display: grid; grid-template-columns: 1fr auto; align-content: center; gap: 3px 9px; }
+.live-public-task aside > span { grid-column: 1 / -1; margin-bottom: 3px; color: #7d896e; font: 6px var(--font-mono); }
+.live-public-task aside b { color: #dce1e2; font: 10px var(--font-mono); text-align: right; }
+.live-public-task aside small { grid-column: 1; grid-row: auto; color: #5e696f; font-size: 6px; }
 
 .live-terminal { min-height: 150px; flex: 1; border: 1px solid #252d35; border-radius: 8px; overflow: hidden; background: #080b0e; box-shadow: 0 14px 35px #0006; }
 .live-terminal > header { height: 29px; padding: 0 9px; border-bottom: 1px solid #202830; display: flex; align-items: center; gap: 5px; background: #0f1418; }
@@ -484,20 +492,33 @@ select { color-scheme: dark; }
 .live-focus-privacy p { margin: 4px 0 0; color: #66725f; font-size: 6px; line-height: 1.5; }
 
 .live-race-board { margin-top: 10px; }
-.live-race-board > header, .live-race-board > a { display: grid; grid-template-columns: minmax(300px, 1.3fr) 125px minmax(180px, 1fr) 90px 65px; align-items: center; gap: 12px; }
+.live-race-controls { min-height: 46px; padding: 7px 12px; border-bottom: 1px solid #20282d; display: flex; align-items: center; justify-content: space-between; gap: 12px; background: #0c1115; }
+.live-race-controls strong { display: block; color: #d5dadc; font-size: 8px; }
+.live-race-controls span { display: block; margin-top: 2px; color: #5f6a71; font-size: 6px; }
+.live-race-controls nav { display: flex; align-items: center; gap: 4px; }
+.live-race-controls button { height: 27px; padding: 0 9px; border: 1px solid #29323a; border-radius: 6px; color: #6f7a81; background: #10161a; font-size: 7px; }
+.live-race-controls button.active { border-color: #45542a; color: #caff3d; background: #151c10; }
+.live-race-board > header, .live-race-list > article { display: grid; grid-template-columns: minmax(300px, 1.3fr) 125px minmax(180px, 1fr) 90px 105px; align-items: center; gap: 12px; }
 .live-race-board > header { height: 32px; padding: 0 13px; border-bottom: 1px solid #20282d; color: #59646b; background: #090d10; font-size: 6px; letter-spacing: .08em; }
-.live-race-board > a { min-height: 55px; padding: 7px 13px; border-bottom: 1px solid #1e262b; color: #818b91; }
-.live-race-board > a:hover { background: #0f1518; }
-.live-race-board > a strong { display: block; color: #cbd0d2; font-size: 8px; }
-.live-race-board > a small { display: block; margin-top: 3px; color: #566169; font-size: 6px; }
-.live-race-board > a > span { display: flex; align-items: center; gap: 6px; font-size: 7px; }
-.live-race-board > a > span i { width: 5px; height: 5px; border-radius: 50%; background: #58636a; }
-.live-race-board > a.live > span { color: #caff3d; }
-.live-race-board > a.live > span i { background: #caff3d; box-shadow: 0 0 0 4px #caff3d0c; }
+.live-race-list { max-height: 330px; overflow: auto; scrollbar-color: #39434a #0b0f12; }
+.live-race-board-all .live-race-list { max-height: 390px; }
+.live-race-list > article { min-height: 55px; padding: 7px 13px; border-bottom: 1px solid #1e262b; color: #818b91; transition: background .18s ease, box-shadow .18s ease; }
+.live-race-list > article:hover, .live-race-list > article.focused { background: #0f1518; }
+.live-race-list > article.focused { box-shadow: inset 2px 0 #caff3d; }
+.live-race-focus { min-width: 0; padding: 0; border: 0; color: inherit; background: transparent; text-align: left; }
+.live-race-focus strong { display: block; overflow: hidden; color: #cbd0d2; font-size: 8px; white-space: nowrap; text-overflow: ellipsis; }
+.live-race-focus small { display: block; margin-top: 3px; overflow: hidden; color: #566169; font-size: 6px; white-space: nowrap; text-overflow: ellipsis; }
+.live-race-list > article > span { display: flex; align-items: center; gap: 6px; font-size: 7px; }
+.live-race-list > article > span i { width: 5px; height: 5px; border-radius: 50%; background: #58636a; }
+.live-race-list > article.live > span { color: #caff3d; }
+.live-race-list > article.live > span i { background: #caff3d; box-shadow: 0 0 0 4px #caff3d0c; }
 .live-race-track { position: relative; height: 20px; }
 .live-race-track::before { content: ""; position: absolute; left: 0; right: 0; top: 9px; height: 1px; background: #303840; }
 .live-race-track i { position: absolute; top: 6px; width: 6px; height: 6px; border: 2px solid #0d1115; border-radius: 50%; background: #caff3d; box-shadow: 0 0 0 1px #64783b; }
 .live-race-board code { color: #899299; font: 7px var(--font-mono); }
+.live-race-result { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.live-race-result > a { padding: 4px 7px; border: 1px solid #2d363d; border-radius: 5px; color: #88949a; font-size: 6px; }
+.live-race-result > a:hover { border-color: #546332; color: #caff3d; }
 .live-race-board > footer { height: 34px; padding: 0 13px; display: grid; grid-template-columns: 80px 1fr 40px; align-items: center; gap: 10px; color: #68737a; font-size: 7px; }
 .live-race-empty { padding: 22px; color: #68737a; text-align: center; font-size: 8px; }
 .broadcast-loading { min-height: 420px; display: grid; place-items: center; }
@@ -591,5 +612,7 @@ select { color-scheme: dark; }
   .live-focus-side { display: none; }
   .live-session-layout { grid-template-columns: 1fr; }
   .live-obligations, .live-context { display: none; }
-  .live-race-board > header, .live-race-board > a { grid-template-columns: minmax(220px, 1fr) 100px minmax(120px, .7fr) 70px 55px; }
+  .live-race-board > header, .live-race-list > article { grid-template-columns: minmax(220px, 1fr) 100px minmax(120px, .7fr) 70px 90px; }
+  .live-public-task { grid-template-columns: 1fr; }
+  .live-public-task aside { display: none; }
 }

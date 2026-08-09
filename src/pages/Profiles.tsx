@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Radar, Play } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { Button, ErrorBlock, LoadingBlock, PageHeader } from "../components/ui";
+import { Button, ErrorBlock, LoadingBlock } from "../components/ui";
 import RadarChart, { type RadarDatum } from "../components/RadarChart";
 import { useApi } from "../lib/useApi";
 import { gradeOf, gradeDescription } from "../lib/grades";
@@ -110,34 +110,40 @@ export default function Profiles() {
   const navigate = useNavigate();
   const state = useApi<ModelProfile[]>(`/model-profiles?lane=${lane}`, 10_000);
   return (
-    <div className="page">
-      <PageHeader
-        eyebrow="CAPABILITY PROFILES"
-        title="已测试 AI"
-        description="基于已完成评测的真实数据，为每个模型绘制能力画像：综合评级、维度雷达图与分类评级，全部来自本地评测记录。"
-      />
-      <div className="segmented">
-        <button className={lane === "unified" ? "active" : ""} onClick={() => setLane("unified")}>统一 Agent 赛道</button>
-        <button className={lane === "native" ? "active" : ""} onClick={() => setLane("native")}>原生 Agent 赛道</button>
+    <div className="ab-view ab-secondary-view ab-profiles-view">
+      <header className="ab-view-header">
+        <div className="ab-view-title"><span className="ab-view-index">06 / PROFILES</span><div><h1>能力画像</h1><p>按赛道聚合真实运行证据，基础维度与 Ultra 压力测试分层呈现。</p></div></div>
+        <div className="ab-header-meta"><span className="ab-meta-pill"><i />{state.data?.length ?? 0} PROFILES</span><button className="ab-run-button" type="button" onClick={() => navigate("/experiments?create=1")}><Play size={14} />新建评测</button></div>
+      </header>
+      <div className="ab-profile-layout">
+        <aside className="ab-section-pane">
+          <div className="ab-pane-label">COMPARISON LANES</div>
+          <button className={lane === "unified" ? "active" : ""} onClick={() => setLane("unified")}><span><Radar size={15} /></span><div><strong>统一 Agent 赛道</strong><small>控制工具与执行协议</small></div></button>
+          <button className={lane === "native" ? "active" : ""} onClick={() => setLane("native")}><span><Play size={15} /></span><div><strong>原生 Agent 赛道</strong><small>模型与系统能力整体计分</small></div></button>
+          <section className="ab-side-contract"><label>PROFILE CONTRACT</label><strong>LANES STAY SEPARATE</strong><p>不同执行范式不混合排名；低于 3 个样本的维度会标记为低置信度。</p></section>
+        </aside>
+        <main className="ab-profile-canvas">
+          <div className="ab-canvas-intro"><span>CAPABILITY LEDGER</span><div><h2>{lane === "unified" ? "基础模型能力" : "原生 Agent 系统能力"}</h2><p>从已完成运行提取分数、成功率、维度覆盖与高难任务表现。</p></div><b>{state.data?.reduce((sum, item) => sum + item.total_runs, 0) ?? 0} RUNS</b></div>
+          {state.loading ? (
+            <LoadingBlock />
+          ) : state.error || !state.data ? (
+            <ErrorBlock message={state.error ?? "读取能力画像失败"} retry={() => void state.refresh()} />
+          ) : state.data.length ? (
+            <div className="profile-grid">
+              {state.data.map((profile) => (
+                <ProfileCard key={profile.model_id} profile={profile} />
+              ))}
+            </div>
+          ) : (
+            <div className="inline-empty inline-empty-action">
+              <Radar size={30} />
+              <strong>该赛道还没有能力画像</strong>
+              <span>完成一次评测后，模型的维度能力画像会自动生成在这里。</span>
+              <Button onClick={() => navigate("/experiments")}><Play size={15} /> 去创建评测</Button>
+            </div>
+          )}
+        </main>
       </div>
-      {state.loading ? (
-        <LoadingBlock />
-      ) : state.error || !state.data ? (
-        <ErrorBlock message={state.error ?? "读取能力画像失败"} retry={() => void state.refresh()} />
-      ) : state.data.length ? (
-        <div className="profile-grid">
-          {state.data.map((profile) => (
-            <ProfileCard key={profile.model_id} profile={profile} />
-          ))}
-        </div>
-      ) : (
-        <div className="inline-empty inline-empty-action">
-          <Radar size={30} />
-          <strong>该赛道还没有能力画像</strong>
-          <span>完成一次评测后，模型的维度能力画像会自动生成在这里。</span>
-          <Button onClick={() => navigate("/experiments")}><Play size={15} /> 去创建评测</Button>
-        </div>
-      )}
     </div>
   );
 }

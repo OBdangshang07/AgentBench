@@ -25,6 +25,88 @@ CURRENT_SCORING_PROFILE = "balanced-v3"
 SUPPORTED_SCORING_PROFILES = {"balanced-v2", CURRENT_SCORING_PROFILE}
 
 
+def _extract_structured_answer(
+    raw: str, required_fields: set[str]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read a structured final answer without confusing presentation with correctness.
+
+    Native coding Agents frequently add a short explanation before the requested JSON or
+    wrap it in a Markdown code fence.  The validator still requires the declared fields
+    and applies the original literal/symbolic checks; this helper only recovers the JSON
+    object from that presentation layer.
+    """
+
+    text = raw.lstrip("\ufeff").strip()
+    try:
+        strict = json.loads(text)
+    except json.JSONDecodeError:
+        strict = None
+    if isinstance(strict, dict) and required_fields.issubset(strict):
+        return strict, {
+            "mode": "strict_json",
+            "format_compliant": True,
+            "embedded": False,
+        }
+
+    decoder = json.JSONDecoder()
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
+    for match in re.finditer(r"\{", text):
+        try:
+            value, consumed = decoder.raw_decode(text[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and required_fields.issubset(value):
+            candidates.append((match.start(), match.start() + consumed, value))
+    if not candidates:
+        raise ValueError(
+            "No JSON object containing the required answer fields was found"
+        )
+
+    start, end, value = candidates[-1]
+    before_fence = text.rfind("```", 0, start)
+    after_fence = text.find("```", end)
+    fenced = before_fence >= 0 and after_fence >= 0
+    return value, {
+        "mode": "json_code_fence" if fenced else "embedded_json",
+        "format_compliant": False,
+        "embedded": True,
+        "offset": start,
+        "warning": "答案 JSON 外包含说明文字；数学正确性照常评分，格式单独留痕",
+    }
+
+
+def _normalize_symbolic_candidate(candidate: Any) -> str:
+    """Normalize common human math notation before strict symbolic comparison."""
+
+    text = str(candidate).strip().strip("`$")
+    text = text.replace("\\cdot", "*").replace("\\times", "*")
+    text = text.replace("\\pi", "pi").replace("\\ln", "ln")
+    text = re.sub(r"\\sqrt\{([^{}]+)\}", r"sqrt(\1)", text)
+    text = text.translate(
+        str.maketrans(
+            {
+                "π": "pi",
+                "·": "*",
+                "×": "*",
+                "−": "-",
+                "–": "-",
+                "²": "**2",
+                "³": "**3",
+                "½": "(1/2)",
+            }
+        )
+    )
+    text = re.sub(r"√\s*\(([^()]*)\)", r"sqrt(\1)", text)
+    text = re.sub(r"√\s*([A-Za-z0-9]+)", r"sqrt(\1)", text)
+    # A final-answer field often contains a label or the complete equation.  Only
+    # the right-hand side is the candidate expression being compared.
+    if "=" in text:
+        text = text.rsplit("=", 1)[1]
+    if "≈" in text:
+        text = text.split("≈", 1)[0]
+    return text.strip().replace("^", "**")
+
+
 @dataclass(slots=True)
 class ValidationResult:
     validator_type: str
@@ -164,7 +246,9 @@ class ScoringEngine:
                 },
             )
         )
-        token_budget = max(0, int(limits.get("token_budget", 0)))
+        token_budget = max(
+            0, int(limits.get("token_budget", limits.get("max_tokens", 0)))
+        )
         total_tokens = max(0, tokens_input) + max(0, tokens_output)
         tokens_reported = total_tokens > 0 and token_budget > 0
         if tokens_reported:
@@ -345,15 +429,30 @@ class ScoringEngine:
         workspace: Workspace,
     ) -> ValidationResult:
         try:
-            import sympy
             from sympy import E, cos, exp, log, pi, simplify, sin, sqrt, symbols
+            from sympy.parsing.sympy_parser import (
+                implicit_multiplication_application,
+                parse_expr,
+                standard_transformations,
+            )
 
             path = config.get("path")
             raw = workspace.read_file(str(path)).lstrip("\ufeff") if path else final_answer
-            actual = json.loads(raw)
             fields = config.get("fields") or {}
-            if not isinstance(actual, dict) or not isinstance(fields, dict) or not fields:
+            if not isinstance(fields, dict) or not fields:
                 raise ValueError("symbolic_json requires a JSON object and field specifications")
+            required_fields = {str(item).split(".", 1)[0] for item in fields}
+            if path:
+                actual = json.loads(raw)
+                extraction = {
+                    "mode": "strict_json_file",
+                    "format_compliant": True,
+                    "embedded": False,
+                }
+            else:
+                actual, extraction = _extract_structured_answer(raw, required_fields)
+            if not isinstance(actual, dict):
+                raise ValueError("symbolic_json requires a JSON object")
             allowed_functions = {
                 "sin": sin,
                 "cos": cos,
@@ -410,9 +509,11 @@ class ScoringEngine:
                         aliases=keyword_aliases,
                         parser_locals=parse_locals,
                     ):
-                        text = str(candidate).strip().replace("^", "**")
+                        text = _normalize_symbolic_candidate(candidate)
                         if len(text) > 2000 or "__" in text or "." in text:
                             raise ValueError("unsafe symbolic expression")
+                        if not re.fullmatch(r"[A-Za-z0-9_+\-*/(),\s]+", text):
+                            raise ValueError("unsupported symbolic notation")
                         names = set(re.findall(r"[A-Za-z][A-Za-z0-9]*", text))
                         if not names.issubset(allowed_locals):
                             raise ValueError(
@@ -420,7 +521,15 @@ class ScoringEngine:
                             )
                         for name, alias in aliases.items():
                             text = re.sub(rf"\b{re.escape(name)}\b", alias, text)
-                        return sympy.sympify(text, locals=parser_locals)
+                        return parse_expr(
+                            text,
+                            local_dict=parser_locals,
+                            transformations=(
+                                *standard_transformations,
+                                implicit_multiplication_application,
+                            ),
+                            evaluate=True,
+                        )
 
                     candidate_expr = parse_expression(value)
                     expected_expr = parse_expression(expected)
@@ -471,7 +580,11 @@ class ScoringEngine:
                 "symbolic_json",
                 weight,
                 score,
-                {"field_scores": field_scores, "field_evidence": field_evidence},
+                {
+                    "field_scores": field_scores,
+                    "field_evidence": field_evidence,
+                    "answer_format": extraction,
+                },
             )
         except (ImportError, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
             return self._graded("symbolic_json", weight, 0.0, {"error": str(exc)})

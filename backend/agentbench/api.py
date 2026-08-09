@@ -17,6 +17,7 @@ from .schemas import (
     AppSettingUpdate,
     ExperimentCreate,
     ManualScoreUpdate,
+    MathQuestionUpdate,
     ModelCreate,
     ModelDiscoveryRequest,
     ModelUpdate,
@@ -213,6 +214,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail="math_paper_import_not_found") from exc
 
+    @app.patch("/api/v1/math-papers/imports/{import_id}/questions/{number}")
+    def update_math_paper_question(
+        import_id: str,
+        number: int,
+        payload: MathQuestionUpdate,
+        svc: Service,
+    ) -> dict[str, Any]:
+        try:
+            return svc.update_math_paper_question(
+                import_id, number, payload.model_dump(exclude_unset=True)
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="math_paper_import_not_found") from exc
+
+    @app.post("/api/v1/math-papers/imports/{import_id}/publish")
+    def publish_math_paper(import_id: str, svc: Service) -> dict[str, Any]:
+        try:
+            return svc.publish_math_paper(import_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="math_paper_import_not_found") from exc
+
     @app.get("/api/v1/suites")
     def suites(svc: Service) -> list[dict[str, Any]]:
         return svc.list_suites()
@@ -248,6 +270,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/v1/experiments/{experiment_id}/cancel")
     def cancel_experiment(experiment_id: str, svc: Service) -> dict[str, Any]:
         return svc.cancel_experiment(experiment_id)
+
+    @app.post("/api/v1/experiments/{experiment_id}/rejudge")
+    def rejudge_experiment(
+        experiment_id: str,
+        svc: Service,
+        scope: str = Query(default="structured", pattern="^(structured|all)$"),
+    ) -> dict[str, Any]:
+        svc.get_experiment(experiment_id)
+        return svc.rejudge_experiment(experiment_id, scope=scope)
 
     @app.get("/api/v1/experiments/{experiment_id}/export")
     def export_experiment(

@@ -4,6 +4,8 @@ import { HashRouter } from "react-router-dom";
 import App from "./App";
 import "./styles.css";
 import "./v3-theme.css";
+import "./studio-ui.css";
+import "./redesign-v2.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

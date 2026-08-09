@@ -12,6 +12,8 @@ from agentbench.catalog import (
     FULL_SUITE_ID,
     GAUNTLET_LITE_SUITE_ID,
     GAUNTLET_SUITE_ID,
+    MATH_2025_CLOSED_SUITE_ID,
+    MATH_2025_TOOL_SUITE_ID,
     NCRE_OFFICE_PAPER02_SUITE_ID,
     NCRE_OFFICE_PAPER03_SUITE_ID,
     NCRE_OFFICE_SUITE_ID,
@@ -428,7 +430,7 @@ def test_seed_disables_retired_builtin_cases(settings):
             "SELECT enabled FROM test_cases WHERE id='retired'"
         )
         assert retired == {"enabled": 0}
-        assert service.dashboard()["test_cases"] == 214
+        assert service.dashboard()["test_cases"] == 258
     finally:
         service.close()
 
@@ -556,13 +558,15 @@ def test_seeded_suites_have_expected_sizes(settings):
         assert len(service.get_suite(REASONING_SUITE_ID)["cases"]) == 25
         assert len(service.get_suite(PLANNING_SUITE_ID)["cases"]) == 15
         assert len(service.get_suite(CODING_SUITE_ID)["cases"]) == 20
+        assert len(service.get_suite(MATH_2025_CLOSED_SUITE_ID)["cases"]) == 22
+        assert len(service.get_suite(MATH_2025_TOOL_SUITE_ID)["cases"]) == 22
         gauntlet_cases = service.get_suite(GAUNTLET_SUITE_ID)["cases"]
         gauntlet_lite_cases = service.get_suite(GAUNTLET_LITE_SUITE_ID)["cases"]
         assert 50 <= len(gauntlet_cases) <= 75
         assert len(gauntlet_cases) >= 55
         assert {case["category"] for case in gauntlet_cases}.isdisjoint({"office-exam"})
         assert 50 <= len(gauntlet_lite_cases) <= 75
-        assert service.dashboard()["test_cases"] == 214
+        assert service.dashboard()["test_cases"] == 258
         suites = {item["id"]: item for item in service.list_suites()}
         assert suites[FRONTIER_SUITE_ID]["difficulty_max"] == 5
         assert suites[PRACTICAL_SUITE_ID]["docker_case_count"] > 0

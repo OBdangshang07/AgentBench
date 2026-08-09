@@ -25,7 +25,7 @@ def _question_type(number: int) -> str:
 def _question_points(number: int) -> int:
     if number <= 16:
         return 5
-    return 10 if number == 17 else 12
+    return 20 if number == 22 else 10
 
 
 def _rubric_template(number: int) -> dict[str, Any]:
@@ -278,6 +278,11 @@ def list_math_imports(data_dir: Path) -> list[dict[str, Any]]:
                 "detected_questions": sum(
                     bool(item.get("question_text")) for item in manifest.get("questions", [])
                 ),
+                "confirmed_questions": sum(
+                    item.get("review_status") == "confirmed"
+                    for item in manifest.get("questions", [])
+                ),
+                "published_suites": manifest.get("published_suites", []),
             }
         )
     return sorted(output, key=lambda item: str(item.get("created_at") or ""), reverse=True)
@@ -291,3 +296,219 @@ def get_math_import(data_dir: Path, import_id: str) -> dict[str, Any]:
     if not manifest_path.is_relative_to(root) or not manifest_path.is_file():
         raise FileNotFoundError(import_id)
     return json.loads(manifest_path.read_text(encoding="utf-8"))
+
+
+def _write_manifest(data_dir: Path, manifest: dict[str, Any]) -> None:
+    import_id = str(manifest.get("id") or "")
+    root = (data_dir / "math-papers").resolve()
+    manifest_path = (root / import_id / "manifest.json").resolve()
+    if not manifest_path.is_relative_to(root) or not manifest_path.is_file():
+        raise FileNotFoundError(import_id)
+    temporary = manifest_path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    temporary.replace(manifest_path)
+
+
+def update_math_question(
+    data_dir: Path,
+    import_id: str,
+    number: int,
+    changes: dict[str, Any],
+) -> dict[str, Any]:
+    manifest = get_math_import(data_dir, import_id)
+    if manifest.get("status") == "published":
+        raise ValueError("published_math_paper_is_immutable")
+    if not 1 <= number <= 22:
+        raise ValueError("invalid_math_question_number")
+    question = next(
+        (item for item in manifest.get("questions", []) if item.get("number") == number),
+        None,
+    )
+    if question is None:
+        raise ValueError("math_question_not_found")
+    allowed = {
+        "question_text",
+        "answer",
+        "accepted_answers",
+        "variables",
+        "solution_obligations",
+        "review_status",
+    }
+    for key, value in changes.items():
+        if key not in allowed:
+            continue
+        if isinstance(value, str):
+            value = value.strip()
+        elif isinstance(value, list):
+            value = [str(item).strip() for item in value if str(item).strip()]
+        question[key] = value
+
+    if changes.get("review_status") == "confirmed":
+        if not str(question.get("question_text") or "").strip():
+            raise ValueError("confirmed_question_requires_text")
+        if not str(question.get("answer") or "").strip():
+            raise ValueError("confirmed_question_requires_answer")
+        if question.get("type") == "solution" and not question.get("solution_obligations"):
+            raise ValueError("confirmed_solution_requires_obligations")
+    all_confirmed = len(manifest.get("questions", [])) == 22 and all(
+        item.get("review_status") == "confirmed" for item in manifest.get("questions", [])
+    )
+    manifest["status"] = "ready_to_publish" if all_confirmed else "needs_review"
+    manifest["updated_at"] = datetime.now(UTC).isoformat()
+    _write_manifest(data_dir, manifest)
+    return manifest
+
+
+def validate_publishable_math_import(manifest: dict[str, Any]) -> None:
+    questions = manifest.get("questions") or []
+    if len(questions) != 22:
+        raise ValueError("math_paper_requires_22_questions")
+    for question in questions:
+        number = int(question.get("number") or 0)
+        if question.get("review_status") != "confirmed":
+            raise ValueError(f"math_question_{number}_not_confirmed")
+        if not str(question.get("question_text") or "").strip():
+            raise ValueError(f"math_question_{number}_missing_text")
+        if not str(question.get("answer") or "").strip():
+            raise ValueError(f"math_question_{number}_missing_answer")
+        if question.get("type") == "solution" and not question.get("solution_obligations"):
+            raise ValueError(f"math_question_{number}_missing_obligations")
+
+
+def build_published_math_cases(manifest: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    validate_publishable_math_import(manifest)
+    source = manifest["source"]
+    year = int(manifest["year"])
+    source_hash = str(source["sha256"])
+    case_version = f"{year}.1.{source_hash[:8]}"
+    output: dict[str, list[dict[str, Any]]] = {"closed-book": [], "tool-augmented": []}
+    for lane in output:
+        for question in manifest["questions"]:
+            number = int(question["number"])
+            kind = str(question["type"])
+            accepted = list(question.get("accepted_answers") or [])
+            variables = list(question.get("variables") or [])
+            if kind == "choice":
+                fields = {
+                    "answer": {
+                        "kind": "literal",
+                        "expected": question["answer"],
+                        "accepted": accepted,
+                        "weight": 1,
+                    }
+                }
+                validators = [{"type": "symbolic_json", "weight": 100, "config": {"fields": fields}}]
+                response_rule = '{"answer":"A"}'
+            elif kind == "fill":
+                fields = {
+                    "answer": {
+                        "kind": "expression",
+                        "expected": question["answer"],
+                        "accepted": accepted,
+                        "variables": variables,
+                        "weight": 1,
+                    }
+                }
+                validators = [{"type": "symbolic_json", "weight": 100, "config": {"fields": fields}}]
+                response_rule = '{"answer":"化简后的最终表达式"}'
+            else:
+                answer_kind = str(question.get("answer_kind") or "expression")
+                objective_weight = max(0, min(100, int(question.get("objective_weight", 40))))
+                fields = {
+                    "final_answer": {
+                        "kind": answer_kind,
+                        "expected": question["answer"],
+                        "accepted": accepted,
+                        "variables": variables,
+                        "weight": 1,
+                    }
+                }
+                validators = []
+                if objective_weight:
+                    validators.append(
+                        {
+                            "type": "symbolic_json",
+                            "weight": objective_weight,
+                            "config": {"fields": fields},
+                        }
+                    )
+                validators.append(
+                    {
+                        "type": "ai_rubric",
+                        "weight": 100 - objective_weight,
+                        "config": {
+                            "reference_answer": question["answer"],
+                            "accepted_answers": accepted,
+                            "solution_obligations": question.get("solution_obligations") or [],
+                            "dimensions": [
+                                "建模或定理选择正确",
+                                "关键变换与中间结论有效",
+                                "使用条件、定义域、边界或分支完整",
+                                "推导可复核且最终结论一致",
+                            ],
+                            "alternate_solutions": "允许任意逻辑有效的等价解法，不得因路径不同扣分。",
+                            "error_carry_forward": "前一步独立错误导致的后续机械结果不重复扣分，保留此前正确方法分。",
+                        },
+                    }
+                )
+                response_rule = '{"final_answer":"最终结论","solution":"完整、可复核的推导"}'
+            lane_name = "闭卷推理" if lane == "closed-book" else "工具增强"
+            instruction = (
+                f"你正在参加 {year} 年考研数学（一）{lane_name}测试。\n\n"
+                f"第 {number} 题（{question['points']} 分）：\n{question['question_text']}\n\n"
+                f"请独立作答，最终严格输出 JSON：{response_rule}。"
+            )
+            output[lane].append(
+                {
+                    "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"agentbench:math:{year}:{lane}:{number}")),
+                    "slug": f"postgraduate-math.{year}.math1.q{number:02d}.{lane}",
+                    "version": case_version,
+                    "category": "postgraduate-math",
+                    "title": f"{year} 数学一 · 第 {number} 题 · {lane_name}",
+                    "description": f"真题第 {number} 题，{question['points']} 分，来源页 {', '.join(map(str, question.get('source_pages') or [])) or '人工校对'}。",
+                    "definition": {
+                        "slug": f"postgraduate-math.{year}.math1.q{number:02d}.{lane}",
+                        "version": case_version,
+                        "category": "postgraduate-math",
+                        "title": f"{year} 数学一 · 第 {number} 题 · {lane_name}",
+                        "description": f"经人工确认的 {year} 年考研数学（一）真题。",
+                        "instruction": instruction,
+                        "tools": [] if lane == "closed-book" else ["filesystem", "search", "shell"],
+                        "limits": {"max_runtime_seconds": 0, "max_steps": 160, "max_tokens": 100_000},
+                        "validators": validators,
+                        "tags": ["考研数学", str(year), kind, lane],
+                        "initial_files": {},
+                        "metadata": {
+                            "difficulty": 5,
+                            "estimated_minutes": 12 if kind != "solution" else 30,
+                            "capability": "高等数学、线性代数与概率统计综合推理",
+                            "exam": MATH_EXAM_ID,
+                            "year": year,
+                            "question_no": number,
+                            "points": question["points"],
+                            "question_type": kind,
+                            "lane": lane,
+                            "source_sha256": source_hash,
+                            "source_pages": question.get("source_pages") or [],
+                            "native_agent_compatible": lane != "closed-book",
+                            "private_validation": True,
+                        },
+                    },
+                }
+            )
+    return output
+
+
+def mark_math_import_published(
+    data_dir: Path,
+    import_id: str,
+    suites: list[dict[str, Any]],
+) -> dict[str, Any]:
+    manifest = get_math_import(data_dir, import_id)
+    manifest["status"] = "published"
+    manifest["published_at"] = datetime.now(UTC).isoformat()
+    manifest["published_suites"] = suites
+    _write_manifest(data_dir, manifest)
+    return manifest

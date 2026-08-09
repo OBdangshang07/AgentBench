@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, PropsWithChildren, ReactNode } from "react";
+import type { ButtonHTMLAttributes, ComponentProps, PropsWithChildren, ReactNode } from "react";
 import { AlertTriangle, LoaderCircle } from "lucide-react";
 import { statusLabel, statusTone } from "../lib/format";
 
@@ -22,8 +22,9 @@ export function Button({
 export function Card({
   children,
   className = "",
-}: PropsWithChildren<{ className?: string }>) {
-  return <section className={`card ${className}`}>{children}</section>;
+  ...props
+}: ComponentProps<"section">) {
+  return <section className={`card ${className}`} {...props}>{children}</section>;
 }
 
 export function PageHeader({

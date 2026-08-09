@@ -252,6 +252,70 @@ def test_rejudge_endpoint_rescores_needs_review_run(settings):
         assert experiment["status"] == "completed"
 
 
+def test_experiment_rejudge_recovers_structured_answers_without_rerunning_model(settings):
+    app = create_app(settings)
+    with TestClient(app) as client:
+        service = app.state.service
+        case = service.import_test_case(
+            TestCaseImport(
+                slug=f"test.structured-rejudge-{new_id()}",
+                version="1.0.0",
+                category="postgraduate-math",
+                title="Structured rejudge",
+                instruction='Return {"answer":"B"}.',
+                validators=[
+                    {
+                        "type": "symbolic_json",
+                        "weight": 100,
+                        "config": {
+                            "fields": {
+                                "answer": {"kind": "literal", "expected": "B"}
+                            }
+                        },
+                    }
+                ],
+                limits={"max_steps": 4, "time_target_seconds": 60},
+            )
+        )
+        suite_id = new_id()
+        service.database.execute(
+            "INSERT INTO test_suites(id,name,description,version,builtin,created_at) "
+            "VALUES (?,?,?,'1.0.0',0,?)",
+            (suite_id, "Structured Suite", "test", utc_now()),
+        )
+        service.database.execute(
+            "INSERT INTO suite_cases(suite_id,test_case_id,position) VALUES (?,?,0)",
+            (suite_id, case["id"]),
+        )
+        experiment = service.create_experiment(
+            ExperimentCreate(
+                name="Structured history repair",
+                suite_id=suite_id,
+                participants=[
+                    Participant(model_id=MOCK_MODEL_ID, runner_id=UNIFIED_RUNNER_ID)
+                ],
+            )
+        )
+        run_id = service.list_runs(experiment["id"])[0]["id"]
+        service._model_client = lambda _model, _metadata: SequencedClient(
+            ['分析完成。\n```json\n{"answer":"B"}\n```']
+        )
+        service._execute_run(run_id)
+        service.database.execute("UPDATE runs SET score=5.5,passed=0 WHERE id=?", (run_id,))
+
+        response = client.post(f"/api/v1/experiments/{experiment['id']}/rejudge")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["updated"] == 1
+        assert payload["failed"] == 0
+        assert payload["runs"][0]["previous_score"] == 5.5
+        assert payload["runs"][0]["score"] > 99
+        repaired = service.get_run(run_id)
+        assert repaired["passed"] is True
+        assert repaired["final_answer"].startswith("分析完成")
+
+
 def test_rejudge_endpoint_rejects_missing_final_answer_or_wrong_status(settings):
     app = create_app(settings)
     with TestClient(app) as client:

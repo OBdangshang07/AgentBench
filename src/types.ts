@@ -144,6 +144,10 @@ export interface TestCase {
   tools?: string[];
   requires_docker?: boolean;
   requires_judge?: boolean;
+  sample_size?: number;
+  avg_score?: number | null;
+  full_score_rate?: number | null;
+  low_discrimination?: boolean;
   definition?: {
     instruction: string;
     tools: string[];
@@ -171,7 +175,7 @@ export interface TestCase {
 
 export interface MathPaperImport {
   id: string;
-  status: "needs_review" | "confirmed" | string;
+  status: "needs_review" | "ready_to_publish" | "published" | string;
   exam: string;
   year: number;
   title: string;
@@ -181,14 +185,23 @@ export interface MathPaperImport {
     size_bytes: number;
     page_count: number;
   };
-  questions: Array<{
+  questions?: Array<{
     number: number;
     type: "choice" | "fill" | "solution";
     points: number;
     question_text: string;
+    answer?: string | null;
+    accepted_answers?: string[];
+    variables?: string[];
+    solution_obligations?: string[];
+    source_pages?: number[];
+    detection_confidence?: string;
     review_status: string;
   }>;
   warnings: string[];
+  detected_questions?: number;
+  confirmed_questions?: number;
+  published_suites?: Array<{ id: string; lane: string; name: string; case_count: number }>;
 }
 
 export interface Suite {
@@ -234,6 +247,9 @@ export interface Experiment {
   run_count?: number;
   finished_count?: number;
   avg_score?: number | null;
+  weighted_score?: number | null;
+  exam_score?: number | null;
+  exam_total?: number | null;
   created_at: string;
   started_at?: string;
   completed_at?: string;
@@ -243,6 +259,9 @@ export interface Experiment {
     failed: number;
     blocked: number;
     avg_score?: number | null;
+    weighted_score?: number | null;
+    exam_score?: number | null;
+    exam_total?: number | null;
     avg_objective_score?: number | null;
     avg_judge_score?: number | null;
     avg_time_score?: number | null;
