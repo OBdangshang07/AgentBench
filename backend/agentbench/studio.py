@@ -21,6 +21,7 @@ from .schemas import (
     SessionAttachmentImport,
     SessionCreate,
     SessionTurnCreate,
+    SkillPackCreate,
     TaskGraphCreate,
     TaskItemCreate,
 )
@@ -72,7 +73,45 @@ class StudioService:
         self.database = database
         self.settings = settings
         self.secrets = secrets
+        self.seed_skill_packs()
         self.recover_interrupted_sessions()
+
+    def seed_skill_packs(self) -> None:
+        if self.database.fetch_one("SELECT id FROM prompt_templates LIMIT 1"):
+            return
+        now = utc_now()
+        defaults = [
+            (
+                "代码审查",
+                "聚焦安全、正确性与可测试性",
+                "审查相关实现，优先报告可复现的问题、风险等级与最小修复建议。",
+                ["filesystem_read", "search", "shell"],
+                "standard",
+            ),
+            (
+                "前端实现",
+                "实现并验证可用的交互界面",
+                "先理解现有设计语言，再完成真实交互、响应式状态和相关前端测试。",
+                ["filesystem_read", "filesystem_write", "search", "shell"],
+                "standard",
+            ),
+            (
+                "发布前验证",
+                "执行发布前的回归与风险检查",
+                "检查版本、变更范围、测试、生产构建和发布产物，不改动无关文件。",
+                ["filesystem_read", "search", "shell"],
+                "standard",
+            ),
+        ]
+        with self.database.transaction() as connection:
+            connection.executemany(
+                "INSERT INTO prompt_templates(id,name,description,content,tools_json,"
+                "permission_profile,builtin,created_at,updated_at) VALUES (?,?,?,?,?,?,1,?,?)",
+                [
+                    (new_id(), name, description, content, json.dumps(tools), permission, now, now)
+                    for name, description, content, tools, permission in defaults
+                ],
+            )
 
     def recover_interrupted_sessions(self) -> None:
         now = utc_now()
@@ -467,6 +506,8 @@ class StudioService:
             "status": row["status"],
             "permission_profile": row["permission_profile"],
             "reasoning_effort": row.get("reasoning_effort") or "medium",
+            "skill_pack_id": row.get("skill_pack_id"),
+            "skill_pack_name": row.get("skill_pack_name"),
             "native_session_id": row.get("native_session_id"),
             "workspace_path": row["workspace_path"],
             "summary": row["summary"],
@@ -486,11 +527,13 @@ class StudioService:
     def _session_query(self, where: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
         return self.database.fetch_all(
             "SELECT s.*,p.name project_name,r.name runner_name,r.runner_type,m.name model_name,"
+            "pt.name skill_pack_name,"
             "(SELECT COUNT(*) FROM session_turns t WHERE t.session_id=s.id) turn_count,"
             "(SELECT COUNT(*) FROM approval_requests a WHERE a.session_id=s.id "
             "AND a.status='pending') pending_approvals "
             "FROM agent_sessions s JOIN projects p ON p.id=s.project_id "
             "JOIN agent_runners r ON r.id=s.runner_id JOIN models m ON m.id=s.model_id "
+            "LEFT JOIN prompt_templates pt ON pt.id=s.skill_pack_id "
             f"{where} ORDER BY s.updated_at DESC",
             params,
         )
@@ -507,15 +550,20 @@ class StudioService:
             model_id = self._default_entity_id("models")
         self._enabled_entity("agent_runners", runner_id)
         self._enabled_entity("models", model_id)
+        skill_pack = self.get_skill_pack(value.skill_pack_id) if value.skill_pack_id else None
         root = self._primary_root(value.project_id)
         session_id = new_id()
         now = utc_now()
-        permission_profile = value.permission_profile or project["permission_profile"]
+        permission_profile = (
+            value.permission_profile
+            or (skill_pack or {}).get("permission_profile")
+            or project["permission_profile"]
+        )
         with self.database.transaction() as connection:
             connection.execute(
                 "INSERT INTO agent_sessions(id,project_id,title,runner_id,model_id,status,"
-                "permission_profile,reasoning_effort,workspace_path,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,'idle',?,?,?,?,?)",
+                "permission_profile,reasoning_effort,skill_pack_id,workspace_path,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,'idle',?,?,?,?,?,?)",
                 (
                     session_id,
                     value.project_id,
@@ -524,6 +572,7 @@ class StudioService:
                     model_id,
                     permission_profile,
                     value.reasoning_effort,
+                    value.skill_pack_id,
                     str(root),
                     now,
                     now,
@@ -603,6 +652,7 @@ class StudioService:
             "model_id",
             "permission_profile",
             "reasoning_effort",
+            "skill_pack_id",
             "archived",
         }
         values = {key: value for key, value in changes.items() if key in allowed}
@@ -614,6 +664,8 @@ class StudioService:
             self._enabled_entity("agent_runners", values["runner_id"])
         if "model_id" in values and values["model_id"] is not None:
             self._enabled_entity("models", values["model_id"])
+        if "skill_pack_id" in values and values["skill_pack_id"] is not None:
+            self.get_skill_pack(values["skill_pack_id"])
         if "archived" in values:
             values["archived"] = int(bool(values["archived"]))
         if not values:
@@ -1247,7 +1299,6 @@ class StudioService:
             self.get_project(value.project_id)
         graph_id = new_id()
         now = utc_now()
-        node_ids: dict[str, str] = {}
         with self.database.transaction() as connection:
             connection.execute(
                 "INSERT INTO task_graphs(id,project_id,name,description,status,settings_json,"
@@ -1262,46 +1313,122 @@ class StudioService:
                     now,
                 ),
             )
-            for index, node in enumerate(value.nodes):
-                alias = str(node.get("id") or f"node-{index + 1}")
-                if alias in node_ids:
-                    raise ValueError("duplicate_graph_node_id")
-                node_id = new_id()
-                node_ids[alias] = node_id
-                connection.execute(
-                    "INSERT INTO task_nodes(id,graph_id,node_type,name,position_x,position_y,"
-                    "config_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,'pending',?,?)",
-                    (
-                        node_id,
-                        graph_id,
-                        str(node.get("type") or "agent"),
-                        str(node.get("name") or alias)[:180],
-                        float(node.get("x") or 0),
-                        float(node.get("y") or 0),
-                        json.dumps(node.get("config") or {}, ensure_ascii=False),
-                        now,
-                        now,
-                    ),
-                )
-            for edge in value.edges:
-                source = node_ids.get(str(edge.get("source")))
-                target = node_ids.get(str(edge.get("target")))
-                if not source or not target or source == target:
-                    raise ValueError("invalid_graph_edge")
-                connection.execute(
-                    "INSERT INTO task_edges(id,graph_id,source_node_id,target_node_id,"
-                    "condition_json,created_at) VALUES (?,?,?,?,?,?)",
-                    (
-                        new_id(),
-                        graph_id,
-                        source,
-                        target,
-                        json.dumps(edge.get("condition") or {}, ensure_ascii=False),
-                        now,
-                    ),
-                )
+            self._insert_graph_definition(connection, graph_id, value.nodes, value.edges, now)
         self.database.insert_audit("task_graph.created", "task_graph", graph_id)
         return self.get_graph(graph_id)
+
+    @staticmethod
+    def _insert_graph_definition(connection, graph_id: str, nodes: list[dict[str, Any]], edges: list[dict[str, Any]], now: str) -> None:
+        if not nodes:
+            raise ValueError("flow_requires_node")
+        allowed_types = {"agent", "approval", "condition", "tool"}
+        node_ids: dict[str, str] = {}
+        normalized_edges: list[tuple[str, str, dict[str, Any]]] = []
+        for index, node in enumerate(nodes):
+            alias = str(node.get("id") or f"node-{index + 1}")
+            if alias in node_ids:
+                raise ValueError("duplicate_graph_node_id")
+            node_type = str(node.get("type") or node.get("node_type") or "agent")
+            if node_type not in allowed_types:
+                raise ValueError("invalid_graph_node_type")
+            node_id = new_id()
+            node_ids[alias] = node_id
+            connection.execute(
+                "INSERT INTO task_nodes(id,graph_id,node_type,name,position_x,position_y,"
+                "config_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,'pending',?,?)",
+                (
+                    node_id,
+                    graph_id,
+                    node_type,
+                    str(node.get("name") or alias)[:180],
+                    float(node.get("x", node.get("position_x", 0)) or 0),
+                    float(node.get("y", node.get("position_y", 0)) or 0),
+                    json.dumps(node.get("config") or {}, ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+        seen_edges: set[tuple[str, str]] = set()
+        adjacency: dict[str, list[str]] = {alias: [] for alias in node_ids}
+        for edge in edges:
+            source_alias = str(edge.get("source") or edge.get("source_node_id") or "")
+            target_alias = str(edge.get("target") or edge.get("target_node_id") or "")
+            source = node_ids.get(source_alias)
+            target = node_ids.get(target_alias)
+            if not source or not target or source == target:
+                raise ValueError("invalid_graph_edge")
+            pair = (source_alias, target_alias)
+            if pair in seen_edges:
+                raise ValueError("duplicate_graph_edge")
+            seen_edges.add(pair)
+            adjacency[source_alias].append(target_alias)
+            normalized_edges.append((source, target, edge.get("condition") or {}))
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(alias: str) -> None:
+            if alias in visiting:
+                raise ValueError("graph_cycle_not_allowed")
+            if alias in visited:
+                return
+            visiting.add(alias)
+            for target_alias in adjacency[alias]:
+                visit(target_alias)
+            visiting.remove(alias)
+            visited.add(alias)
+
+        for alias in node_ids:
+            visit(alias)
+        for source, target, condition in normalized_edges:
+            connection.execute(
+                "INSERT INTO task_edges(id,graph_id,source_node_id,target_node_id,"
+                "condition_json,created_at) VALUES (?,?,?,?,?,?)",
+                (new_id(), graph_id, source, target, json.dumps(condition, ensure_ascii=False), now),
+            )
+
+    def update_graph(self, graph_id: str, value) -> dict[str, Any]:
+        graph = self.get_graph(graph_id)
+        if graph["status"] in {"running", "waiting_approval", "cancelling"}:
+            raise ValueError("active_flow_locked")
+        changes = value.model_dump(exclude_unset=True)
+        if "project_id" in changes and changes["project_id"]:
+            self.get_project(str(changes["project_id"]))
+        definition_changed = "nodes" in changes or "edges" in changes
+        if definition_changed and not ({"nodes", "edges"} <= changes.keys()):
+            raise ValueError("flow_nodes_and_edges_required")
+        now = utc_now()
+        with self.database.transaction() as connection:
+            values: dict[str, Any] = {}
+            if "project_id" in changes:
+                values["project_id"] = changes["project_id"]
+            if "name" in changes:
+                values["name"] = str(changes["name"]).strip()
+            if "description" in changes:
+                values["description"] = str(changes["description"] or "").strip()
+            if "settings" in changes:
+                values["settings_json"] = json.dumps(changes["settings"] or {}, ensure_ascii=False)
+            if definition_changed:
+                connection.execute("DELETE FROM task_edges WHERE graph_id=?", (graph_id,))
+                connection.execute("DELETE FROM task_nodes WHERE graph_id=?", (graph_id,))
+                self._insert_graph_definition(
+                    connection, graph_id, changes["nodes"], changes["edges"], now
+                )
+            if values or definition_changed:
+                values.update({"status": "draft", "updated_at": now, "completed_at": None})
+                assignments = ",".join(f"{key}=?" for key in values)
+                connection.execute(
+                    f"UPDATE task_graphs SET {assignments} WHERE id=?",
+                    (*values.values(), graph_id),
+                )
+        self.database.insert_audit("task_graph.updated", "task_graph", graph_id)
+        return self.get_graph(graph_id)
+
+    def delete_graph(self, graph_id: str) -> None:
+        graph = self.get_graph(graph_id)
+        if graph["status"] in {"running", "waiting_approval", "cancelling"}:
+            raise ValueError("active_flow_locked")
+        self.database.execute("DELETE FROM task_graphs WHERE id=?", (graph_id,))
+        self.database.insert_audit("task_graph.deleted", "task_graph", graph_id)
 
     def get_graph(self, graph_id: str) -> dict[str, Any]:
         graph = self.database.fetch_one("SELECT * FROM task_graphs WHERE id=?", (graph_id,))
@@ -1369,6 +1496,129 @@ class StudioService:
             raise
         self.database.insert_audit("mcp_server.created", "mcp_server", server_id)
         return self.get_mcp_server(server_id)
+
+    def update_mcp_server(self, server_id: str, value) -> dict[str, Any]:
+        current = self.get_mcp_server_internal(server_id)
+        if current.get("builtin"):
+            raise ValueError("builtin_mcp_server_locked")
+        changes = value.model_dump(exclude_unset=True)
+        remove_keys = set(changes.pop("remove_env_keys", []))
+        environment = dict(current.get("env_refs") or {})
+        for key in remove_keys:
+            reference = environment.pop(key, None)
+            if reference:
+                self.secrets.delete(str(reference))
+        for key, secret in (changes.pop("env", None) or {}).items():
+            if not key or not key.replace("_", "").isalnum():
+                raise ValueError("invalid_mcp_env_key")
+            reference = environment.get(key) or f"mcp-{server_id}-{key}"
+            self.secrets.set(reference, secret)
+            environment[key] = reference
+        transport = str(changes.get("transport") or current["transport"])
+        command = changes.get("command", current.get("command"))
+        url = str(changes["url"]) if changes.get("url") else changes.get("url", current.get("url"))
+        if transport == "stdio" and not command:
+            raise ValueError("mcp_stdio_command_required")
+        if transport != "stdio" and not url:
+            raise ValueError("mcp_url_required")
+        values: dict[str, Any] = {
+            "name": str(changes.get("name") or current["name"]).strip(),
+            "transport": transport,
+            "command": command if transport == "stdio" else None,
+            "args_json": json.dumps(changes.get("args", current.get("args") or []), ensure_ascii=False),
+            "url": url if transport != "stdio" else None,
+            "env_json": json.dumps(environment, ensure_ascii=False),
+            "enabled": int(bool(changes.get("enabled", current["enabled"]))),
+            "health_status": "unknown",
+            "tools_json": "[]",
+            "last_error": None,
+            "last_checked_at": None,
+            "updated_at": utc_now(),
+        }
+        assignments = ",".join(f"{key}=?" for key in values)
+        self.database.execute(
+            f"UPDATE mcp_servers SET {assignments} WHERE id=?", (*values.values(), server_id)
+        )
+        self.database.insert_audit("mcp_server.updated", "mcp_server", server_id)
+        return self.get_mcp_server(server_id)
+
+    def delete_mcp_server(self, server_id: str) -> None:
+        current = self.get_mcp_server_internal(server_id)
+        if current.get("builtin"):
+            raise ValueError("builtin_mcp_server_locked")
+        for reference in (current.get("env_refs") or {}).values():
+            self.secrets.delete(str(reference))
+        self.database.execute("DELETE FROM mcp_servers WHERE id=?", (server_id,))
+        self.database.insert_audit("mcp_server.deleted", "mcp_server", server_id)
+
+    def _public_skill_pack(self, row: dict[str, Any]) -> dict[str, Any]:
+        output = dict(row)
+        output["tools"] = _json(output.pop("tools_json"), [])
+        output["builtin"] = bool(output["builtin"])
+        return output
+
+    def list_skill_packs(self) -> list[dict[str, Any]]:
+        return [
+            self._public_skill_pack(row)
+            for row in self.database.fetch_all(
+                "SELECT * FROM prompt_templates ORDER BY builtin DESC,name"
+            )
+        ]
+
+    def get_skill_pack(self, pack_id: str) -> dict[str, Any]:
+        row = self.database.fetch_one("SELECT * FROM prompt_templates WHERE id=?", (pack_id,))
+        if not row:
+            raise KeyError("skill_pack_not_found")
+        return self._public_skill_pack(row)
+
+    def create_skill_pack(self, value: SkillPackCreate) -> dict[str, Any]:
+        pack_id = new_id()
+        now = utc_now()
+        self.database.execute(
+            "INSERT INTO prompt_templates(id,name,description,content,tools_json,"
+            "permission_profile,builtin,created_at,updated_at) VALUES (?,?,?,?,?,?,0,?,?)",
+            (
+                pack_id,
+                value.name.strip(),
+                value.description.strip(),
+                value.content.strip(),
+                json.dumps(value.tools, ensure_ascii=False),
+                value.permission_profile,
+                now,
+                now,
+            ),
+        )
+        self.database.insert_audit("skill_pack.created", "skill_pack", pack_id)
+        return self.get_skill_pack(pack_id)
+
+    def update_skill_pack(self, pack_id: str, value) -> dict[str, Any]:
+        current = self.get_skill_pack(pack_id)
+        if current["builtin"]:
+            raise ValueError("builtin_skill_pack_locked")
+        changes = value.model_dump(exclude_unset=True)
+        values: dict[str, Any] = {}
+        for key in ("name", "description", "content", "permission_profile"):
+            if key in changes:
+                values[key] = changes[key].strip() if isinstance(changes[key], str) else changes[key]
+        if "tools" in changes:
+            values["tools_json"] = json.dumps(changes["tools"] or [], ensure_ascii=False)
+        if values:
+            values["updated_at"] = utc_now()
+            assignments = ",".join(f"{key}=?" for key in values)
+            self.database.execute(
+                f"UPDATE prompt_templates SET {assignments} WHERE id=?",
+                (*values.values(), pack_id),
+            )
+        self.database.insert_audit("skill_pack.updated", "skill_pack", pack_id)
+        return self.get_skill_pack(pack_id)
+
+    def delete_skill_pack(self, pack_id: str) -> None:
+        current = self.get_skill_pack(pack_id)
+        if current["builtin"]:
+            raise ValueError("builtin_skill_pack_locked")
+        self.database.execute("UPDATE agent_sessions SET skill_pack_id=NULL WHERE skill_pack_id=?", (pack_id,))
+        self.database.execute("DELETE FROM prompt_templates WHERE id=?", (pack_id,))
+        self.database.insert_audit("skill_pack.deleted", "skill_pack", pack_id)
 
     def _public_mcp(self, row: dict[str, Any]) -> dict[str, Any]:
         row = dict(row)

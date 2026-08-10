@@ -11,6 +11,7 @@ import re
 import shutil
 import statistics
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -23,6 +24,7 @@ import httpx
 
 from . import __version__
 from .agent import AgentHarness, AgentResult
+from .browser_runtime import BrowserRuntime
 from .catalog import seed_builtin_data
 from .config import Settings
 from .db import Database, new_id, utc_now
@@ -270,6 +272,14 @@ def public_runner(row: dict[str, Any]) -> dict[str, Any]:
 
 def runner_adapter_capabilities(runner_type: str, tools: list[str]) -> dict[str, Any]:
     native_resume = runner_type in {"codex_cli", "claude_code_cli"}
+    browser_bridge = runner_type in {
+        "unified",
+        "codex_cli",
+        "claude_code_cli",
+        "opencode_cli",
+        "reasonix_cli",
+        "kimi_code_cli",
+    }
     structured = runner_type in {
         "unified",
         "codex_cli",
@@ -285,7 +295,8 @@ def runner_adapter_capabilities(runner_type: str, tools: list[str]) -> dict[str,
         "structured_events": "full" if runner_type == "unified" else (
             "stream" if structured else "filtered_text"
         ),
-        "mcp": "mcp" in tools,
+        "mcp": browser_bridge or "mcp" in tools,
+        "visible_browser": browser_bridge,
         "model_override": runner_type != "qoder_cli",
         "approval_gate": True,
         "process_tree_cancel": True,
@@ -340,6 +351,7 @@ class EvaluationService:
         self.database.sync_test_case_revisions()
         self.secrets = SecretStore(settings.data_dir)
         self.studio = StudioService(self.database, settings, self.secrets)
+        self.browser = BrowserRuntime(settings.data_dir)
         self.docker = DockerExecutor()
         self.scoring = ScoringEngine(self.docker)
         self.executor = ThreadPoolExecutor(
@@ -351,6 +363,7 @@ class EvaluationService:
         self._cancel_events: dict[str, threading.Event] = {}
         self._session_cancel_events: dict[str, threading.Event] = {}
         self._flow_cancel_events: dict[str, threading.Event] = {}
+        self._browser_bridges: dict[str, dict[str, Any]] = {}
         self._terminals: dict[str, tuple[str, InteractiveTerminal]] = {}
         self._experiment_semaphores: dict[str, threading.Semaphore] = {}
         self._install_jobs: dict[str, dict[str, Any]] = {}
@@ -390,6 +403,7 @@ class EvaluationService:
                 event.set()
             for event in self._flow_cancel_events.values():
                 event.set()
+            self._browser_bridges.clear()
             terminals = list(self._terminals.values())
             self._terminals.clear()
         for _, terminal in terminals:
@@ -397,6 +411,8 @@ class EvaluationService:
                 terminal.close()
         self.executor.shutdown(wait=False, cancel_futures=True)
         self.install_executor.shutdown(wait=False, cancel_futures=False)
+        with suppress(Exception):
+            self.browser.close()
 
     def recover_interrupted_runs(self) -> None:
         now = utc_now()
@@ -798,6 +814,25 @@ class EvaluationService:
                         "UPDATE task_graphs SET status='running',updated_at=? WHERE id=?",
                         (utc_now(), graph["id"]),
                     )
+                elif node["node_type"] == "condition":
+                    config = node.get("config") or {}
+                    source = "\n".join(
+                        json.dumps(item.get("output") or {}, ensure_ascii=False)
+                        for item in predecessors
+                    )[:40_000]
+                    expected = str(config.get("value") or "")
+                    operator = str(config.get("operator") or "contains")
+                    if operator == "equals":
+                        matched = source.strip() == expected.strip()
+                    elif operator == "not_contains":
+                        matched = expected.casefold() not in source.casefold()
+                    elif operator == "starts_with":
+                        matched = source.strip().casefold().startswith(expected.strip().casefold())
+                    elif operator == "ends_with":
+                        matched = source.strip().casefold().endswith(expected.strip().casefold())
+                    else:
+                        matched = expected.casefold() in source.casefold()
+                    output = {"matched": matched, "operator": operator, "value": expected}
                 else:
                     output = {
                         "matched": True,
@@ -859,13 +894,45 @@ class EvaluationService:
                 if int(settings.get("max_tokens", 500_000)) > 0 and int(usage["tokens"]) > int(settings.get("max_tokens", 500_000)):
                     raise RuntimeError("工作流超过 Token 预算")
                 node_map = {node["id"]: node for node in graph["nodes"]}
-                incoming: dict[str, list[str]] = {node["id"]: [] for node in graph["nodes"]}
+                incoming: dict[str, list[dict[str, Any]]] = {
+                    node["id"]: [] for node in graph["nodes"]
+                }
                 for edge in graph["edges"]:
-                    incoming[edge["target_node_id"]].append(edge["source_node_id"])
-                ready = [
-                    node for node in pending
-                    if all(node_map[source]["status"] == "completed" for source in incoming[node["id"]])
-                ]
+                    incoming[edge["target_node_id"]].append(edge)
+                ready: list[dict[str, Any]] = []
+                active_predecessors: dict[str, list[dict[str, Any]]] = {}
+                skipped: list[dict[str, Any]] = []
+                terminal = {"completed", "skipped", "failed", "cancelled"}
+                for node in pending:
+                    node_edges = incoming[node["id"]]
+                    if not node_edges:
+                        ready.append(node)
+                        active_predecessors[node["id"]] = []
+                        continue
+                    sources = [node_map[edge["source_node_id"]] for edge in node_edges]
+                    if not all(source["status"] in terminal for source in sources):
+                        continue
+                    active_sources: list[dict[str, Any]] = []
+                    for edge, source in zip(node_edges, sources, strict=True):
+                        condition = edge.get("condition") or {}
+                        if "when" in condition:
+                            matched = bool((source.get("output") or {}).get("matched"))
+                            if matched != bool(condition["when"]):
+                                continue
+                        active_sources.append(source)
+                    if not active_sources or any(source["status"] != "completed" for source in active_sources):
+                        skipped.append(node)
+                    else:
+                        ready.append(node)
+                        active_predecessors[node["id"]] = active_sources
+                if skipped:
+                    now = utc_now()
+                    for node in skipped:
+                        self.database.execute(
+                            "UPDATE task_nodes SET status='skipped',output_json=?,updated_at=? WHERE id=?",
+                            (json.dumps({"skipped": True, "reason": "condition_not_matched"}), now, node["id"]),
+                        )
+                    continue
                 if not ready:
                     raise RuntimeError("工作流存在环或不可达节点")
                 concurrency = max(1, min(int(settings.get("max_concurrency", 4)), 8))
@@ -876,9 +943,13 @@ class EvaluationService:
                             self._execute_flow_node,
                             graph,
                             node,
-                            [node_map[source] for source in incoming[node["id"]]],
+                            active_predecessors[node["id"]],
                             cancel_event,
-                            isolated=len(group) > 1 and node["node_type"] == "agent",
+                            isolated=(
+                                bool(settings.get("parallel_worktrees", True))
+                                and len(group) > 1
+                                and node["node_type"] == "agent"
+                            ),
                         ): node
                         for node in group
                     }
@@ -956,6 +1027,31 @@ class EvaluationService:
             self.check_mcp_server(item["id"])
             for item in self.studio.list_mcp_servers()
             if item["enabled"]
+        ]
+
+    def tool_gateway_status(self) -> list[dict[str, Any]]:
+        return [
+            {"id": "filesystem", "name": "Filesystem", "status": "online", "detail": "项目根目录限制、搜索、读取、写入与 Diff"},
+            {"id": "git-workspace", "name": "Git Workspace", "status": "online" if shutil.which("git") else "offline", "detail": "分支、Worktree、Diff 与安全合并"},
+            {
+                "id": "browser",
+                "name": "Browser",
+                "status": (
+                    "online"
+                    if self.browser.is_running()
+                    else "approval"
+                    if self.browser.executable
+                    else "unavailable"
+                ),
+                "detail": (
+                    "可视化 Chromium CDP 运行时已启动，可由用户随时接管"
+                    if self.browser.is_running()
+                    else "已检测到 Microsoft Edge，启动后支持导航、DOM、截图与交互"
+                    if self.browser.executable
+                    else "未检测到受支持的 Edge 或 Chrome"
+                ),
+            },
+            {"id": "terminal", "name": "Terminal", "status": "approval", "detail": "交互终端按会话权限与审批运行"},
         ]
 
     def execute_mcp_tool(self, server_id: str, value: McpToolCall) -> dict[str, Any]:
@@ -1270,6 +1366,13 @@ class EvaluationService:
                 context_items, ensure_ascii=False, indent=2
             )[:20000]
         history_block = f"\n\nRECENT SESSION HISTORY:\n{history}" if history else ""
+        skill_block = ""
+        if session.get("skill_pack_id"):
+            skill = self.studio.get_skill_pack(str(session["skill_pack_id"]))
+            skill_block = (
+                f"\n\nACTIVE SKILL PACK · {skill['name']}:\n"
+                f"{str(skill['content'])[:20000]}"
+            )
         return (
             "You are working in an AgentBench Studio project explicitly selected by the user. "
             "Work only inside the current project workspace. Do not expose private chain-of-thought; "
@@ -1278,8 +1381,16 @@ class EvaluationService:
             "or an observable finding, never private reasoning. Show verifiable progress through tool "
             "calls and finish with a useful summary. Preserve "
             "unrelated user changes and verify your work when practical."
-            f"{history_block}{context}\n\nCURRENT USER REQUEST:\n{turn['user_message']}"
+            f"{skill_block}{history_block}{context}\n\nCURRENT USER REQUEST:\n{turn['user_message']}"
         )
+
+    def _studio_session_tools(self, session: dict[str, Any]) -> list[str]:
+        available = self._studio_tools(session["permission_profile"])
+        if not session.get("skill_pack_id"):
+            return available
+        skill = self.studio.get_skill_pack(str(session["skill_pack_id"]))
+        requested = {str(tool) for tool in skill.get("tools") or []}
+        return [tool for tool in available if tool in requested] if requested else available
 
     def _materialize_studio_attachments(
         self,
@@ -1427,12 +1538,121 @@ class EvaluationService:
         return configured
 
     @staticmethod
+    def _studio_native_browser_options(
+        args: list[str],
+        runner_type: str,
+        browser_mcp: dict[str, Any] | None,
+        current_env: dict[str, str],
+    ) -> tuple[list[str], dict[str, str]]:
+        configured = list(args)
+        environment = dict(current_env)
+        if not browser_mcp:
+            return configured, environment
+        command = str(browser_mcp["command"])
+        command_args = [str(item) for item in browser_mcp.get("args") or []]
+        prompt_index = configured.index("{prompt}") if "{prompt}" in configured else len(configured)
+        stdio_definition = {"command": command, "args": command_args}
+        if runner_type == "codex_cli":
+            configured[prompt_index:prompt_index] = [
+                "-c",
+                f"mcp_servers.agentbench_browser.command={json.dumps(command)}",
+                "-c",
+                f"mcp_servers.agentbench_browser.args={json.dumps(command_args)}",
+            ]
+        elif runner_type in {"claude_code_cli", "kimi_code_cli"}:
+            configured[prompt_index:prompt_index] = [
+                "--mcp-config",
+                json.dumps(
+                    {"mcpServers": {"agentbench_browser": stdio_definition}},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            ]
+        elif runner_type == "opencode_cli":
+            overlay: dict[str, Any] = {}
+            raw_overlay = environment.get("OPENCODE_CONFIG_CONTENT")
+            if raw_overlay:
+                with suppress(json.JSONDecodeError):
+                    parsed = json.loads(raw_overlay)
+                    if isinstance(parsed, dict):
+                        overlay = parsed
+            servers = overlay.get("mcp") if isinstance(overlay.get("mcp"), dict) else {}
+            overlay["mcp"] = {
+                **servers,
+                "agentbench_browser": {
+                    "type": "local",
+                    "command": [command, *command_args],
+                    "enabled": True,
+                },
+            }
+            environment["OPENCODE_CONFIG_CONTENT"] = json.dumps(
+                overlay, ensure_ascii=False, separators=(",", ":")
+            )
+        return configured, environment
+
+    def _reasonix_browser_environment(
+        self,
+        bridge_token: str,
+        browser_mcp: dict[str, Any],
+        current_env: dict[str, str],
+    ) -> tuple[dict[str, str], Path]:
+        bridge_root = (self.settings.data_dir / "native-bridges" / bridge_token).resolve()
+        expected_root = (self.settings.data_dir / "native-bridges").resolve()
+        if not bridge_root.is_relative_to(expected_root):
+            raise RuntimeError("native_bridge_path_invalid")
+        bridge_root.mkdir(parents=True, exist_ok=True)
+        configured_home = current_env.get("REASONIX_HOME") or os.getenv("REASONIX_HOME")
+        source_home = (
+            Path(configured_home).expanduser().resolve()
+            if configured_home
+            else (Path(os.getenv("APPDATA") or Path.home() / "AppData" / "Roaming") / "reasonix").resolve()
+        )
+        source_config = source_home / "config.toml"
+        target_config = bridge_root / "config.toml"
+        if source_config.is_file():
+            shutil.copy2(source_config, target_config)
+        else:
+            target_config.write_text("config_version = 5\n", encoding="utf-8")
+        source_env = source_home / ".env"
+        if source_env.is_file():
+            shutil.copy2(source_env, bridge_root / ".env")
+        plugin_name = f"agentbench_browser_{bridge_token[:12]}"
+        command = str(browser_mcp["command"])
+        command_args = [str(item) for item in browser_mcp.get("args") or []]
+        with target_config.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "\n# Ephemeral AgentBench visible-browser bridge.\n"
+                "[[plugins]]\n"
+                f"name = {json.dumps(plugin_name)}\n"
+                f"command = {json.dumps(command)}\n"
+                f"args = {json.dumps(command_args)}\n"
+            )
+        (bridge_root / "mcp-activation.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "overrides": [
+                        {
+                            "scope": "global",
+                            "source": "user_config",
+                            "server": plugin_name,
+                            "enabled": True,
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return {"REASONIX_HOME": str(bridge_root)}, bridge_root
+
+    @staticmethod
     def _studio_tools(permission_profile: str) -> list[str]:
         if permission_profile == "readonly":
             return ["filesystem_read", "search"]
         if permission_profile == "workspace":
             return ["filesystem_read", "filesystem_write", "search"]
-        return ["filesystem_read", "filesystem_write", "search", "shell"]
+        return ["filesystem_read", "filesystem_write", "search", "shell", "browser"]
 
     def _studio_permission_already_allowed(
         self,
@@ -1513,7 +1733,7 @@ class EvaluationService:
         cancel_event: threading.Event,
     ):
         def authorize(name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
-            if name != "run_command":
+            if name != "run_command" and not name.startswith("browser_"):
                 return None
             current = self.database.fetch_one(
                 "SELECT permission_profile FROM agent_sessions WHERE id=?", (session["id"],)
@@ -1526,9 +1746,21 @@ class EvaluationService:
             if current_profile in {"readonly", "workspace"}:
                 return {
                     "ok": False,
-                    "error_code": "permission_profile_blocks_shell",
-                    "message": "当前会话权限不允许执行终端命令",
+                    "error_code": "permission_profile_blocks_tool",
+                    "message": "当前会话权限不允许执行该受保护工具",
                 }
+            if name.startswith("browser_"):
+                return self._wait_for_studio_approval(
+                    session,
+                    turn_id,
+                    request_type="browser",
+                    title="Agent 请求控制可视化浏览器",
+                    description="浏览器保持可见，你可以随时接管。网页交互可能产生外部状态变化。",
+                    request={"tool": name, "arguments": arguments},
+                    pattern="browser:*",
+                    risk_level="medium",
+                    cancel_event=cancel_event,
+                )
             command = str(arguments.get("command") or "").strip()
             safe_command = _redact_viewer_text(command, 1200)
             lower = command.lower()
@@ -1561,6 +1793,122 @@ class EvaluationService:
             )
 
         return authorize
+
+    def _studio_browser_tool(
+        self, name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        page_id = str(arguments.get("page_id") or "") or None
+        if name == "browser_navigate":
+            url = str(arguments.get("url") or "")
+            if not self.browser.is_running():
+                self.browser.launch()
+            return {"ok": True, **self.browser.navigate(url, page_id)}
+        if name == "browser_snapshot":
+            return {"ok": True, **self.browser.snapshot(page_id)}
+        if name == "browser_click":
+            return {
+                "ok": True,
+                **self.browser.interact(
+                    "click", str(arguments.get("selector") or ""), page_id=page_id
+                ),
+            }
+        if name == "browser_fill":
+            return {
+                "ok": True,
+                **self.browser.interact(
+                    "fill",
+                    str(arguments.get("selector") or ""),
+                    str(arguments.get("value") or ""),
+                    page_id,
+                ),
+            }
+        if name == "browser_screenshot":
+            artifact = self.browser.screenshot(page_id)
+            return {
+                "ok": True,
+                **artifact,
+                "url": f"/api/v1/browser/artifacts/{artifact['id']}",
+            }
+        return None
+
+    def _register_browser_bridge(
+        self,
+        session: dict[str, Any],
+        turn_id: str,
+        cancel_event: threading.Event,
+    ) -> tuple[str, dict[str, Any]]:
+        token = f"{uuid.uuid4().hex}{uuid.uuid4().hex}"
+        with self._state_lock:
+            self._browser_bridges[token] = {
+                "session": session,
+                "turn_id": turn_id,
+                "cancel_event": cancel_event,
+            }
+        if getattr(sys, "frozen", False):
+            command = str(Path(sys.executable).resolve())
+            args = ["--browser-mcp"]
+        else:
+            command = str(Path(sys.executable).resolve())
+            args = [
+                str((Path(__file__).resolve().parent.parent / "agentbench_entry.py").resolve()),
+                "--browser-mcp",
+            ]
+        args.extend(
+            [
+                "--api-base",
+                f"http://{self.settings.host}:{self.settings.port}",
+                "--bridge-token",
+                token,
+            ]
+        )
+        return token, {"command": command, "args": args}
+
+    def _unregister_browser_bridge(self, token: str | None) -> None:
+        if not token:
+            return
+        with self._state_lock:
+            self._browser_bridges.pop(token, None)
+
+    def execute_browser_bridge_tool(
+        self, token: str, tool_name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        with self._state_lock:
+            bridge = self._browser_bridges.get(token)
+        if bridge is None:
+            raise ValueError("browser_bridge_expired")
+        if tool_name not in {
+            "browser_navigate",
+            "browser_snapshot",
+            "browser_click",
+            "browser_fill",
+            "browser_screenshot",
+        }:
+            raise ValueError("browser_tool_not_allowed")
+        session = bridge["session"]
+        turn_id = str(bridge["turn_id"])
+        denied = self._studio_tool_authorizer(
+            session, turn_id, bridge["cancel_event"]
+        )(tool_name, arguments)
+        if denied is not None:
+            return denied
+        self.studio.append_event(
+            session["id"],
+            "live.tool",
+            {"tool": tool_name, "status": "running", "detail": "可视化浏览器正在执行操作"},
+            turn_id=turn_id,
+            visibility="recording_safe",
+        )
+        result = self._studio_browser_tool(tool_name, arguments)
+        if result is None:
+            raise ValueError("browser_tool_not_found")
+        self.studio.append_event(
+            session["id"],
+            "live.tool",
+            {"tool": tool_name, "status": "completed", "detail": "可视化浏览器操作已完成"},
+            turn_id=turn_id,
+            visibility="recording_safe",
+        )
+        return result
 
     def _execute_session_turn(self, turn_id: str) -> None:
         turn = self.database.fetch_one("SELECT * FROM session_turns WHERE id=?", (turn_id,))
@@ -1602,6 +1950,7 @@ class EvaluationService:
         before = self._studio_workspace_state(root, before_snapshot_root)
         attachment_root: Path | None = None
         attachments: list[dict[str, Any]] = []
+        browser_bridge_token: str | None = None
         workspace = Workspace(root)
         runner = self.database.fetch_one(
             "SELECT * FROM agent_runners WHERE id=?", (session["runner_id"],)
@@ -1659,7 +2008,7 @@ class EvaluationService:
                     client=client,
                     workspace=workspace,
                     docker=self.docker,
-                    allowed_capabilities=self._studio_tools(session["permission_profile"]),
+                    allowed_capabilities=self._studio_session_tools(session),
                     limits=limits,
                     system_prompt=(
                         str(runner.get("system_prompt") or "")
@@ -1670,6 +2019,7 @@ class EvaluationService:
                     tool_authorizer=self._studio_tool_authorizer(
                         session, turn_id, cancel_event
                     ),
+                    tool_executor=self._studio_browser_tool,
                 ).run(instruction)
             else:
                 native_denied = None
@@ -1708,9 +2058,15 @@ class EvaluationService:
                         "UPDATE agent_sessions SET status='running',updated_at=? WHERE id=?",
                         (utc_now(), session["id"]),
                     )
+                native_tools = self._studio_session_tools(session)
+                browser_mcp = None
+                if native_denied is None and "browser" in native_tools:
+                    browser_bridge_token, browser_mcp = self._register_browser_bridge(
+                        session, turn_id, cancel_event
+                    )
                 definition = {
                     "instruction": instruction,
-                    "tools": self._studio_tools(session["permission_profile"]),
+                    "tools": native_tools,
                     "limits": {
                         "max_runtime_seconds": int(
                             self.get_setting("default_max_runtime_seconds") or 7200
@@ -1722,6 +2078,8 @@ class EvaluationService:
                         "permission_profile": session["permission_profile"],
                         "reasoning_effort": session.get("reasoning_effort") or "medium",
                         "attachments": attachments,
+                        "browser_mcp": browser_mcp,
+                        "browser_bridge_token": browser_bridge_token,
                     },
                 }
                 if native_denied is None:
@@ -1911,6 +2269,7 @@ class EvaluationService:
                 turn_id=turn_id,
             )
         finally:
+            self._unregister_browser_bridge(browser_bridge_token)
             if attachment_root and attachment_root.exists():
                 with suppress(OSError):
                     shutil.rmtree(attachment_root)
@@ -4042,6 +4401,8 @@ class EvaluationService:
         runner_limits = _json(runner.get("limits_json"), {})
         definition_limits = definition.get("limits") or {}
         args = _json(runner.get("args_json"), [])
+        native_environment = _json(runner.get("env_json"), {})
+        native_bridge_root: Path | None = None
         model_settings = _json(model.get("settings_json"), {})
         native_session_id = str(metadata.get("native_session_id") or "").strip()
         if metadata.get("studio_session"):
@@ -4062,6 +4423,20 @@ class EvaluationService:
                 list(metadata.get("attachments") or []),
                 str(model.get("model_name") or ""),
             )
+            browser_mcp = metadata.get("browser_mcp")
+            args, native_environment = self._studio_native_browser_options(
+                args,
+                str(runner["runner_type"]),
+                browser_mcp if isinstance(browser_mcp, dict) else None,
+                native_environment,
+            )
+            if runner["runner_type"] == "reasonix_cli" and isinstance(browser_mcp, dict):
+                bridge_environment, native_bridge_root = self._reasonix_browser_environment(
+                    str(metadata.get("browser_bridge_token") or uuid.uuid4().hex),
+                    browser_mcp,
+                    native_environment,
+                )
+                native_environment.update(bridge_environment)
         if model.get("model_name") in {"auto", "default"} and "--model" in args:
             model_index = args.index("--model")
             del args[model_index : model_index + 2]
@@ -4212,27 +4587,34 @@ class EvaluationService:
                 },
             )
 
-        command_result = run_native_cli(
-            executable=executable,
-            args=args,
-            workspace=workspace,
-            placeholders=placeholders,
-            extra_env=_json(runner.get("env_json"), {}),
-            timeout=int(
-                definition_limits.get(
-                    "max_runtime_seconds",
-                    runner_limits.get(
+        try:
+            command_result = run_native_cli(
+                executable=executable,
+                args=args,
+                workspace=workspace,
+                placeholders=placeholders,
+                extra_env=native_environment,
+                timeout=int(
+                    definition_limits.get(
                         "max_runtime_seconds",
-                        self.get_setting("default_max_runtime_seconds")
-                        if self.get_setting("default_max_runtime_seconds") is not None
-                        else 7200,
-                    ),
-                )
-            ),
-            cancel_event=cancel_event,
-            line_callback=line_callback,
-            heartbeat_callback=heartbeat_callback,
-        )
+                        runner_limits.get(
+                            "max_runtime_seconds",
+                            self.get_setting("default_max_runtime_seconds")
+                            if self.get_setting("default_max_runtime_seconds") is not None
+                            else 7200,
+                        ),
+                    )
+                ),
+                cancel_event=cancel_event,
+                line_callback=line_callback,
+                heartbeat_callback=heartbeat_callback,
+            )
+        finally:
+            if native_bridge_root is not None:
+                expected_root = (self.settings.data_dir / "native-bridges").resolve()
+                resolved_bridge_root = native_bridge_root.resolve()
+                if resolved_bridge_root.is_relative_to(expected_root):
+                    shutil.rmtree(resolved_bridge_root, ignore_errors=True)
         with live_lock:
             pending_text = live_text_buffer.strip()
             pending_stream_id = f"native-message-{live_text_stream}"

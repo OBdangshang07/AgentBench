@@ -54,6 +54,7 @@ import type {
   ProjectTree,
   ReasoningEffort,
   SessionAttachment,
+  SkillPack,
   StudioEvent,
 } from "./types";
 import { useSessionStream } from "./useSessionStream";
@@ -188,6 +189,26 @@ function eventIcon(event: StudioEvent) {
   return <Brain size={15} />;
 }
 
+function isSecondaryOperation(event: StudioEvent) {
+  if (["live.tool", "live.command", "live.test", "live.file_change", "tool.requested", "tool.completed", "file.changed"].includes(event.event_type)) {
+    return eventTone(event) !== "failed";
+  }
+  return false;
+}
+
+function operationSummary(events: StudioEvent[]) {
+  const tools = events.filter((event) => event.event_type.includes("tool")).length;
+  const commands = events.filter((event) => event.event_type.includes("command")).length;
+  const tests = events.filter((event) => event.event_type.includes("test")).length;
+  const files = events.filter((event) => event.event_type.includes("file")).length;
+  return [
+    tools ? `${tools} 个工具` : "",
+    commands ? `${commands} 条命令` : "",
+    tests ? `${tests} 次验证` : "",
+    files ? `${files} 项文件变更` : "",
+  ].filter(Boolean).join(" · ");
+}
+
 interface SessionForm {
   project_id: string;
   title: string;
@@ -195,6 +216,7 @@ interface SessionForm {
   model_id: string;
   permission_profile: PermissionProfile;
   reasoning_effort: ReasoningEffort;
+  skill_pack_id: string;
 }
 
 interface StudioPickerOption {
@@ -402,6 +424,7 @@ export default function AgentStudio() {
   const { data: projects } = useApi<Project[]>("/projects");
   const { data: runners } = useApi<Runner[]>("/runners");
   const { data: models } = useApi<ModelConfig[]>("/models");
+  const { data: skillPacks } = useApi<SkillPack[]>("/skill-packs", 10_000);
   const { data: detail, loading, error, refresh } = useApi<AgentSessionDetail>(
     sessionId ? `/sessions/${sessionId}` : null,
     (current) => current && activeStatuses.has(current.status) ? 750 : 2_500,
@@ -435,7 +458,7 @@ export default function AgentStudio() {
   const [approvalBusy, setApprovalBusy] = useState<string | null>(null);
   const [configBusy, setConfigBusy] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
-  const [sessionForm, setSessionForm] = useState<SessionForm>({ project_id: "", title: "新 Agent 会话", runner_id: "", model_id: "", permission_profile: "workspace", reasoning_effort: "medium" });
+  const [sessionForm, setSessionForm] = useState<SessionForm>({ project_id: "", title: "新 Agent 会话", runner_id: "", model_id: "", permission_profile: "workspace", reasoning_effort: "medium", skill_pack_id: "" });
   const [studioLayout, setStudioLayout] = useState<StudioLayoutState>(initialStudioLayout);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileSearchRef = useRef<HTMLInputElement>(null);
@@ -524,6 +547,14 @@ export default function AgentStudio() {
     }
     return [...standalone, ...keyed.values()].sort((left, right) => left.seq - right.seq);
   }, [events]);
+  const primaryProcessEvents = useMemo(
+    () => processEvents.filter((event) => !isSecondaryOperation(event)),
+    [processEvents],
+  );
+  const operationEvents = useMemo(
+    () => processEvents.filter(isSecondaryOperation),
+    [processEvents],
+  );
   const collapsedEventCount = Math.max(0, events.length - processEvents.length);
   const pendingApprovals = useMemo(
     () => detail?.approvals.filter((item) => item.status === "pending") ?? [],
@@ -545,6 +576,14 @@ export default function AgentStudio() {
       label: model.name,
       description: `${model.provider} · ${model.model_name}`,
     })), [models]);
+  const skillOptions = useMemo<ComposerMenuOption[]>(() => [
+    { value: "", label: "无", description: "使用 Agent 默认工作方式" },
+    ...(skillPacks ?? []).map((pack) => ({
+      value: pack.id,
+      label: pack.name,
+      description: pack.description || "自定义提示词与工具组合",
+    })),
+  ], [skillPacks]);
   const liveUsage = useMemo(() => {
     if (!activeStatuses.has(detail?.status ?? "")) return { input: 0, output: 0, cost: 0 };
     const activeTurn = [...(detail?.turns ?? [])].reverse().find((turn) => activeStatuses.has(turn.status));
@@ -622,6 +661,7 @@ export default function AgentStudio() {
       model_id: project?.default_model_id ?? models?.find((item) => item.enabled)?.id ?? "",
       permission_profile: project?.permission_profile ?? "workspace",
       reasoning_effort: "medium",
+      skill_pack_id: "",
     });
     setCreateOpen(true);
   }
@@ -630,7 +670,10 @@ export default function AgentStudio() {
     event.preventDefault();
     setActionError(null);
     try {
-      const created = await api<AgentSession>("/sessions", { method: "POST", body: JSON.stringify(sessionForm) });
+      const created = await api<AgentSession>("/sessions", {
+        method: "POST",
+        body: JSON.stringify({ ...sessionForm, skill_pack_id: sessionForm.skill_pack_id || null }),
+      });
       setCreateOpen(false);
       await refreshSessions();
       navigate(`/studio/${created.id}`);
@@ -918,6 +961,7 @@ export default function AgentStudio() {
             <label><span>模型</span><select required value={sessionForm.model_id} onChange={(event) => setSessionForm({ ...sessionForm, model_id: event.target.value })}>{models?.filter((model) => model.enabled).map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>
             <label><span>权限</span><select value={sessionForm.permission_profile} onChange={(event) => setSessionForm({ ...sessionForm, permission_profile: event.target.value as PermissionProfile })}><option value="readonly">只读</option><option value="workspace">工作区读写</option><option value="standard">标准开发</option><option value="full">完全访问</option></select></label>
             <label><span>思考强度</span><select value={sessionForm.reasoning_effort} onChange={(event) => setSessionForm({ ...sessionForm, reasoning_effort: event.target.value as ReasoningEffort })}><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="max">最大</option></select></label>
+            <label className="full"><span>能力包</span><select value={sessionForm.skill_pack_id} onChange={(event) => setSessionForm({ ...sessionForm, skill_pack_id: event.target.value })}><option value="">不使用能力包</option>{skillPacks?.map((pack) => <option key={pack.id} value={pack.id}>{pack.name} · {pack.description}</option>)}</select></label>
           </div>
           {actionError && <div className="v4-error">{actionError}</div>}
           <footer><button className="v4-button secondary" type="button" onClick={() => setCreateOpen(false)}>取消</button><button className="v4-button primary" type="submit"><Sparkles size={16} />创建会话</button></footer>
@@ -982,7 +1026,7 @@ export default function AgentStudio() {
                 <b className={connected ? "live" : ""}><i />{connected ? "实时" : "已保存"}</b>
               </header>
               <div className="v4-process-list">
-                {processEvents.slice(-12).map((event, index, visible) => (
+                {primaryProcessEvents.slice(-8).map((event, index, visible) => (
                   <article key={`${event.event_type}-${event.seq}`} className={eventTone(event)}>
                     <span className="v4-process-icon">{eventIcon(event)}</span>
                     <div>
@@ -990,10 +1034,32 @@ export default function AgentStudio() {
                       {eventDetail(event) && (event.event_type === "live.message"
                         ? <p>{eventDetail(event)}</p>
                         : <pre>{eventDetail(event)}</pre>)}
-                      <small>{time(event.created_at)} · 步骤 {Math.max(1, processEvents.length - visible.length + index + 1)}</small>
+                      <small>{time(event.created_at)} · 公开进度 {Math.max(1, primaryProcessEvents.length - visible.length + index + 1)}</small>
                     </div>
                   </article>
                 ))}
+                {operationEvents.length > 0 && (
+                  <details className="v4-process-operations">
+                    <summary>
+                      <span><Code2 size={14} /></span>
+                      <div><strong>后台操作</strong><small>{operationSummary(operationEvents)}</small></div>
+                      <b>{operationEvents.length}</b>
+                      <ChevronRight className="v4-operation-chevron" size={14} />
+                    </summary>
+                    <div>
+                      {operationEvents.slice(-30).map((event) => (
+                        <article key={`${event.event_type}-${event.seq}`} className={eventTone(event)}>
+                          <span className="v4-process-icon">{eventIcon(event)}</span>
+                          <div>
+                            <header><strong>{eventTitle(event)}</strong><em>{eventCategory(event)}</em></header>
+                            {eventDetail(event) && <pre>{eventDetail(event)}</pre>}
+                            <small>{time(event.created_at)} · 操作 {event.seq}</small>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  </details>
+                )}
                 {!processEvents.length && (
                   <div className="v4-process-waiting"><Brain size={18} /><span><strong>Agent 正在处理</strong><small>等待下一条可公开的进度说明或工具活动…</small></span></div>
                 )}
@@ -1026,6 +1092,7 @@ export default function AgentStudio() {
             <button className="v4-composer-tool" type="button" onClick={() => void attachFiles()} disabled={attachmentBusy || attachments.length >= 10} title="添加图片或文件（单个最大 50 MB）"><Upload size={14} /><span>{attachmentBusy ? "添加中" : "附件"}</span></button>
             <ComposerMenu ariaLabel="会话访问权限" label="权限" icon={<ShieldCheck size={14} />} value={detail?.permission_profile ?? "workspace"} options={permissionOptions} disabled={configBusy} onChange={(value) => void updateRuntimeSetting({ permission_profile: value as PermissionProfile })} />
             <ComposerMenu ariaLabel="思考强度" label="思考" icon={<Brain size={14} />} value={detail?.reasoning_effort ?? "medium"} options={effortOptions} disabled={configBusy} onChange={(value) => void updateRuntimeSetting({ reasoning_effort: value as ReasoningEffort })} />
+            <ComposerMenu ariaLabel="会话能力包" label="能力" icon={<Sparkles size={14} />} value={detail?.skill_pack_id ?? ""} options={skillOptions} disabled={configBusy || activeStatuses.has(detail?.status ?? "")} onChange={(value) => void updateRuntimeSetting({ skill_pack_id: value || null })} />
             <span className="v4-quota" title={`输入 ${(detail?.tokens_input ?? 0) + liveUsage.input} · 输出 ${(detail?.tokens_output ?? 0) + liveUsage.output} · 预计费用 $${quotaCost.toFixed(4)}`}><Gauge size={14} /><span>{quotaTokens.toLocaleString()} Tokens{activeStatuses.has(detail?.status ?? "") && (liveUsage.input + liveUsage.output > 0) ? " · LIVE" : ""}</span><b>${quotaCost.toFixed(3)}</b></span>
             {activeStatuses.has(detail?.status ?? "") ? <button className="cancel" type="button" onClick={() => void cancel()}><CircleStop size={16} />停止</button> : <button className="send" type="submit" aria-label="发送消息" title="发送 · Enter" disabled={!message.trim() || sending}><Send size={16} /></button>}
           </footer>

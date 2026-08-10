@@ -73,7 +73,7 @@ describe("experiment live queue", () => {
   it("can reveal every run while keeping the current run on the live stage", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
-      if (url.endsWith("/health")) return response({ name: "AgentBench Desktop", version: "4.1.1" });
+      if (url.endsWith("/health")) return response({ name: "AgentBench Desktop", version: "4.2.0" });
       if (url.includes("/experiments/exp-live")) return response(experiment);
       if (url.includes("/runs?experiment_id=exp-live")) return response(runs);
       if (url.includes("/runs/run-1")) return response(runDetail(runs[0]));

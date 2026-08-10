@@ -16,11 +16,16 @@ from .reports import export_exam_report
 from .schemas import (
     ApprovalDecision,
     AppSettingUpdate,
+    BrowserAction,
+    BrowserLaunch,
+    BrowserNavigate,
+    BrowserToolCall,
     ExperimentCreate,
     FileChangeReview,
     ManualScoreUpdate,
     MathQuestionUpdate,
     McpServerCreate,
+    McpServerUpdate,
     McpToolCall,
     ModelCreate,
     ModelDiscoveryRequest,
@@ -33,7 +38,10 @@ from .schemas import (
     SessionCreate,
     SessionTurnCreate,
     SessionUpdate,
+    SkillPackCreate,
+    SkillPackUpdate,
     TaskGraphCreate,
+    TaskGraphUpdate,
     TaskItemCreate,
     TaskItemUpdate,
     TerminalCreate,
@@ -365,6 +373,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def flow(graph_id: str, svc: Service) -> dict[str, Any]:
         return svc.studio.get_graph(graph_id)
 
+    @app.patch("/api/v1/flows/{graph_id}")
+    def update_flow(
+        graph_id: str, payload: TaskGraphUpdate, svc: Service
+    ) -> dict[str, Any]:
+        return svc.studio.update_graph(graph_id, payload)
+
+    @app.delete("/api/v1/flows/{graph_id}", status_code=204)
+    def delete_flow(graph_id: str, svc: Service) -> Response:
+        svc.studio.delete_graph(graph_id)
+        return Response(status_code=204)
+
     @app.post("/api/v1/flows/{graph_id}/run", status_code=202)
     def run_flow(graph_id: str, svc: Service) -> dict[str, Any]:
         return svc.start_flow(graph_id)
@@ -381,6 +400,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def create_mcp_server(payload: McpServerCreate, svc: Service) -> dict[str, Any]:
         return svc.studio.create_mcp_server(payload)
 
+    @app.patch("/api/v1/mcp-servers/{server_id}")
+    def update_mcp_server(
+        server_id: str, payload: McpServerUpdate, svc: Service
+    ) -> dict[str, Any]:
+        return svc.studio.update_mcp_server(server_id, payload)
+
+    @app.delete("/api/v1/mcp-servers/{server_id}", status_code=204)
+    def delete_mcp_server(server_id: str, svc: Service) -> Response:
+        svc.studio.delete_mcp_server(server_id)
+        return Response(status_code=204)
+
     @app.post("/api/v1/mcp-servers/health")
     def check_all_mcp_servers(svc: Service) -> list[dict[str, Any]]:
         return svc.check_all_mcp_servers()
@@ -394,6 +424,84 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         server_id: str, payload: McpToolCall, svc: Service
     ) -> dict[str, Any]:
         return svc.execute_mcp_tool(server_id, payload)
+
+    @app.get("/api/v1/skill-packs")
+    def skill_packs(svc: Service) -> list[dict[str, Any]]:
+        return svc.studio.list_skill_packs()
+
+    @app.post("/api/v1/skill-packs", status_code=201)
+    def create_skill_pack(payload: SkillPackCreate, svc: Service) -> dict[str, Any]:
+        return svc.studio.create_skill_pack(payload)
+
+    @app.patch("/api/v1/skill-packs/{pack_id}")
+    def update_skill_pack(
+        pack_id: str, payload: SkillPackUpdate, svc: Service
+    ) -> dict[str, Any]:
+        return svc.studio.update_skill_pack(pack_id, payload)
+
+    @app.delete("/api/v1/skill-packs/{pack_id}", status_code=204)
+    def delete_skill_pack(pack_id: str, svc: Service) -> Response:
+        svc.studio.delete_skill_pack(pack_id)
+        return Response(status_code=204)
+
+    @app.get("/api/v1/tools/status")
+    def tool_gateway_status(svc: Service) -> list[dict[str, Any]]:
+        return svc.tool_gateway_status()
+
+    @app.get("/api/v1/browser/status")
+    def browser_status(svc: Service) -> dict[str, Any]:
+        return svc.browser.status()
+
+    @app.post("/api/v1/browser/launch")
+    def browser_launch(payload: BrowserLaunch, svc: Service) -> dict[str, Any]:
+        return svc.browser.launch(payload.url)
+
+    @app.post("/api/v1/browser/pages")
+    def browser_new_page(payload: BrowserLaunch, svc: Service) -> dict[str, Any]:
+        return svc.browser.new_page(payload.url)
+
+    @app.get("/api/v1/browser/pages")
+    def browser_pages(svc: Service) -> list[dict[str, Any]]:
+        return svc.browser.pages()
+
+    @app.post("/api/v1/browser/navigate")
+    def browser_navigate(payload: BrowserNavigate, svc: Service) -> dict[str, Any]:
+        return svc.browser.navigate(payload.url, payload.page_id)
+
+    @app.get("/api/v1/browser/snapshot")
+    def browser_snapshot(
+        svc: Service, page_id: str | None = None
+    ) -> dict[str, Any]:
+        return svc.browser.snapshot(page_id)
+
+    @app.post("/api/v1/browser/actions")
+    def browser_action(payload: BrowserAction, svc: Service) -> dict[str, Any]:
+        return svc.browser.interact(
+            payload.action, payload.selector, payload.value, payload.page_id
+        )
+
+    @app.post("/api/v1/browser/screenshots")
+    def browser_screenshot(
+        svc: Service, page_id: str | None = None
+    ) -> dict[str, Any]:
+        artifact = svc.browser.screenshot(page_id)
+        return {**artifact, "url": f"/api/v1/browser/artifacts/{artifact['id']}"}
+
+    @app.post("/api/v1/browser/bridge/{bridge_token}", include_in_schema=False)
+    def browser_bridge_call(
+        bridge_token: str, payload: BrowserToolCall, svc: Service
+    ) -> dict[str, Any]:
+        return svc.execute_browser_bridge_tool(
+            bridge_token, payload.tool_name, payload.arguments
+        )
+
+    @app.get("/api/v1/browser/artifacts/{artifact_id}")
+    def browser_artifact(artifact_id: str, svc: Service) -> FileResponse:
+        return FileResponse(svc.browser.artifact(artifact_id), media_type="image/png")
+
+    @app.post("/api/v1/browser/close")
+    def browser_close(svc: Service) -> dict[str, Any]:
+        return svc.browser.close()
 
     @app.get("/api/v1/system/status")
     def system_status(svc: Service) -> dict[str, Any]:

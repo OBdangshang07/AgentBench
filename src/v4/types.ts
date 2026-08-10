@@ -146,6 +146,8 @@ export interface AgentSession {
   status: string;
   permission_profile: PermissionProfile;
   reasoning_effort: ReasoningEffort;
+  skill_pack_id: string | null;
+  skill_pack_name: string | null;
   native_session_id: string | null;
   workspace_path: string;
   summary: string;
@@ -246,4 +248,49 @@ export interface McpServer {
   builtin: boolean;
   created_at: string;
   updated_at: string;
+}
+
+export interface SkillPack {
+  id: string;
+  name: string;
+  description: string;
+  content: string;
+  tools: string[];
+  permission_profile: PermissionProfile | null;
+  builtin: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ToolGatewayStatus {
+  id: "filesystem" | "git-workspace" | "browser" | "terminal";
+  name: string;
+  status: "online" | "offline" | "approval" | "unavailable";
+  detail: string;
+}
+
+export interface BrowserPage {
+  id: string;
+  title: string;
+  url: string;
+  type?: string;
+}
+
+export interface BrowserStatus {
+  installed: boolean;
+  running: boolean;
+  executable: string | null;
+  engine: string | null;
+  profile_path: string;
+  page_count: number;
+  pages: BrowserPage[];
+  manual_takeover: boolean;
+}
+
+export interface BrowserSnapshot {
+  title: string;
+  url: string;
+  text: string;
+  links: Array<{ index: number; text: string; href: string }>;
+  controls: Array<{ index: number; tag: string; type: string | null; text: string; id: string | null; name: string | null }>;
 }

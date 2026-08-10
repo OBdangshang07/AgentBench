@@ -11,6 +11,7 @@ from .model_clients import ModelClient, ModelClientError, ModelUsage
 
 EventSink = Callable[[str, dict[str, Any]], None]
 ToolAuthorizer = Callable[[str, dict[str, Any]], dict[str, Any] | None]
+ToolExecutor = Callable[[str, dict[str, Any]], dict[str, Any] | None]
 
 
 TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
@@ -66,6 +67,58 @@ TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
+    "browser_navigate": {
+        "name": "browser_navigate",
+        "description": "Open or navigate the visible AgentBench browser to an HTTP(S) URL.",
+        "parameters": {
+            "type": "object",
+            "required": ["url"],
+            "properties": {"url": {"type": "string"}, "page_id": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "browser_snapshot": {
+        "name": "browser_snapshot",
+        "description": "Read the current page text, links and interactive controls.",
+        "parameters": {
+            "type": "object",
+            "properties": {"page_id": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "browser_click": {
+        "name": "browser_click",
+        "description": "Click an element in the visible browser using a CSS selector.",
+        "parameters": {
+            "type": "object",
+            "required": ["selector"],
+            "properties": {"selector": {"type": "string"}, "page_id": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "browser_fill": {
+        "name": "browser_fill",
+        "description": "Fill an input in the visible browser using a CSS selector.",
+        "parameters": {
+            "type": "object",
+            "required": ["selector", "value"],
+            "properties": {
+                "selector": {"type": "string"},
+                "value": {"type": "string"},
+                "page_id": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "browser_screenshot": {
+        "name": "browser_screenshot",
+        "description": "Capture the visible browser viewport as a PNG artifact.",
+        "parameters": {
+            "type": "object",
+            "properties": {"page_id": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
 }
 
 
@@ -94,6 +147,7 @@ class AgentHarness:
         event_sink: EventSink,
         cancellation_check: Callable[[], bool] | None = None,
         tool_authorizer: ToolAuthorizer | None = None,
+        tool_executor: ToolExecutor | None = None,
     ):
         self.client = client
         self.workspace = workspace
@@ -104,6 +158,7 @@ class AgentHarness:
         self.event_sink = event_sink
         self.cancellation_check = cancellation_check or (lambda: False)
         self.tool_authorizer = tool_authorizer
+        self.tool_executor = tool_executor
 
     def _tools(self) -> list[dict[str, Any]]:
         names: list[str] = []
@@ -118,6 +173,16 @@ class AgentHarness:
             names.append("search_text")
         if "shell" in self.allowed_capabilities:
             names.append("run_command")
+        if "browser" in self.allowed_capabilities:
+            names.extend(
+                [
+                    "browser_navigate",
+                    "browser_snapshot",
+                    "browser_click",
+                    "browser_fill",
+                    "browser_screenshot",
+                ]
+            )
         return [TOOL_DEFINITIONS[name] for name in dict.fromkeys(names)]
 
     def run(self, instruction: str) -> AgentResult:
@@ -264,6 +329,10 @@ class AgentHarness:
                 denied = self.tool_authorizer(name, arguments)
                 if denied is not None:
                     return denied
+            if self.tool_executor is not None:
+                executed = self.tool_executor(name, arguments)
+                if executed is not None:
+                    return executed
             if name == "read_file" and {
                 "filesystem",
                 "filesystem_read",

@@ -12,6 +12,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agentbench.api import create_app
+from agentbench.browser_mcp import BrowserMcpBridge
+from agentbench.browser_runtime import BrowserRuntime, BrowserRuntimeError
 from agentbench.catalog import MOCK_MODEL_ID, UNIFIED_RUNNER_ID
 from agentbench.execution import CommandResult
 from agentbench.model_clients import ModelDecision, ModelUsage
@@ -19,12 +21,16 @@ from agentbench.schemas import (
     ApprovalDecision,
     FileChangeReview,
     McpServerCreate,
+    McpServerUpdate,
     McpToolCall,
     ProjectCreate,
     SessionAttachmentImport,
     SessionCreate,
     SessionTurnCreate,
+    SkillPackCreate,
+    SkillPackUpdate,
     TaskGraphCreate,
+    TaskGraphUpdate,
     TaskItemCreate,
     TerminalCreate,
     TerminalInput,
@@ -53,6 +59,29 @@ class StudioWriteClient:
             content="Created generated.txt and verified the Studio runtime.",
             usage=ModelUsage(input_tokens=60, output_tokens=12),
             raw={"test": True},
+        )
+
+
+class BrowserToolClient:
+    def __init__(self) -> None:
+        self.index = 0
+
+    def complete(self, history, tools) -> ModelDecision:
+        del history
+        self.index += 1
+        if self.index == 1:
+            assert "browser_navigate" in {tool["name"] for tool in tools}
+            return ModelDecision(
+                kind="tool",
+                tool_name="browser_navigate",
+                tool_arguments={"url": "https://example.com"},
+                tool_call_id="browser-call-1",
+                usage=ModelUsage(input_tokens=20, output_tokens=10),
+            )
+        return ModelDecision(
+            kind="final",
+            content="Browser navigation completed.",
+            usage=ModelUsage(input_tokens=10, output_tokens=5),
         )
 
 
@@ -162,7 +191,7 @@ def test_v4_schema_keeps_benchmarks_separate_from_studio(settings) -> None:
             "mcp_servers",
         } <= tables
         assert {"experiments", "runs", "run_events", "test_cases"} <= tables
-        assert service.database.fetch_one("SELECT version FROM schema_meta") == {"version": 7}
+        assert service.database.fetch_one("SELECT version FROM schema_meta") == {"version": 8}
     finally:
         service.close()
 
@@ -589,6 +618,252 @@ def test_tasks_graphs_and_mcp_definitions_are_real_local_records(settings, tmp_p
         service.close()
 
 
+def test_flow_mcp_skill_and_browser_management_apis_are_mutable(settings, tmp_path) -> None:
+    with TestClient(create_app(settings)) as client:
+        root = tmp_path / "management-api"
+        root.mkdir()
+        project = client.post(
+            "/api/v1/projects",
+            json={
+                "name": "Management API",
+                "root_path": str(root),
+                "default_runner_id": UNIFIED_RUNNER_ID,
+                "default_model_id": MOCK_MODEL_ID,
+            },
+        ).json()
+
+        flow_response = client.post(
+            "/api/v1/flows",
+            json={
+                "project_id": project["id"],
+                "name": "API flow",
+                "nodes": [{"id": "plan", "type": "agent", "name": "Plan"}],
+            },
+        )
+        assert flow_response.status_code == 201
+        flow = flow_response.json()
+        edited = client.patch(
+            f"/api/v1/flows/{flow['id']}",
+            json={
+                "name": "Edited API flow",
+                "nodes": [
+                    {"id": "plan", "type": "agent", "name": "Plan"},
+                    {"id": "gate", "type": "condition", "name": "Gate"},
+                ],
+                "edges": [{"source": "plan", "target": "gate"}],
+            },
+        ).json()
+        assert edited["name"] == "Edited API flow"
+        assert len(edited["nodes"]) == 2
+
+        mcp = client.post(
+            "/api/v1/mcp-servers",
+            json={"name": "API MCP", "transport": "stdio", "command": "cmd", "args": []},
+        ).json()
+        assert client.patch(
+            f"/api/v1/mcp-servers/{mcp['id']}", json={"name": "Edited API MCP"}
+        ).json()["name"] == "Edited API MCP"
+
+        skill = client.post(
+            "/api/v1/skill-packs",
+            json={
+                "name": "API skill",
+                "description": "Created through HTTP",
+                "content": "Inspect the selected project.",
+                "tools": ["search"],
+            },
+        ).json()
+        assert client.patch(
+            f"/api/v1/skill-packs/{skill['id']}", json={"description": "Editable"}
+        ).json()["description"] == "Editable"
+        browser_status = client.get("/api/v1/browser/status")
+        assert browser_status.status_code == 200
+        assert "installed" in browser_status.json()
+
+        assert client.delete(f"/api/v1/flows/{flow['id']}").status_code == 204
+        assert client.delete(f"/api/v1/mcp-servers/{mcp['id']}").status_code == 204
+        assert client.delete(f"/api/v1/skill-packs/{skill['id']}").status_code == 204
+
+
+def test_skill_packs_are_persisted_and_applied_to_studio_sessions(settings, tmp_path) -> None:
+    service = EvaluationService(settings)
+    try:
+        project = create_project(service, tmp_path / "skill-project")
+        assert {item["name"] for item in service.studio.list_skill_packs()} >= {
+            "代码审查",
+            "前端实现",
+            "发布前验证",
+        }
+        skill = service.studio.create_skill_pack(
+            SkillPackCreate(
+                name="只读巡查",
+                description="只读取项目并报告",
+                content="只进行可验证的只读巡查。",
+                tools=["filesystem_read", "search"],
+                permission_profile="readonly",
+            )
+        )
+        session = service.studio.create_session(
+            SessionCreate(
+                project_id=project["id"],
+                title="Skill session",
+                skill_pack_id=skill["id"],
+            )
+        )
+        assert session["skill_pack_name"] == "只读巡查"
+        assert session["permission_profile"] == "readonly"
+        assert service._studio_session_tools(session) == ["filesystem_read", "search"]
+
+        updated = service.studio.update_skill_pack(
+            skill["id"], SkillPackUpdate(description="更新后的说明")
+        )
+        assert updated["description"] == "更新后的说明"
+        service.studio.delete_skill_pack(skill["id"])
+        assert service.studio.get_session(session["id"])["skill_pack_id"] is None
+    finally:
+        service.close()
+
+
+def test_browser_runtime_rejects_non_web_urls_before_launch(tmp_path) -> None:
+    browser = BrowserRuntime(tmp_path / "browser-runtime")
+    with pytest.raises(BrowserRuntimeError, match="browser_url_scheme_not_allowed"):
+        browser.launch("file:///C:/Windows/System32")
+
+
+def test_unified_studio_agent_can_control_the_visible_browser(settings, tmp_path) -> None:
+    service = EvaluationService(settings)
+    calls: list[str] = []
+    service.browser = SimpleNamespace(
+        is_running=lambda: False,
+        launch=lambda: calls.append("launch") or {"running": True},
+        navigate=lambda url, page_id=None: calls.append(f"navigate:{url}:{page_id}")
+        or {"title": "Example", "url": url, "text": "Example Domain"},
+        close=lambda: None,
+    )
+    try:
+        project = create_project(service, tmp_path / "browser-agent")
+        session = service.studio.create_session(
+            SessionCreate(
+                project_id=project["id"],
+                title="Browser Agent",
+                permission_profile="full",
+            )
+        )
+        service._model_client = lambda _model, _metadata: BrowserToolClient()
+        turn = service.queue_session_turn(
+            session["id"], SessionTurnCreate(message="Open the example page")
+        )
+        completed = wait_for_turn(service, turn["id"])
+        assert completed["status"] == "completed"
+        assert calls == ["launch", "navigate:https://example.com:None"]
+    finally:
+        service.close()
+
+
+def test_native_agent_browser_bridge_is_ephemeral_and_capability_scoped(
+    settings, tmp_path
+) -> None:
+    service = EvaluationService(settings)
+    calls: list[str] = []
+    service.browser = SimpleNamespace(
+        is_running=lambda: False,
+        launch=lambda: calls.append("launch") or {"running": True},
+        navigate=lambda url, page_id=None: calls.append(f"navigate:{url}:{page_id}")
+        or {"title": "Example", "url": url},
+        close=lambda: None,
+    )
+    try:
+        project = create_project(service, tmp_path / "native-browser")
+        session = service.studio.create_session(
+            SessionCreate(
+                project_id=project["id"],
+                title="Native browser",
+                permission_profile="full",
+            )
+        )
+        turn = service.studio.queue_turn(
+            session["id"], SessionTurnCreate(message="Use the visible browser")
+        )
+        token, definition = service._register_browser_bridge(
+            session, turn["id"], threading.Event()
+        )
+        assert Path(definition["command"]).is_file()
+        result = service.execute_browser_bridge_tool(
+            token, "browser_navigate", {"url": "https://example.com"}
+        )
+        assert result["ok"] is True
+        assert calls == ["launch", "navigate:https://example.com:None"]
+        with pytest.raises(ValueError, match="browser_tool_not_allowed"):
+            service.execute_browser_bridge_tool(token, "run_command", {})
+        service._unregister_browser_bridge(token)
+        with pytest.raises(ValueError, match="browser_bridge_expired"):
+            service.execute_browser_bridge_tool(token, "browser_snapshot", {})
+    finally:
+        service.close()
+
+
+def test_native_cli_adapters_receive_non_persistent_browser_mcp_configuration() -> None:
+    bridge = {"command": r"C:\AgentBench\backend.exe", "args": ["--browser-mcp", "token"]}
+    cases = {
+        "codex_cli": ["exec", "--json", "{prompt}"],
+        "claude_code_cli": ["--print", "{prompt}"],
+        "kimi_code_cli": ["--print", "--prompt", "{prompt}"],
+        "opencode_cli": ["run", "{prompt}"],
+    }
+    for runner_type, original in cases.items():
+        args, environment = EvaluationService._studio_native_browser_options(
+            original, runner_type, bridge, {}
+        )
+        if runner_type == "codex_cli":
+            assert any("mcp_servers.agentbench_browser.command" in item for item in args)
+        elif runner_type in {"claude_code_cli", "kimi_code_cli"}:
+            assert "--mcp-config" in args
+            config = json.loads(args[args.index("--mcp-config") + 1])
+            assert config["mcpServers"]["agentbench_browser"]["command"] == bridge["command"]
+        else:
+            config = json.loads(environment["OPENCODE_CONFIG_CONTENT"])
+            assert config["mcp"]["agentbench_browser"]["command"][0] == bridge["command"]
+
+
+def test_browser_mcp_protocol_lists_tools_and_returns_tool_results() -> None:
+    bridge = BrowserMcpBridge("http://127.0.0.1:43765", "bridge-token")
+    bridge._request = lambda *_args, **_kwargs: {
+        "ok": True,
+        "title": "Example",
+        "url": "https://example.com",
+    }
+    initialized = bridge.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18"},
+        }
+    )
+    assert initialized["result"]["protocolVersion"] == "2025-06-18"
+    listed = bridge.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    assert {item["name"] for item in listed["result"]["tools"]} == {
+        "browser_navigate",
+        "browser_snapshot",
+        "browser_click",
+        "browser_fill",
+        "browser_screenshot",
+    }
+    called = bridge.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "browser_navigate",
+                "arguments": {"url": "https://example.com"},
+            },
+        }
+    )
+    assert called["result"]["isError"] is False
+    assert "Example" in called["result"]["content"][0]["text"]
+
+
 def test_unified_session_runtime_persists_output_events_and_file_changes(
     settings, tmp_path
 ) -> None:
@@ -838,6 +1113,53 @@ def test_flow_scheduler_executes_agent_node_and_persists_output(settings, tmp_pa
         service.close()
 
 
+def test_flow_definition_can_be_edited_and_condition_paths_are_skipped(settings, tmp_path) -> None:
+    service = EvaluationService(settings)
+    try:
+        project = create_project(service, tmp_path / "flow-editor")
+        graph = service.studio.create_graph(
+            TaskGraphCreate(
+                project_id=project["id"],
+                name="Editable flow",
+                nodes=[{"id": "start", "type": "condition", "name": "Gate"}],
+            )
+        )
+        updated = service.studio.update_graph(
+            graph["id"],
+            TaskGraphUpdate(
+                name="Edited flow",
+                settings={"max_retries": 0, "max_concurrency": 2},
+                nodes=[
+                    {
+                        "id": "gate",
+                        "type": "condition",
+                        "name": "Gate",
+                        "config": {"operator": "contains", "value": "never"},
+                    },
+                    {"id": "yes", "type": "condition", "name": "Yes branch"},
+                    {"id": "no", "type": "condition", "name": "No branch"},
+                ],
+                edges=[
+                    {"source": "gate", "target": "yes", "condition": {"when": True}},
+                    {"source": "gate", "target": "no", "condition": {"when": False}},
+                ],
+            ),
+        )
+        assert updated["name"] == "Edited flow"
+        assert len(updated["nodes"]) == 3
+
+        service.start_flow(graph["id"])
+        completed = wait_for_record(service, "task_graphs", graph["id"])
+        assert completed["status"] == "completed"
+        statuses = {node["name"]: node["status"] for node in service.studio.get_graph(graph["id"])["nodes"]}
+        assert statuses == {"Gate": "completed", "Yes branch": "skipped", "No branch": "completed"}
+
+        service.studio.delete_graph(graph["id"])
+        assert service.studio.list_graphs() == []
+    finally:
+        service.close()
+
+
 def test_flow_worktree_merge_applies_nul_delimited_git_changes(tmp_path) -> None:
     project_root = tmp_path / "flow-merge-project"
     project_root.mkdir()
@@ -918,5 +1240,13 @@ def test_mcp_health_and_tool_call_use_real_json_rpc_stdio(settings, tmp_path) ->
         )
         assert result["ok"] is True
         assert result["result"]["content"][0]["text"] == "hello"
+
+        updated = service.studio.update_mcp_server(
+            mcp["id"], McpServerUpdate(name="Renamed MCP", enabled=False)
+        )
+        assert updated["name"] == "Renamed MCP"
+        assert updated["enabled"] is False
+        service.studio.delete_mcp_server(mcp["id"])
+        assert service.studio.list_mcp_servers() == []
     finally:
         service.close()

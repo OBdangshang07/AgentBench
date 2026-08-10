@@ -45,6 +45,8 @@ const session: AgentSession = {
   status: "completed",
   permission_profile: "workspace",
   reasoning_effort: "medium",
+  skill_pack_id: null,
+  skill_pack_name: null,
   native_session_id: null,
   workspace_path: "D:/AI_project/AI_test",
   summary: "",
@@ -130,7 +132,7 @@ function installApiMock(
 ) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = String(input);
-    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "4.1.1" });
+    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "4.2.0" });
     if (url.endsWith("/sessions")) return json([currentSession]);
     if (url.endsWith("/sessions/session-1") && init?.method === "PATCH") return json({ ...currentDetail, ...JSON.parse(String(init.body)) });
     if (url.endsWith("/sessions/session-1")) return json(currentDetail);
@@ -285,6 +287,9 @@ describe("Agent Studio visual workspace controls", () => {
     const processList = container.querySelector(".v4-process-list");
     expect(processList).not.toBeNull();
     expect(processList?.querySelectorAll("article")).toHaveLength(3);
+    const operations = container.querySelector(".v4-process-operations");
+    expect(operations).not.toHaveAttribute("open");
+    expect(operations).toHaveTextContent("1 个工具");
     expect(processList).toHaveTextContent("正在读取 package.json 以确认版本。");
     expect(processList).toHaveTextContent("工具完成 · read_file");
     expect(processList).not.toHaveTextContent("Agent 产生新的可验证进度");

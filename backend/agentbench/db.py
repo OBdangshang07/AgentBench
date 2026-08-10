@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def utc_now() -> str:
@@ -273,6 +273,7 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     status TEXT NOT NULL DEFAULT 'idle',
     permission_profile TEXT NOT NULL DEFAULT 'workspace',
     reasoning_effort TEXT NOT NULL DEFAULT 'medium',
+    skill_pack_id TEXT REFERENCES prompt_templates(id) ON DELETE SET NULL,
     native_session_id TEXT,
     workspace_path TEXT NOT NULL,
     summary TEXT NOT NULL DEFAULT '',
@@ -610,6 +611,8 @@ class Database:
                     "ALTER TABLE agent_sessions ADD COLUMN reasoning_effort "
                     "TEXT NOT NULL DEFAULT 'medium'"
                 )
+            if "skill_pack_id" not in session_columns:
+                connection.execute("ALTER TABLE agent_sessions ADD COLUMN skill_pack_id TEXT")
             row = connection.execute("SELECT version FROM schema_meta LIMIT 1").fetchone()
             if row is None:
                 connection.execute("INSERT INTO schema_meta(version) VALUES (?)", (SCHEMA_VERSION,))

@@ -185,6 +185,7 @@ class SessionCreate(BaseModel):
     title: str = Field(default="新 Agent 会话", min_length=1, max_length=180)
     permission_profile: PermissionProfile | None = None
     reasoning_effort: ReasoningEffort = "medium"
+    skill_pack_id: str | None = None
 
 
 class SessionUpdate(BaseModel):
@@ -195,6 +196,7 @@ class SessionUpdate(BaseModel):
     model_id: str | None = None
     permission_profile: PermissionProfile | None = None
     reasoning_effort: ReasoningEffort | None = None
+    skill_pack_id: str | None = None
     archived: bool | None = None
 
 
@@ -230,6 +232,43 @@ class TerminalResize(BaseModel):
 
     columns: int = Field(ge=40, le=300)
     rows: int = Field(ge=10, le=100)
+
+
+class BrowserLaunch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(default="about:blank", min_length=1, max_length=4096)
+
+
+class BrowserNavigate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=1, max_length=4096)
+    page_id: str | None = Field(default=None, max_length=240)
+
+
+class BrowserAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["click", "fill", "submit"]
+    selector: str = Field(min_length=1, max_length=2000)
+    value: str | None = Field(default=None, max_length=100_000)
+    page_id: str | None = Field(default=None, max_length=240)
+
+
+class BrowserToolCall(BaseModel):
+    """One capability-scoped call from the ephemeral native-Agent MCP bridge."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: Literal[
+        "browser_navigate",
+        "browser_snapshot",
+        "browser_click",
+        "browser_fill",
+        "browser_screenshot",
+    ]
+    arguments: dict[str, Any] = Field(default_factory=dict)
 
 
 class ApprovalDecision(BaseModel):
@@ -279,11 +318,44 @@ class McpServerCreate(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
 
 
+class McpServerUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    transport: Literal["stdio", "sse", "streamable_http"] | None = None
+    command: str | None = Field(default=None, max_length=2048)
+    args: list[str] | None = Field(default=None, max_length=100)
+    url: HttpUrl | None = None
+    env: dict[str, str] | None = None
+    remove_env_keys: list[str] = Field(default_factory=list, max_length=100)
+    enabled: bool | None = None
+
+
 class McpToolCall(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     tool_name: str = Field(min_length=1, max_length=240)
     arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class SkillPackCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=1000)
+    content: str = Field(min_length=1, max_length=20_000)
+    tools: list[str] = Field(default_factory=list, max_length=50)
+    permission_profile: PermissionProfile | None = None
+
+
+class SkillPackUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=1000)
+    content: str | None = Field(default=None, min_length=1, max_length=20_000)
+    tools: list[str] | None = Field(default=None, max_length=50)
+    permission_profile: PermissionProfile | None = None
 
 
 class TaskGraphCreate(BaseModel):
@@ -295,3 +367,14 @@ class TaskGraphCreate(BaseModel):
     settings: dict[str, Any] = Field(default_factory=dict)
     nodes: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
     edges: list[dict[str, Any]] = Field(default_factory=list, max_length=300)
+
+
+class TaskGraphUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=180)
+    description: str | None = Field(default=None, max_length=4000)
+    settings: dict[str, Any] | None = None
+    nodes: list[dict[str, Any]] | None = Field(default=None, min_length=1, max_length=100)
+    edges: list[dict[str, Any]] | None = Field(default=None, max_length=300)

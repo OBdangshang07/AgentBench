@@ -63,7 +63,7 @@ def test_v3_runs_keep_immutable_test_definition_revisions(settings) -> None:
         preserved_definition, preserved_revision = service._definition_for_run(refreshed)
         assert preserved_revision["id"] == original_revision["id"]
         assert preserved_definition["instruction"] == original_definition["instruction"]
-        assert service.database.fetch_one("SELECT version FROM schema_meta") == {"version": 7}
+        assert service.database.fetch_one("SELECT version FROM schema_meta") == {"version": 8}
     finally:
         service.close()
 
@@ -77,11 +77,11 @@ def test_schema_upgrade_creates_recoverable_database_backup(tmp_path) -> None:
     database = Database(database_path)
     database.initialize()
 
-    backups = list((tmp_path / "migration-backups").glob("agentbench-pre-schema-v7-*.db"))
+    backups = list((tmp_path / "migration-backups").glob("agentbench-pre-schema-v8-*.db"))
     assert len(backups) == 1
     with sqlite3.connect(backups[0]) as backup:
         assert backup.execute("SELECT version FROM schema_meta").fetchone() == (3,)
-    assert database.fetch_one("SELECT version FROM schema_meta") == {"version": 7}
+    assert database.fetch_one("SELECT version FROM schema_meta") == {"version": 8}
 
 
 def test_test_library_health_uses_objective_scores_not_legacy_passed(settings) -> None:
