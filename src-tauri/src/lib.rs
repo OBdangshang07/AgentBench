@@ -1,5 +1,5 @@
 use std::{
-    env,
+    env, fs,
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
     os::windows::process::CommandExt,
@@ -31,6 +31,65 @@ fn packaged_backend(resource_dir: &Path) -> Option<PathBuf> {
         .join("backend")
         .join(filename);
     candidate.is_file().then_some(candidate)
+}
+
+fn is_packaged_backend_filename(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
+    if normalized == "agentbench-backend.exe" {
+        return true;
+    }
+    let Some(version) = normalized
+        .strip_prefix("agentbench-backend-")
+        .and_then(|value| value.strip_suffix(".exe"))
+    else {
+        return false;
+    };
+    !version.is_empty()
+        && version.chars().any(|character| character.is_ascii_digit())
+        && version
+            .chars()
+            .all(|character| character.is_ascii_digit() || character == '.')
+}
+
+fn cleanup_obsolete_backends(resource_dir: &Path) {
+    let Some(current) = packaged_backend(resource_dir) else {
+        return;
+    };
+    let Some(backend_dir) = current.parent() else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(backend_dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == current || !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if is_packaged_backend_filename(name) {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_packaged_backend_filename;
+
+    #[test]
+    fn recognizes_only_release_sidecar_names() {
+        assert!(is_packaged_backend_filename("agentbench-backend.exe"));
+        assert!(is_packaged_backend_filename("agentbench-backend-3.1.1.exe"));
+        assert!(is_packaged_backend_filename("AgentBench-Backend-4.0.0.EXE"));
+        assert!(!is_packaged_backend_filename(
+            "agentbench-backend-backup.exe"
+        ));
+        assert!(!is_packaged_backend_filename("unrelated.exe"));
+    }
 }
 
 fn development_python() -> Option<PathBuf> {
@@ -194,9 +253,13 @@ fn stop_backend(app_handle: &tauri::AppHandle) {
 
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let backend = ensure_backend(app).map_err(std::io::Error::other)?;
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                cleanup_obsolete_backends(&resource_dir);
+            }
             app.manage(BackendProcess(Mutex::new(backend)));
             Ok(())
         })

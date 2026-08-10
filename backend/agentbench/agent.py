@@ -10,6 +10,7 @@ from .execution import DockerExecutor, Workspace, WorkspaceViolation
 from .model_clients import ModelClient, ModelClientError, ModelUsage
 
 EventSink = Callable[[str, dict[str, Any]], None]
+ToolAuthorizer = Callable[[str, dict[str, Any]], dict[str, Any] | None]
 
 
 TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
@@ -77,6 +78,7 @@ class AgentResult:
     duration_ms: int
     error_code: str | None = None
     error_message: str | None = None
+    native_session_id: str | None = None
 
 
 class AgentHarness:
@@ -90,6 +92,8 @@ class AgentHarness:
         limits: dict[str, Any],
         system_prompt: str,
         event_sink: EventSink,
+        cancellation_check: Callable[[], bool] | None = None,
+        tool_authorizer: ToolAuthorizer | None = None,
     ):
         self.client = client
         self.workspace = workspace
@@ -98,11 +102,18 @@ class AgentHarness:
         self.limits = limits
         self.system_prompt = system_prompt
         self.event_sink = event_sink
+        self.cancellation_check = cancellation_check or (lambda: False)
+        self.tool_authorizer = tool_authorizer
 
     def _tools(self) -> list[dict[str, Any]]:
         names: list[str] = []
-        if "filesystem" in self.allowed_capabilities:
-            names.extend(["read_file", "list_files", "write_file"])
+        if {
+            "filesystem",
+            "filesystem_read",
+        } & self.allowed_capabilities:
+            names.extend(["read_file", "list_files"])
+        if {"filesystem", "filesystem_write"} & self.allowed_capabilities:
+            names.append("write_file")
         if "search" in self.allowed_capabilities:
             names.append("search_text")
         if "shell" in self.allowed_capabilities:
@@ -129,6 +140,16 @@ class AgentHarness:
         usage = ModelUsage()
         tools = self._tools()
         for step in range(1, max_steps + 1):
+            if self.cancellation_check():
+                return AgentResult(
+                    False,
+                    "",
+                    step - 1,
+                    usage,
+                    int((time.perf_counter() - started) * 1000),
+                    "user_cancelled",
+                    "The user cancelled this Agent turn",
+                )
             if max_runtime_seconds > 0 and time.perf_counter() - started > max_runtime_seconds:
                 return AgentResult(
                     False,
@@ -153,6 +174,16 @@ class AgentHarness:
                     str(exc),
                 )
             usage.add(decision.usage)
+            if self.cancellation_check():
+                return AgentResult(
+                    False,
+                    "",
+                    step,
+                    usage,
+                    int((time.perf_counter() - started) * 1000),
+                    "user_cancelled",
+                    "The user cancelled this Agent turn",
+                )
             self.event_sink(
                 "model.responded",
                 {
@@ -229,9 +260,19 @@ class AgentHarness:
 
     def _execute_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         try:
-            if name == "read_file" and "filesystem" in self.allowed_capabilities:
+            if self.tool_authorizer is not None:
+                denied = self.tool_authorizer(name, arguments)
+                if denied is not None:
+                    return denied
+            if name == "read_file" and {
+                "filesystem",
+                "filesystem_read",
+            } & self.allowed_capabilities:
                 return {"ok": True, "content": self.workspace.read_file(str(arguments["path"]))}
-            if name == "list_files" and "filesystem" in self.allowed_capabilities:
+            if name == "list_files" and {
+                "filesystem",
+                "filesystem_read",
+            } & self.allowed_capabilities:
                 return {
                     "ok": True,
                     "files": self.workspace.list_files(str(arguments.get("path", "."))),
@@ -243,7 +284,10 @@ class AgentHarness:
                         str(arguments["query"]), str(arguments.get("path", "."))
                     ),
                 }
-            if name == "write_file" and "filesystem" in self.allowed_capabilities:
+            if name == "write_file" and {
+                "filesystem",
+                "filesystem_write",
+            } & self.allowed_capabilities:
                 return {
                     "ok": True,
                     **self.workspace.write_file(str(arguments["path"]), str(arguments["content"])),

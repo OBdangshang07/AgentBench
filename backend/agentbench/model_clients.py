@@ -52,6 +52,7 @@ class OpenAICompatibleClient:
         model_name: str,
         temperature: float,
         max_tokens: int,
+        reasoning_effort: str | None = None,
         timeout: int = 120,
     ):
         self.base_url = base_url.rstrip("/")
@@ -59,6 +60,7 @@ class OpenAICompatibleClient:
         self.model_name = model_name
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort
         self.timeout = timeout
 
     def complete(self, history: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ModelDecision:
@@ -99,6 +101,8 @@ class OpenAICompatibleClient:
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
         if tools:
             payload["tools"] = [{"type": "function", "function": tool} for tool in tools]
             payload["tool_choice"] = "auto"
@@ -112,6 +116,14 @@ class OpenAICompatibleClient:
                 json=payload,
                 timeout=self.timeout,
             )
+            if response.status_code == 400 and "reasoning_effort" in payload:
+                fallback_payload = {key: value for key, value in payload.items() if key != "reasoning_effort"}
+                response = httpx.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=headers,
+                    json=fallback_payload,
+                    timeout=self.timeout,
+                )
             response.raise_for_status()
             data = response.json()
         except (httpx.HTTPError, ValueError) as exc:
@@ -157,12 +169,14 @@ class AnthropicClient:
         api_key: str | None,
         model_name: str,
         max_tokens: int,
+        reasoning_effort: str | None = None,
         timeout: int = 120,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model_name = model_name
         self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort
         self.timeout = timeout
 
     def complete(self, history: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ModelDecision:
@@ -208,6 +222,8 @@ class AnthropicClient:
             "system": "\n".join(system_parts),
             "messages": messages,
         }
+        if self.reasoning_effort:
+            payload["output_config"] = {"effort": self.reasoning_effort}
         if tools:
             payload["tools"] = [
                 {
@@ -227,6 +243,14 @@ class AnthropicClient:
             response = httpx.post(
                 f"{self.base_url}/v1/messages", headers=headers, json=payload, timeout=self.timeout
             )
+            if response.status_code == 400 and "output_config" in payload:
+                fallback_payload = {key: value for key, value in payload.items() if key != "output_config"}
+                response = httpx.post(
+                    f"{self.base_url}/v1/messages",
+                    headers=headers,
+                    json=fallback_payload,
+                    timeout=self.timeout,
+                )
             response.raise_for_status()
             data = response.json()
         except (httpx.HTTPError, ValueError) as exc:

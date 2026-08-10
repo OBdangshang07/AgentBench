@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 7
 
 
 def utc_now() -> str:
@@ -238,12 +238,254 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    default_runner_id TEXT REFERENCES agent_runners(id) ON DELETE SET NULL,
+    default_model_id TEXT REFERENCES models(id) ON DELETE SET NULL,
+    permission_profile TEXT NOT NULL DEFAULT 'workspace',
+    settings_json TEXT NOT NULL DEFAULT '{}',
+    pinned INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_opened_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS project_roots (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    root_path TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    access_mode TEXT NOT NULL DEFAULT 'workspace',
+    is_primary INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    UNIQUE(project_id, root_path)
+);
+
+CREATE TABLE IF NOT EXISTS agent_sessions (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    runner_id TEXT NOT NULL REFERENCES agent_runners(id),
+    model_id TEXT NOT NULL REFERENCES models(id),
+    status TEXT NOT NULL DEFAULT 'idle',
+    permission_profile TEXT NOT NULL DEFAULT 'workspace',
+    reasoning_effort TEXT NOT NULL DEFAULT 'medium',
+    native_session_id TEXT,
+    workspace_path TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    tokens_input INTEGER NOT NULL DEFAULT 0,
+    tokens_output INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS session_turns (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+    turn_no INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    user_message TEXT NOT NULL,
+    final_answer TEXT,
+    tokens_input INTEGER NOT NULL DEFAULT 0,
+    tokens_output INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    steps INTEGER NOT NULL DEFAULT 0,
+    error_code TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    UNIQUE(session_id, turn_no)
+);
+
+CREATE TABLE IF NOT EXISTS session_messages (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+    turn_id TEXT REFERENCES session_turns(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS session_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+    turn_id TEXT REFERENCES session_turns(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    visibility TEXT NOT NULL DEFAULT 'user',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    UNIQUE(session_id, seq)
+);
+
+CREATE TABLE IF NOT EXISTS approval_requests (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+    turn_id TEXT REFERENCES session_turns(id) ON DELETE CASCADE,
+    request_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    risk_level TEXT NOT NULL DEFAULT 'medium',
+    request_json TEXT NOT NULL DEFAULT '{}',
+    decision_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    resolved_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS permission_rules (
+    id TEXT PRIMARY KEY,
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    runner_id TEXT REFERENCES agent_runners(id) ON DELETE CASCADE,
+    scope TEXT NOT NULL,
+    pattern TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(project_id, runner_id, scope, pattern)
+);
+
+CREATE TABLE IF NOT EXISTS session_file_changes (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+    turn_id TEXT REFERENCES session_turns(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    change_type TEXT NOT NULL,
+    before_sha256 TEXT,
+    after_sha256 TEXT,
+    size_delta INTEGER NOT NULL DEFAULT 0,
+    before_snapshot_path TEXT,
+    after_snapshot_path TEXT,
+    status TEXT NOT NULL DEFAULT 'observed',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS session_artifacts (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
+    turn_id TEXT REFERENCES session_turns(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL,
+    size INTEGER NOT NULL DEFAULT 0,
+    sha256 TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS task_graphs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'draft',
+    settings_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS task_nodes (
+    id TEXT PRIMARY KEY,
+    graph_id TEXT NOT NULL REFERENCES task_graphs(id) ON DELETE CASCADE,
+    node_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    position_x REAL NOT NULL DEFAULT 0,
+    position_y REAL NOT NULL DEFAULT 0,
+    config_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT,
+    output_json TEXT NOT NULL DEFAULT '{}',
+    session_id TEXT REFERENCES agent_sessions(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS task_edges (
+    id TEXT PRIMARY KEY,
+    graph_id TEXT NOT NULL REFERENCES task_graphs(id) ON DELETE CASCADE,
+    source_node_id TEXT NOT NULL REFERENCES task_nodes(id) ON DELETE CASCADE,
+    target_node_id TEXT NOT NULL REFERENCES task_nodes(id) ON DELETE CASCADE,
+    condition_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    UNIQUE(graph_id, source_node_id, target_node_id)
+);
+
+CREATE TABLE IF NOT EXISTS task_items (
+    id TEXT PRIMARY KEY,
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    graph_id TEXT REFERENCES task_graphs(id) ON DELETE SET NULL,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'backlog',
+    priority TEXT NOT NULL DEFAULT 'normal',
+    runner_id TEXT REFERENCES agent_runners(id) ON DELETE SET NULL,
+    model_id TEXT REFERENCES models(id) ON DELETE SET NULL,
+    session_id TEXT REFERENCES agent_sessions(id) ON DELETE SET NULL,
+    due_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS mcp_servers (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    transport TEXT NOT NULL DEFAULT 'stdio',
+    command TEXT,
+    args_json TEXT NOT NULL DEFAULT '[]',
+    url TEXT,
+    env_json TEXT NOT NULL DEFAULT '{}',
+    tools_json TEXT NOT NULL DEFAULT '[]',
+    health_status TEXT NOT NULL DEFAULT 'unknown',
+    last_error TEXT,
+    last_checked_at TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    builtin INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS prompt_templates (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL,
+    tools_json TEXT NOT NULL DEFAULT '[]',
+    permission_profile TEXT,
+    builtin INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_runs_experiment ON runs(experiment_id);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 CREATE INDEX IF NOT EXISTS idx_attempts_run ON run_attempts(run_id, attempt_no);
 CREATE INDEX IF NOT EXISTS idx_events_run ON run_events(run_id, seq);
 CREATE INDEX IF NOT EXISTS idx_tests_category ON test_cases(category);
 CREATE INDEX IF NOT EXISTS idx_revisions_case ON test_case_revisions(test_case_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_projects_archived ON projects(archived, updated_at);
+CREATE INDEX IF NOT EXISTS idx_project_roots_project ON project_roots(project_id, is_primary);
+CREATE INDEX IF NOT EXISTS idx_sessions_project ON agent_sessions(project_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_status ON agent_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_session_turns_session ON session_turns(session_id, turn_no);
+CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_approvals_status ON approval_requests(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_file_changes_session ON session_file_changes(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_task_nodes_graph ON task_nodes(graph_id, status);
+CREATE INDEX IF NOT EXISTS idx_task_items_status ON task_items(status, updated_at);
 """
 
 
@@ -321,6 +563,53 @@ class Database:
             }
             if "definition_hash" not in test_columns:
                 connection.execute("ALTER TABLE test_cases ADD COLUMN definition_hash TEXT")
+            change_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(session_file_changes)"
+                ).fetchall()
+            }
+            for name in ("before_snapshot_path", "after_snapshot_path"):
+                if name not in change_columns:
+                    connection.execute(
+                        f"ALTER TABLE session_file_changes ADD COLUMN {name} TEXT"
+                    )
+            mcp_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(mcp_servers)").fetchall()
+            }
+            for name, declaration in (
+                ("tools_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("health_status", "TEXT NOT NULL DEFAULT 'unknown'"),
+                ("last_error", "TEXT"),
+                ("last_checked_at", "TEXT"),
+            ):
+                if name not in mcp_columns:
+                    connection.execute(
+                        f"ALTER TABLE mcp_servers ADD COLUMN {name} {declaration}"
+                    )
+            node_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(task_nodes)").fetchall()
+            }
+            for name, declaration in (
+                ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+                ("error_message", "TEXT"),
+                ("output_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ):
+                if name not in node_columns:
+                    connection.execute(
+                        f"ALTER TABLE task_nodes ADD COLUMN {name} {declaration}"
+                    )
+            session_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(agent_sessions)").fetchall()
+            }
+            if "reasoning_effort" not in session_columns:
+                connection.execute(
+                    "ALTER TABLE agent_sessions ADD COLUMN reasoning_effort "
+                    "TEXT NOT NULL DEFAULT 'medium'"
+                )
             row = connection.execute("SELECT version FROM schema_meta LIMIT 1").fetchone()
             if row is None:
                 connection.execute("INSERT INTO schema_meta(version) VALUES (?)", (SCHEMA_VERSION,))

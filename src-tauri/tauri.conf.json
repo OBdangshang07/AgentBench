@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AgentBench Desktop",
-  "version": "3.1.1",
+  "version": "4.1.0",
   "identifier": "com.agentbench.desktop",
   "build": {
     "beforeDevCommand": "powershell -ExecutionPolicy Bypass -File scripts/frontend-dev.ps1",
@@ -36,11 +36,11 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "resources/backend/agentbench-backend-3.1.1.exe",
+      "resources/backend/agentbench-backend-4.1.0.exe",
       "resources/backend/README.txt"
     ],
-    "shortDescription": "Local AI Agent evaluation lab",
-    "longDescription": "Evaluate AI models through unified, Codex CLI, Claude Code CLI, and custom Agent runners with reproducible local scoring.",
+    "shortDescription": "Local visual Agent workspace and evaluation lab",
+    "longDescription": "Operate local AI Agents through Studio, Tasks, DAG Flows and MCP tools, then evaluate models with reproducible local benchmarks.",
     "windows": {
       "wix": {
         "language": "zh-CN"

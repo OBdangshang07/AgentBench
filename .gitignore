@@ -6,7 +6,7 @@ __pycache__/
 .pytest_cache/
 .pytest-tmp/
 backend/.codex-test-tmp/
-.pytest-v3-*/
+.pytest-v*/
 .ruff_cache/
 .coverage
 htmlcov/
@@ -28,14 +28,15 @@ backend/dist/
 .agentbench-data/
 .profiles-qa/
 .tmp/
+tmp/
 .tmp-live-qa/
 .tmp_pytest_out.txt
 .ncre-sources/.tmp/
 _ncre_dev/reference-workspace*/
-.installed-*/
+.installed-*
 .migration-*/
 .runtime-*/
-.visual-*/
+.visual-*
 release-backups/
 *.db
 *.db-shm

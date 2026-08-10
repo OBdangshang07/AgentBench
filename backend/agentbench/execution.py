@@ -5,6 +5,7 @@ import fnmatch
 import hashlib
 import os
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -222,7 +223,9 @@ SAFE_ENV_KEYS = {
     "PATH",
     "PATHEXT",
     "SYSTEMROOT",
+    "SYSTEMDRIVE",
     "WINDIR",
+    "PROGRAMDATA",
     "TEMP",
     "TMP",
     "USERPROFILE",
@@ -599,6 +602,11 @@ def run_native_cli(
     start = time.perf_counter()
     process: subprocess.Popen[str] | None = None
     last_start_error: OSError | None = None
+    popen_options: dict[str, Any] = {}
+    if os.name == "nt":
+        popen_options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        popen_options["start_new_session"] = True
     for resolved in candidates:
         try:
             process = subprocess.Popen(
@@ -613,6 +621,7 @@ def run_native_cli(
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                **popen_options,
             )
             break
         except OSError as exc:
@@ -664,15 +673,11 @@ def run_native_cli(
         now = time.monotonic()
         if cancel_event and cancel_event.is_set():
             error_code = "cancelled"
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
+            _terminate_process_tree(process)
             break
         if deadline is not None and now > deadline:
             error_code = "runtime_safety_limit"
-            process.kill()
+            _terminate_process_tree(process)
             break
         if heartbeat_callback is not None and now >= next_heartbeat:
             with suppress(Exception):
@@ -707,3 +712,31 @@ def run_native_cli(
         int((time.perf_counter() - start) * 1000),
         None if process.returncode == 0 else "cli_failed",
     )
+
+
+def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
+    """Stop a CLI and every helper it spawned without targeting unrelated processes."""
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        with suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+    else:
+        with suppress(OSError):
+            os.killpg(process.pid, signal.SIGTERM)
+    if process.poll() is None:
+        with suppress(OSError):
+            process.terminate()
+        with suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=3)
+    if process.poll() is None:
+        with suppress(OSError):
+            process.kill()

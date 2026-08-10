@@ -2,9 +2,24 @@
 
 AgentBench Desktop 是一个 Windows 优先的本地 AI Agent 能力评测客户端。它将不同模型放入统一的 Agent Harness，在隔离工作区中执行同一批任务，并结合确定性验证器、匿名 AI 裁判和运行成本指标生成可追溯的评分。
 
-## V3.1.1 能力
+## V4.1.0：全 Agent 可视化工作台
 
-- 本次迭代要点：结构级本地评测工作站 UI、套件优先测试库、Viewer-safe 实验/任务直播页、考研数学完整导入与发布工作流
+- 从单一评测平台扩展为本地 Agent 操作平台，同时完整保留 Benchmarks、Ultra、考研数学和 NCRE Office。
+- 控制中心统一显示项目、会话、审批、任务、Token 与费用；项目中心使用原生目录选择器注册本地工作区。
+- Agent Studio 支持持久会话、实时活动流、文件树、文件预览、Diff 审核、接受/拒绝/部分应用以及 ConPTY 交互终端。
+- 原生 CLI Agent 启动前必须经过平台审批，可选择仅本次、当前会话、当前项目或拒绝；等待期间 Turn 会真实挂起并在批准后自动恢复。
+- Agent Flow 支持 DAG 依赖、同层 Agent 并行、Git worktree 隔离与安全合并、重试、人工审批、取消及时间/Token/费用预算。
+- 任务中心可直接创建真实 Agent Session 并执行任务，不再只是看板状态管理。
+- MCP 支持 stdio、Streamable HTTP 和 SSE 健康检查，能够读取工具目录、调用工具并作为 Flow 节点执行。
+- Codex、Claude Code、OpenCode、Reasonix、Gemini CLI、Aider、Kimi Code、Qoder CLI 与自定义适配器使用统一的能力探测和模型选择界面。
+- SQLite Schema v7 会保留旧实验和运行记录，并在迁移前自动创建数据库备份。
+- 录屏界面只展示命令、工具、文件变化和简短进度，不展示或存储模型私有思维链。
+
+详细使用方法见 [`docs/V4-GUIDE.md`](docs/V4-GUIDE.md)。
+
+### 评测能力
+
+- 延续 V3.1.1 的结构级本地评测工作站 UI、套件优先测试库、Viewer-safe 实验/任务直播页、考研数学完整导入与发布工作流
 - Tauri 2 + React 桌面界面，FastAPI 本地 Sidecar
 - SQLite 本地数据，不需要服务器、Redis 或云存储
 - OpenAI-compatible 模型适配器和可离线演示的 Mock 模型
@@ -56,7 +71,7 @@ pnpm dev
 
 正式代码执行任务要求 Docker Desktop。没有 Docker 时，文本推理、结构化输出和受限文件任务仍可运行；Shell 验证会明确标记为环境不可用，绝不会静默回退到宿主机执行。
 
-详细设计见 [`docs/PRODUCT.md`](docs/PRODUCT.md)、[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 和 [`docs/SECURITY.md`](docs/SECURITY.md)。
+详细设计见 [`docs/PRODUCT.md`](docs/PRODUCT.md)、[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)、[`docs/SECURITY.md`](docs/SECURITY.md) 和 [`docs/V4-GUIDE.md`](docs/V4-GUIDE.md)。
 
 ## 分发给其他人
 

@@ -14,14 +14,31 @@ from . import __version__
 from .config import Settings
 from .reports import export_exam_report
 from .schemas import (
+    ApprovalDecision,
     AppSettingUpdate,
     ExperimentCreate,
+    FileChangeReview,
     ManualScoreUpdate,
     MathQuestionUpdate,
+    McpServerCreate,
+    McpToolCall,
     ModelCreate,
     ModelDiscoveryRequest,
     ModelUpdate,
+    ProjectCreate,
+    ProjectRootCreate,
+    ProjectUpdate,
     RunnerCreate,
+    SessionAttachmentImport,
+    SessionCreate,
+    SessionTurnCreate,
+    SessionUpdate,
+    TaskGraphCreate,
+    TaskItemCreate,
+    TaskItemUpdate,
+    TerminalCreate,
+    TerminalInput,
+    TerminalResize,
     TestCaseImport,
 )
 from .service import EvaluationService
@@ -66,6 +83,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "tauri://localhost",
             "https://tauri.localhost",
         ],
+        allow_origin_regex=r"^http://(localhost|127\.0\.0\.1):14\d{2}$",
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
         allow_headers=["Content-Type", "Accept"],
     )
@@ -98,6 +116,284 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/v1/dashboard")
     def dashboard(svc: Service) -> dict[str, Any]:
         return svc.dashboard()
+
+    @app.get("/api/v1/studio/dashboard")
+    def studio_dashboard(svc: Service) -> dict[str, Any]:
+        return svc.studio.dashboard()
+
+    @app.get("/api/v1/projects")
+    def projects(svc: Service, include_archived: bool = False) -> list[dict[str, Any]]:
+        return svc.studio.list_projects(include_archived)
+
+    @app.post("/api/v1/projects", status_code=201)
+    def create_project(payload: ProjectCreate, svc: Service) -> dict[str, Any]:
+        return svc.studio.create_project(payload)
+
+    @app.get("/api/v1/projects/{project_id}")
+    def project(project_id: str, svc: Service) -> dict[str, Any]:
+        return svc.studio.get_project(project_id)
+
+    @app.patch("/api/v1/projects/{project_id}")
+    def update_project(
+        project_id: str, payload: ProjectUpdate, svc: Service
+    ) -> dict[str, Any]:
+        return svc.studio.update_project(project_id, payload.model_dump(exclude_unset=True))
+
+    @app.delete("/api/v1/projects/{project_id}")
+    def archive_project(project_id: str, svc: Service) -> dict[str, Any]:
+        return svc.studio.archive_project(project_id)
+
+    @app.post("/api/v1/projects/{project_id}/roots", status_code=201)
+    def add_project_root(
+        project_id: str, payload: ProjectRootCreate, svc: Service
+    ) -> dict[str, Any]:
+        return svc.studio.add_project_root(project_id, payload)
+
+    @app.get("/api/v1/projects/{project_id}/files")
+    def project_files(
+        project_id: str,
+        svc: Service,
+        path: str = Query(default=".", max_length=2048),
+        limit: int = Query(default=500, ge=1, le=2000),
+    ) -> dict[str, Any]:
+        return svc.studio.list_project_files(project_id, path, limit)
+
+    @app.get("/api/v1/projects/{project_id}/files/search")
+    def search_project_files(
+        project_id: str,
+        svc: Service,
+        query: str = Query(min_length=2, max_length=160),
+        limit: int = Query(default=120, ge=1, le=200),
+    ) -> dict[str, Any]:
+        return svc.studio.search_project_files(project_id, query, limit)
+
+    @app.get("/api/v1/projects/{project_id}/file")
+    def project_file(
+        project_id: str,
+        svc: Service,
+        path: str = Query(min_length=1, max_length=2048),
+    ) -> dict[str, Any]:
+        return svc.studio.read_project_file(project_id, path)
+
+    @app.get("/api/v1/sessions")
+    def sessions(
+        svc: Service,
+        project_id: str | None = None,
+        include_archived: bool = False,
+        limit: int = Query(default=200, ge=1, le=1000),
+    ) -> list[dict[str, Any]]:
+        return svc.studio.list_sessions(project_id, include_archived, limit)
+
+    @app.post("/api/v1/sessions", status_code=201)
+    def create_session(payload: SessionCreate, svc: Service) -> dict[str, Any]:
+        return svc.studio.create_session(payload)
+
+    @app.get("/api/v1/sessions/{session_id}")
+    def session(session_id: str, svc: Service) -> dict[str, Any]:
+        return svc.studio.get_session(session_id)
+
+    @app.patch("/api/v1/sessions/{session_id}")
+    def update_session(
+        session_id: str, payload: SessionUpdate, svc: Service
+    ) -> dict[str, Any]:
+        return svc.studio.update_session(session_id, payload.model_dump(exclude_unset=True))
+
+    @app.post("/api/v1/sessions/{session_id}/turns", status_code=202)
+    def create_session_turn(
+        session_id: str, payload: SessionTurnCreate, svc: Service
+    ) -> dict[str, Any]:
+        return svc.queue_session_turn(session_id, payload)
+
+    @app.post("/api/v1/sessions/{session_id}/attachments", status_code=201)
+    def import_session_attachments(
+        session_id: str, payload: SessionAttachmentImport, svc: Service
+    ) -> list[dict[str, Any]]:
+        return svc.studio.import_session_attachments(session_id, payload)
+
+    @app.delete(
+        "/api/v1/sessions/{session_id}/attachments/{attachment_id}", status_code=204
+    )
+    def delete_session_attachment(
+        session_id: str, attachment_id: str, svc: Service
+    ) -> Response:
+        svc.studio.delete_session_attachment(session_id, attachment_id)
+        return Response(status_code=204)
+
+    @app.post("/api/v1/sessions/{session_id}/cancel", status_code=202)
+    def cancel_session(session_id: str, svc: Service) -> dict[str, Any]:
+        return svc.cancel_session(session_id)
+
+    @app.post("/api/v1/sessions/{session_id}/terminals", status_code=201)
+    def start_terminal(
+        session_id: str, payload: TerminalCreate, svc: Service
+    ) -> dict[str, Any]:
+        return svc.start_terminal(session_id, payload)
+
+    @app.get("/api/v1/sessions/{session_id}/terminals/{terminal_id}")
+    def read_terminal(
+        session_id: str,
+        terminal_id: str,
+        svc: Service,
+        after: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        return svc.read_terminal(session_id, terminal_id, after)
+
+    @app.post("/api/v1/sessions/{session_id}/terminals/{terminal_id}/input")
+    def write_terminal(
+        session_id: str,
+        terminal_id: str,
+        payload: TerminalInput,
+        svc: Service,
+    ) -> dict[str, Any]:
+        return svc.write_terminal(session_id, terminal_id, payload)
+
+    @app.post("/api/v1/sessions/{session_id}/terminals/{terminal_id}/resize")
+    def resize_terminal(
+        session_id: str,
+        terminal_id: str,
+        payload: TerminalResize,
+        svc: Service,
+    ) -> dict[str, Any]:
+        return svc.resize_terminal(session_id, terminal_id, payload)
+
+    @app.delete("/api/v1/sessions/{session_id}/terminals/{terminal_id}")
+    def close_terminal(
+        session_id: str, terminal_id: str, svc: Service
+    ) -> dict[str, Any]:
+        return svc.close_terminal(session_id, terminal_id)
+
+    @app.get("/api/v1/sessions/{session_id}/events")
+    def session_events(
+        session_id: str,
+        svc: Service,
+        after: int = Query(default=0, ge=0),
+    ) -> list[dict[str, Any]]:
+        return svc.studio.get_events(session_id, after)
+
+    @app.get("/api/v1/sessions/{session_id}/changes/{change_id}")
+    def session_file_change(
+        session_id: str, change_id: str, svc: Service
+    ) -> dict[str, Any]:
+        return svc.studio.file_change_diff(session_id, change_id)
+
+    @app.post("/api/v1/file-changes/{change_id}/review")
+    def review_file_change(
+        change_id: str, payload: FileChangeReview, svc: Service
+    ) -> dict[str, Any]:
+        return svc.studio.review_file_change(change_id, payload)
+
+    @app.get("/api/v1/sessions/{session_id}/events/stream")
+    async def session_event_stream(
+        session_id: str,
+        svc: Service,
+        after: int = Query(default=0, ge=0),
+    ) -> StreamingResponse:
+        svc.studio.get_session(session_id)
+
+        async def stream():
+            cursor = after
+            idle_ticks = 0
+            while True:
+                events = svc.studio.get_events(session_id, cursor)
+                for item in events:
+                    cursor = item["seq"]
+                    yield f"id: {cursor}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
+                    idle_ticks = 0
+                current = svc.database.fetch_one(
+                    "SELECT status FROM agent_sessions WHERE id=?", (session_id,)
+                )
+                if current and current["status"] in {
+                    "idle",
+                    "completed",
+                    "failed",
+                    "cancelled",
+                    "interrupted",
+                } and not events:
+                    break
+                idle_ticks += 1
+                if idle_ticks % 15 == 0:
+                    yield ": keepalive\n\n"
+                await asyncio.sleep(0.5)
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
+
+    @app.get("/api/v1/approvals")
+    def approvals(
+        svc: Service,
+        session_id: str | None = None,
+        status: str | None = Query(default=None, pattern="^(pending|approved|denied)$"),
+    ) -> list[dict[str, Any]]:
+        return svc.studio.list_approvals(session_id, status)
+
+    @app.post("/api/v1/approvals/{approval_id}/decision")
+    def decide_approval(
+        approval_id: str, payload: ApprovalDecision, svc: Service
+    ) -> dict[str, Any]:
+        return svc.studio.decide_approval(approval_id, payload)
+
+    @app.get("/api/v1/tasks")
+    def tasks(svc: Service, project_id: str | None = None) -> list[dict[str, Any]]:
+        return svc.studio.list_tasks(project_id)
+
+    @app.post("/api/v1/tasks", status_code=201)
+    def create_task(payload: TaskItemCreate, svc: Service) -> dict[str, Any]:
+        return svc.studio.create_task(payload)
+
+    @app.patch("/api/v1/tasks/{task_id}")
+    def update_task(
+        task_id: str, payload: TaskItemUpdate, svc: Service
+    ) -> dict[str, Any]:
+        return svc.studio.update_task(task_id, payload.model_dump(exclude_unset=True))
+
+    @app.post("/api/v1/tasks/{task_id}/start", status_code=202)
+    def start_task(task_id: str, svc: Service) -> dict[str, Any]:
+        return svc.start_task(task_id)
+
+    @app.post("/api/v1/tasks/{task_id}/cancel", status_code=202)
+    def cancel_task(task_id: str, svc: Service) -> dict[str, Any]:
+        return svc.cancel_task(task_id)
+
+    @app.get("/api/v1/flows")
+    def flows(svc: Service, project_id: str | None = None) -> list[dict[str, Any]]:
+        return svc.studio.list_graphs(project_id)
+
+    @app.post("/api/v1/flows", status_code=201)
+    def create_flow(payload: TaskGraphCreate, svc: Service) -> dict[str, Any]:
+        return svc.studio.create_graph(payload)
+
+    @app.get("/api/v1/flows/{graph_id}")
+    def flow(graph_id: str, svc: Service) -> dict[str, Any]:
+        return svc.studio.get_graph(graph_id)
+
+    @app.post("/api/v1/flows/{graph_id}/run", status_code=202)
+    def run_flow(graph_id: str, svc: Service) -> dict[str, Any]:
+        return svc.start_flow(graph_id)
+
+    @app.post("/api/v1/flows/{graph_id}/cancel", status_code=202)
+    def cancel_flow(graph_id: str, svc: Service) -> dict[str, Any]:
+        return svc.cancel_flow(graph_id)
+
+    @app.get("/api/v1/mcp-servers")
+    def mcp_servers(svc: Service) -> list[dict[str, Any]]:
+        return svc.studio.list_mcp_servers()
+
+    @app.post("/api/v1/mcp-servers", status_code=201)
+    def create_mcp_server(payload: McpServerCreate, svc: Service) -> dict[str, Any]:
+        return svc.studio.create_mcp_server(payload)
+
+    @app.post("/api/v1/mcp-servers/health")
+    def check_all_mcp_servers(svc: Service) -> list[dict[str, Any]]:
+        return svc.check_all_mcp_servers()
+
+    @app.post("/api/v1/mcp-servers/{server_id}/health")
+    def check_mcp_server(server_id: str, svc: Service) -> dict[str, Any]:
+        return svc.check_mcp_server(server_id)
+
+    @app.post("/api/v1/mcp-servers/{server_id}/tools/call")
+    def execute_mcp_tool(
+        server_id: str, payload: McpToolCall, svc: Service
+    ) -> dict[str, Any]:
+        return svc.execute_mcp_tool(server_id, payload)
 
     @app.get("/api/v1/system/status")
     def system_status(svc: Service) -> dict[str, Any]:

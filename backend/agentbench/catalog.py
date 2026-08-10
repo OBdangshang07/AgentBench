@@ -2946,6 +2946,8 @@ def seed_builtin_data(database: Database) -> None:
                 "json",
                 "--permission-mode",
                 "auto",
+                "--dir",
+                "{workspace}",
                 "--model",
                 "{model_name}",
                 "{prompt}",

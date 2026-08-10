@@ -138,3 +138,160 @@ class AppSettingUpdate(BaseModel):
 
 class ModelEnabledUpdate(BaseModel):
     enabled: bool
+
+
+PermissionProfile = Literal["readonly", "workspace", "standard", "full"]
+ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
+
+
+class ProjectCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+    root_path: str = Field(min_length=1, max_length=2048)
+    description: str = Field(default="", max_length=2000)
+    default_runner_id: str | None = None
+    default_model_id: str | None = None
+    permission_profile: PermissionProfile = "workspace"
+    pinned: bool = False
+
+
+class ProjectUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
+    default_runner_id: str | None = None
+    default_model_id: str | None = None
+    permission_profile: PermissionProfile | None = None
+    pinned: bool | None = None
+    archived: bool | None = None
+
+
+class ProjectRootCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    root_path: str = Field(min_length=1, max_length=2048)
+    label: str = Field(default="", max_length=120)
+    access_mode: PermissionProfile = "workspace"
+
+
+class SessionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str
+    runner_id: str | None = None
+    model_id: str | None = None
+    title: str = Field(default="新 Agent 会话", min_length=1, max_length=180)
+    permission_profile: PermissionProfile | None = None
+    reasoning_effort: ReasoningEffort = "medium"
+
+
+class SessionUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, min_length=1, max_length=180)
+    runner_id: str | None = None
+    model_id: str | None = None
+    permission_profile: PermissionProfile | None = None
+    reasoning_effort: ReasoningEffort | None = None
+    archived: bool | None = None
+
+
+class SessionTurnCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    message: str = Field(min_length=1, max_length=200_000)
+    context: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+
+
+class SessionAttachmentImport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    paths: list[str] = Field(min_length=1, max_length=10)
+
+
+class TerminalCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    shell: Literal["powershell.exe", "pwsh.exe", "cmd.exe"] = "powershell.exe"
+    columns: int = Field(default=120, ge=40, le=300)
+    rows: int = Field(default=30, ge=10, le=100)
+
+
+class TerminalInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    data: str = Field(max_length=20_000)
+
+
+class TerminalResize(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    columns: int = Field(ge=40, le=300)
+    rows: int = Field(ge=10, le=100)
+
+
+class ApprovalDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["allow_once", "allow_session", "allow_project", "deny"]
+    reason: str = Field(default="", max_length=1000)
+
+
+class FileChangeReview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["accept", "reject", "apply_content"]
+    content: str | None = Field(default=None, max_length=2_000_000)
+
+
+class TaskItemCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str | None = None
+    title: str = Field(min_length=1, max_length=180)
+    description: str = Field(default="", max_length=4000)
+    priority: Literal["low", "normal", "high", "urgent"] = "normal"
+    runner_id: str | None = None
+    model_id: str | None = None
+
+
+class TaskItemUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, min_length=1, max_length=180)
+    description: str | None = Field(default=None, max_length=4000)
+    status: Literal["backlog", "queued", "running", "approval", "completed", "failed"] | None = None
+    priority: Literal["low", "normal", "high", "urgent"] | None = None
+    runner_id: str | None = None
+    model_id: str | None = None
+
+
+class McpServerCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+    transport: Literal["stdio", "sse", "streamable_http"] = "stdio"
+    command: str | None = Field(default=None, max_length=2048)
+    args: list[str] = Field(default_factory=list, max_length=100)
+    url: HttpUrl | None = None
+    env: dict[str, str] = Field(default_factory=dict)
+
+
+class McpToolCall(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: str = Field(min_length=1, max_length=240)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class TaskGraphCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str | None = None
+    name: str = Field(min_length=1, max_length=180)
+    description: str = Field(default="", max_length=4000)
+    settings: dict[str, Any] = Field(default_factory=dict)
+    nodes: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+    edges: list[dict[str, Any]] = Field(default_factory=list, max_length=300)

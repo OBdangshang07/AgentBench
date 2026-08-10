@@ -218,6 +218,33 @@ def test_native_output_parser_prefers_cli_reported_cost():
     assert reported_cost == 0.03125
 
 
+def test_reasonix_stream_output_keeps_live_text_final_usage_and_cost():
+    output = "\n".join(
+        [
+            json.dumps({"kind": "text", "text": "STREAM"}),
+            json.dumps({"kind": "message", "text": "STREAM_OK"}),
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "result": "STREAM_OK",
+                    "total_cost_usd": 0.000043,
+                    "usage": {"input_tokens": 13220, "output_tokens": 7},
+                }
+            ),
+        ]
+    )
+
+    final, input_tokens, output_tokens, reported_cost, event_count = (
+        EvaluationService._parse_native_output("reasonix_cli", output, lambda *_args: None)
+    )
+
+    assert final == "STREAM_OK"
+    assert (input_tokens, output_tokens) == (13220, 7)
+    assert reported_cost == 0.000043
+    assert event_count == 3
+
+
 def test_kimi_discovery_uses_cli_catalog(monkeypatch):
     monkeypatch.setattr("agentbench.model_discovery.native_cli_status", _installed_cli)
     monkeypatch.setattr(

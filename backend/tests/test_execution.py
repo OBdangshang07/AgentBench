@@ -73,6 +73,27 @@ def test_custom_native_cli_is_started_without_shell_interpolation(tmp_path):
     assert '"result": "OK"' in result.stdout
 
 
+def test_native_cli_preserves_required_windows_system_paths(monkeypatch, tmp_path):
+    monkeypatch.setenv("SYSTEMDRIVE", "Q:")
+    monkeypatch.setenv("PROGRAMDATA", "Q:\\ProgramData")
+    workspace = Workspace(tmp_path / "windows-env-run")
+
+    result = run_native_cli(
+        executable=sys.executable,
+        args=[
+            "-c",
+            "import os; print(os.environ.get('SYSTEMDRIVE')); print(os.environ.get('PROGRAMDATA'))",
+        ],
+        workspace=workspace,
+        placeholders={},
+        extra_env={},
+        timeout=10,
+    )
+
+    assert result.ok is True
+    assert result.stdout.splitlines() == ["Q:", "Q:\\ProgramData"]
+
+
 def test_run_native_cli_delivers_long_stdin_text_without_argv(tmp_path):
     workspace = Workspace(tmp_path / "stdin-run")
     payload = "评审任务行\n" * 3000  # > 8191 chars, multi-line

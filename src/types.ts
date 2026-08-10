@@ -108,6 +108,16 @@ export interface Runner {
     unavailable_reason?: string | null;
     manual_instructions?: string;
   };
+  adapter?: {
+    conversation_mode: "native_resume" | "history_replay";
+    native_resume: boolean;
+    structured_events: "full" | "stream" | "filtered_text";
+    mcp: boolean;
+    model_override: boolean;
+    approval_gate: boolean;
+    process_tree_cancel: boolean;
+    interactive_terminal: boolean;
+  };
 }
 
 export interface RunnerInstallJob {
