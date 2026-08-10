@@ -1273,7 +1273,10 @@ class EvaluationService:
         return (
             "You are working in an AgentBench Studio project explicitly selected by the user. "
             "Work only inside the current project workspace. Do not expose private chain-of-thought; "
-            "show concise progress through tool calls and finish with a useful summary. Preserve "
+            "before major actions and whenever the plan changes, emit a concise user-facing progress "
+            "update like a collaborative coding agent. Progress updates must describe the next action "
+            "or an observable finding, never private reasoning. Show verifiable progress through tool "
+            "calls and finish with a useful summary. Preserve "
             "unrelated user changes and verify your work when practical."
             f"{history_block}{context}\n\nCURRENT USER REQUEST:\n{turn['user_message']}"
         )
@@ -4085,6 +4088,10 @@ class EvaluationService:
         )
         live_line_count = 0
         live_lock = threading.Lock()
+        live_text_buffer = ""
+        live_text_stream = 0
+        live_text_last_emit = 0.0
+        live_text_last_length = 0
 
         def workspace_state() -> dict[str, tuple[int, int]]:
             state: dict[str, tuple[int, int]] = {}
@@ -4098,27 +4105,80 @@ class EvaluationService:
         previous_workspace_state = workspace_state()
 
         def line_callback(stream_name: str, line: str) -> None:
-            nonlocal live_line_count
+            nonlocal live_line_count, live_text_buffer, live_text_stream
+            nonlocal live_text_last_emit, live_text_last_length
             with live_lock:
                 live_line_count += 1
                 line_no = live_line_count
             normalized = self._normalize_native_live_event(
                 runner["runner_type"], stream_name, line, line_no
             )
-            if normalized is not None:
-                event_sink(*normalized)
-                usage = normalized[1].get("usage")
-                if isinstance(usage, dict) and usage:
+            if normalized is None:
+                return
+            event_type, payload = normalized
+            if event_type == "live.text_delta":
+                delta = str(payload.get("delta") or "")
+                snapshot = ""
+                stream_id = ""
+                now = time.monotonic()
+                with live_lock:
+                    live_text_buffer += delta
+                    enough_text = len(live_text_buffer) - live_text_last_length >= 18
+                    enough_time = now - live_text_last_emit >= 0.75
+                    sentence_boundary = live_text_buffer.rstrip().endswith(
+                        ("。", "！", "？", ".", "!", "?", ":", "：", "\n")
+                    )
+                    if enough_time and (enough_text or sentence_boundary):
+                        snapshot = live_text_buffer
+                        stream_id = f"native-message-{live_text_stream}"
+                        live_text_last_emit = now
+                        live_text_last_length = len(live_text_buffer)
+                if snapshot:
                     event_sink(
-                        "usage.updated",
+                        "live.message",
                         {
-                            "usage": usage,
-                            "mode": "delta"
-                            if normalized[1].get("source_type")
-                            in {"step_finish", "step-finish"}
-                            else "absolute",
+                            **payload,
+                            "stream_id": stream_id,
+                            "text": _redact_viewer_text(snapshot, 6000),
+                            "status": "streaming",
                         },
                     )
+                return
+            if event_type == "live.message":
+                text_value = str(payload.get("text") or "").strip()
+                with live_lock:
+                    stream_id = f"native-message-{live_text_stream}"
+                    if not text_value:
+                        text_value = live_text_buffer.strip()
+                    live_text_buffer = ""
+                    live_text_stream += 1
+                    live_text_last_emit = 0.0
+                    live_text_last_length = 0
+                if text_value:
+                    event_sink(
+                        event_type,
+                        {
+                            **payload,
+                            "stream_id": stream_id,
+                            "text": _redact_viewer_text(text_value, 6000),
+                            "status": "completed",
+                        },
+                    )
+            elif event_type != "live.usage":
+                event_sink(event_type, payload)
+            usage = payload.get("usage")
+            if isinstance(usage, dict) and any(
+                float(usage.get(key) or 0) > 0
+                for key in ("input_tokens", "output_tokens", "cost_usd")
+            ):
+                source_type = str(payload.get("source_type") or "")
+                incremental = source_type in {"step_finish", "step-finish"} or (
+                    runner["runner_type"] == "reasonix_cli" and source_type == "usage"
+                )
+                event_sink(
+                    "usage.updated",
+                    {"usage": usage, "mode": "delta" if incremental else "absolute"},
+                )
 
         def heartbeat_callback(elapsed_ms: int) -> None:
             nonlocal previous_workspace_state
@@ -4173,6 +4233,21 @@ class EvaluationService:
             line_callback=line_callback,
             heartbeat_callback=heartbeat_callback,
         )
+        with live_lock:
+            pending_text = live_text_buffer.strip()
+            pending_stream_id = f"native-message-{live_text_stream}"
+            live_text_buffer = ""
+        if pending_text:
+            event_sink(
+                "live.message",
+                {
+                    "runner_type": runner["runner_type"],
+                    "stream": "stdout",
+                    "stream_id": pending_stream_id,
+                    "text": _redact_viewer_text(pending_text, 6000),
+                    "status": "completed",
+                },
+            )
         heartbeat_callback(command_result.duration_ms)
         final_answer, input_tokens, output_tokens, reported_cost, event_count = self._parse_native_output(
             runner["runner_type"], command_result.stdout, None
@@ -4257,11 +4332,13 @@ class EvaluationService:
 
         nested = item.get("item") if isinstance(item.get("item"), dict) else {}
         part = item.get("part") if isinstance(item.get("part"), dict) else {}
+        tool = item.get("tool") if isinstance(item.get("tool"), dict) else {}
         message = item.get("message") if isinstance(item.get("message"), dict) else {}
         blocks = message.get("content") if isinstance(message.get("content"), list) else []
-        sources = [item, nested, part, *[block for block in blocks if isinstance(block, dict)]]
+        sources = [item, nested, part, tool, *[block for block in blocks if isinstance(block, dict)]]
         kind = str(
-            item.get("type")
+            item.get("kind")
+            or item.get("type")
             or nested.get("type")
             or part.get("type")
             or "activity"
@@ -4275,11 +4352,7 @@ class EvaluationService:
             or {}
         )
         if isinstance(usage, dict) and usage:
-            base["usage"] = {
-                "input_tokens": int(usage.get("input_tokens", usage.get("input", 0)) or 0),
-                "output_tokens": int(usage.get("output_tokens", usage.get("output", 0)) or 0)
-                + int(usage.get("reasoning", 0) or 0),
-            }
+            base["usage"] = EvaluationService._native_usage_values(usage)
 
         def first_value(*names: str) -> Any:
             for source in sources:
@@ -4289,15 +4362,54 @@ class EvaluationService:
                         return value
             return None
 
+        semantic_kinds = {
+            kind.lower(),
+            str(nested.get("type") or "").lower(),
+            str(part.get("type") or "").lower(),
+        }
+        if semantic_kinds & {"reasoning", "thinking", "chain_of_thought"}:
+            # Native CLIs can expose private reasoning token deltas. They are deliberately
+            # not persisted; the UI shows public Agent messages and verifiable actions.
+            return None
+        if kind.lower() in {"turn_started", "turn.started", "session_started"}:
+            return "live.phase", {
+                **base,
+                "phase": "analysis",
+                "summary": "Agent 已接收任务，正在分析执行路径",
+                "status": "running",
+            }
+        if kind.lower() == "usage":
+            return "live.usage", base
+        if kind.lower() in {"text", "text_delta", "assistant_text_delta"}:
+            delta = item.get("text") or item.get("delta") or part.get("text")
+            if isinstance(delta, str) and delta:
+                return "live.text_delta", {**base, "delta": delta}
+            return None
+        if semantic_kinds & {"message", "agent_message", "assistant_message", "assistant"}:
+            public_text = first_value("text", "output_text")
+            if not public_text and isinstance(blocks, list):
+                public_text = "\n".join(
+                    str(block.get("text") or "")
+                    for block in blocks
+                    if isinstance(block, dict) and block.get("type") in {"text", "assistant_text"}
+                ).strip()
+            if isinstance(public_text, str) and public_text.strip():
+                return "live.message", {**base, "text": public_text.strip()}
+
         tool_name = first_value("tool_name", "name")
         tool_input = first_value("input", "arguments", "args")
+        if isinstance(tool_input, str):
+            with suppress(json.JSONDecodeError):
+                parsed_input = json.loads(tool_input)
+                if isinstance(parsed_input, dict):
+                    tool_input = parsed_input
         command = first_value("command", "cmd")
         if not command and isinstance(tool_input, dict):
             command = tool_input.get("command") or tool_input.get("cmd")
         path = first_value("path", "file_path", "filename")
         if not path and isinstance(tool_input, dict):
             path = tool_input.get("path") or tool_input.get("file_path")
-        output = first_value("aggregated_output", "stdout", "result")
+        output = first_value("aggregated_output", "stdout", "result", "output")
         descriptor = " ".join(
             str(value).lower()
             for value in (kind, tool_name, command)
@@ -4306,26 +4418,29 @@ class EvaluationService:
 
         if command:
             safe_command = _redact_viewer_text(str(command), 900)
+            tool_id = _redact_viewer_text(
+                str(tool.get("id") or first_value("id") or ""), 180
+            )
+            command_status = (
+                "completed"
+                if kind.lower() in {"tool_result", "tool.completed", "tool_result_end"}
+                else first_value("status") or "running"
+            )
             if any(marker in descriptor for marker in ("pytest", "vitest", "jest", "cargo test", "test")):
                 return "live.test", {
                     **base,
-                    "status": first_value("status") or "running",
+                    "tool_id": tool_id,
+                    "status": command_status,
                     "command": safe_command,
                     "detail": _redact_viewer_text(str(output), 800) if output else "公开测试正在执行",
                 }
             return "live.command", {
                 **base,
-                "status": first_value("status") or "running",
+                "tool_id": tool_id,
+                "status": command_status,
                 "command": safe_command,
                 "exit_code": first_value("exit_code"),
                 "detail": _redact_viewer_text(str(output), 800) if output else None,
-            }
-        if path or any(marker in descriptor for marker in ("write", "edit", "patch", "file")):
-            return "live.file_change", {
-                **base,
-                "path": _redact_viewer_text(str(path or "工作区文件"), 500),
-                "change": "modified",
-                "tool": _redact_viewer_text(str(tool_name or kind), 160),
             }
         if tool_name or "tool" in descriptor:
             detail = ""
@@ -4338,9 +4453,25 @@ class EvaluationService:
                 detail = json.dumps(_viewer_safe_value(visible), ensure_ascii=False)
             return "live.tool", {
                 **base,
+                "tool_id": _redact_viewer_text(str(tool.get("id") or first_value("id") or ""), 180),
                 "tool": _redact_viewer_text(str(tool_name or kind), 160),
-                "status": first_value("status") or "running",
-                "detail": detail,
+                "status": (
+                    "completed"
+                    if kind.lower() in {"tool_result", "tool.completed", "tool_result_end"}
+                    else "preparing"
+                    if bool(tool.get("partial")) and not tool_input
+                    else first_value("status") or "running"
+                ),
+                "detail": detail or (
+                    f"工具已返回 {len(str(output)):,} 个字符" if output is not None else ""
+                ),
+            }
+        if path or any(marker in descriptor for marker in ("write", "edit", "patch", "file")):
+            return "live.file_change", {
+                **base,
+                "path": _redact_viewer_text(str(path or "工作区文件"), 500),
+                "change": "modified",
+                "tool": _redact_viewer_text(str(tool_name or kind), 160),
             }
         if kind in {"result", "turn.completed", "step_finish", "step-finish"}:
             return "live.phase", {
@@ -4353,6 +4484,42 @@ class EvaluationService:
             **base,
             "summary": "Agent 产生新的可验证进度",
             "kind": kind,
+        }
+
+    @staticmethod
+    def _native_usage_values(usage: dict[str, Any]) -> dict[str, int | float]:
+        def integer(*names: str) -> int:
+            for name in names:
+                value = usage.get(name)
+                if value not in (None, ""):
+                    with suppress(TypeError, ValueError):
+                        return max(0, int(value))
+            return 0
+
+        def number(*names: str) -> float:
+            for name in names:
+                value = usage.get(name)
+                if value not in (None, ""):
+                    with suppress(TypeError, ValueError):
+                        return max(0.0, float(value))
+            return 0.0
+
+        output_tokens = integer(
+            "output_tokens", "output", "completion_tokens", "completionTokens"
+        )
+        if not any(
+            name in usage
+            for name in ("output_tokens", "completion_tokens", "completionTokens")
+        ):
+            # OpenCode reports visible output and reasoning separately, while Reasonix's
+            # completionTokens already includes its reasoningTokens.
+            output_tokens += integer("reasoning", "reasoning_tokens", "reasoningTokens")
+        return {
+            "input_tokens": integer(
+                "input_tokens", "input", "prompt_tokens", "promptTokens"
+            ),
+            "output_tokens": output_tokens,
+            "cost_usd": number("cost_usd", "costUSD", "costUsd", "cost"),
         }
 
     @staticmethod
@@ -4380,9 +4547,10 @@ class EvaluationService:
             count += 1
             if event_sink is not None:
                 event_sink("native_cli.event", {"runner_type": runner_type, "event": item})
+            item_kind = str(item.get("kind") or item.get("type") or "")
             if item.get("type") == "result" and isinstance(item.get("result"), str):
                 final = item["result"]
-            if item.get("type") in {"text", "assistant", "message", "output"}:
+            if item_kind in {"text", "assistant", "message", "output"}:
                 candidate = item.get("text") or item.get("content") or item.get("output")
                 if isinstance(candidate, str):
                     final = candidate
@@ -4409,11 +4577,12 @@ class EvaluationService:
                 or (part.get("tokens") if isinstance(part, dict) else None)
                 or {}
             )
-            input_value = int(usage.get("input_tokens", usage.get("input", 0)) or 0)
-            output_value = int(usage.get("output_tokens", usage.get("output", 0)) or 0)
-            if "output_tokens" not in usage:
-                output_value += int(usage.get("reasoning", 0) or 0)
-            is_incremental = item.get("type") in {"step_finish", "step-finish"}
+            usage_values = EvaluationService._native_usage_values(usage)
+            input_value = int(usage_values["input_tokens"])
+            output_value = int(usage_values["output_tokens"])
+            is_incremental = item.get("type") in {"step_finish", "step-finish"} or (
+                runner_type == "reasonix_cli" and item_kind == "usage"
+            )
             if is_incremental:
                 input_tokens += input_value
                 output_tokens += output_value
@@ -4425,6 +4594,8 @@ class EvaluationService:
                 or item.get("cost_usd")
                 or item.get("costUSD")
                 or (usage.get("cost_usd") if isinstance(usage, dict) else None)
+                or (usage.get("costUsd") if isinstance(usage, dict) else None)
+                or (usage.get("cost") if isinstance(usage, dict) else None)
             )
             if raw_cost is not None:
                 with suppress(TypeError, ValueError):

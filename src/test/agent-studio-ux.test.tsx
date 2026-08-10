@@ -130,7 +130,7 @@ function installApiMock(
 ) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = String(input);
-    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "4.1.0" });
+    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "4.1.1" });
     if (url.endsWith("/sessions")) return json([currentSession]);
     if (url.endsWith("/sessions/session-1") && init?.method === "PATCH") return json({ ...currentDetail, ...JSON.parse(String(init.body)) });
     if (url.endsWith("/sessions/session-1")) return json(currentDetail);
@@ -252,14 +252,43 @@ describe("Agent Studio visual workspace controls", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "仅允许一次" })[0]);
     await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/approvals/approval-1/decision"))).toBe(true));
 
-    fireEvent.change(screen.getByRole("combobox", { name: "会话访问权限" }), { target: { value: "full" } });
+    fireEvent.click(screen.getByRole("button", { name: "会话访问权限" }));
+    fireEvent.click(screen.getByRole("option", { name: /完全访问/ }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith("/sessions/session-1") && init?.method === "PATCH" && String(init.body).includes("permission_profile"))).toBe(true));
-    await waitFor(() => expect(screen.getByRole("combobox", { name: "思考强度" })).not.toBeDisabled());
-    fireEvent.change(screen.getByRole("combobox", { name: "思考强度" }), { target: { value: "high" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "思考强度" })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole("button", { name: "思考强度" }));
+    fireEvent.click(screen.getByRole("option", { name: /高.*复杂任务/ }));
     expect(screen.getByRole("button", { name: /附件/ })).toBeInTheDocument();
     expect(screen.getByText("2,000 Tokens")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /交互终端/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /活动日志/ })).toBeInTheDocument();
+  });
+
+  it("turns streamed model output into a readable and deduplicated process timeline", async () => {
+    const processDetail: AgentSessionDetail = {
+      ...detail,
+      events: [
+        { id: 1, session_id: session.id, turn_id: "turn-1", seq: 1, event_type: "turn.started", visibility: "recording_safe", payload: {}, created_at: now },
+        { id: 2, session_id: session.id, turn_id: "turn-1", seq: 2, event_type: "live.message", visibility: "recording_safe", payload: { stream_id: "native-message-0", text: "正在读取", status: "streaming" }, created_at: now },
+        { id: 3, session_id: session.id, turn_id: "turn-1", seq: 3, event_type: "live.message", visibility: "recording_safe", payload: { stream_id: "native-message-0", text: "正在读取 package.json 以确认版本。", status: "completed" }, created_at: now },
+        { id: 4, session_id: session.id, turn_id: "turn-1", seq: 4, event_type: "live.tool", visibility: "recording_safe", payload: { tool_id: "call-1", tool: "read_file", status: "preparing" }, created_at: now },
+        { id: 5, session_id: session.id, turn_id: "turn-1", seq: 5, event_type: "live.tool", visibility: "recording_safe", payload: { tool_id: "call-1", tool: "read_file", status: "completed", detail: '{"path":"package.json"}' }, created_at: now },
+        { id: 6, session_id: session.id, turn_id: "turn-1", seq: 6, event_type: "live.activity", visibility: "recording_safe", payload: { kind: "activity", summary: "Agent 产生新的可验证进度" }, created_at: now },
+        { id: 7, session_id: session.id, turn_id: "turn-1", seq: 7, event_type: "live.heartbeat", visibility: "recording_safe", payload: { elapsed_ms: 12_000, line_count: 91 }, created_at: now },
+        { id: 8, session_id: session.id, turn_id: "turn-1", seq: 8, event_type: "usage.updated", visibility: "recording_safe", payload: { usage: { input_tokens: 120, output_tokens: 17 }, mode: "delta" }, created_at: now },
+      ],
+    };
+    installApiMock(processDetail, session);
+    const { container } = renderStudio();
+
+    expect(await screen.findByText("Agent 执行过程")).toBeInTheDocument();
+    const processList = container.querySelector(".v4-process-list");
+    expect(processList).not.toBeNull();
+    expect(processList?.querySelectorAll("article")).toHaveLength(3);
+    expect(processList).toHaveTextContent("正在读取 package.json 以确认版本。");
+    expect(processList).toHaveTextContent("工具完成 · read_file");
+    expect(processList).not.toHaveTextContent("Agent 产生新的可验证进度");
+    expect(container.querySelector(".v4-inline-activity > footer")).toHaveTextContent("5 条");
   });
 
   it("forwards direct xterm keyboard input to the interactive terminal in order", async () => {

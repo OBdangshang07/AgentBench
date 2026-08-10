@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import SettingsPage from "../pages/Settings";
 
 const status = {
-  version: "4.1.0",
+  version: "4.1.1",
   data_dir: "C:/AgentBench",
   database: { path: "C:/AgentBench/agentbench.db", ready: true },
   docker: { installed: true, available: true, executable: "docker" },
@@ -18,7 +18,7 @@ describe("judge settings", () => {
   it("persists judge selection immediately", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return new Response(JSON.stringify({ name: "AgentBench Desktop", version: "4.1.0" }), { status: 200 });
+      if (url.endsWith("/health")) return new Response(JSON.stringify({ name: "AgentBench Desktop", version: "4.1.1" }), { status: 200 });
       if (init?.method === "PATCH") return new Response(JSON.stringify(status), { status: 200 });
       if (url.endsWith("/models")) {
         return new Response(JSON.stringify([

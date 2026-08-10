@@ -92,6 +92,21 @@ const effortLabels: Record<ReasoningEffort, string> = {
   max: "最大",
 };
 
+const permissionOptions: ComposerMenuOption[] = [
+  { value: "readonly", label: "只读", description: "仅查看和分析，不写入项目" },
+  { value: "workspace", label: "工作区", description: "仅修改当前已授权项目" },
+  { value: "standard", label: "标准开发", description: "允许命令、测试和开发工具" },
+  { value: "full", label: "完全访问", description: "跳过 Agent 沙箱与逐项审批" },
+];
+
+const effortOptions: ComposerMenuOption[] = [
+  { value: "low", label: "低", description: "更快响应，适合简单操作" },
+  { value: "medium", label: "中", description: "速度与分析深度均衡" },
+  { value: "high", label: "高", description: "复杂任务使用更多推理资源" },
+  { value: "xhigh", label: "极高", description: "深度分析高难任务" },
+  { value: "max", label: "最大", description: "使用 Agent 支持的最高强度" },
+];
+
 const statusLabels: Record<string, string> = {
   idle: "就绪",
   queued: "排队中",
@@ -109,6 +124,13 @@ function eventTitle(event: StudioEvent) {
   switch (event.event_type) {
     case "turn.queued": return "任务已进入 Agent 队列";
     case "turn.started": return "Agent 开始执行本轮任务";
+    case "native_cli.started": return "已启动原生 Agent 运行时";
+    case "live.phase": return String(payload.summary ?? "Agent 正在推进任务");
+    case "live.message": return payload.status === "streaming" ? "Agent 正在说明进度" : "Agent 进度说明";
+    case "live.tool": return `${payload.status === "completed" ? "工具完成" : payload.status === "preparing" ? "准备调用工具" : "正在调用工具"} · ${String(payload.tool ?? "tool")}`;
+    case "live.command": return "正在执行命令";
+    case "live.test": return payload.status === "completed" ? "测试执行完成" : "正在运行验证测试";
+    case "live.file_change": return `${String(payload.change ?? "修改")}文件 · ${String(payload.path ?? "工作区文件")}`;
     case "tool.requested": return `调用工具 · ${String(payload.name ?? "tool")}`;
     case "tool.completed": return `工具完成 · ${String(payload.name ?? "tool")}`;
     case "file.changed": return `${String(payload.change_type ?? "修改")}文件 · ${String(payload.path ?? "")}`;
@@ -125,11 +147,45 @@ function eventTitle(event: StudioEvent) {
 
 function eventDetail(event: StudioEvent) {
   const payload = event.payload;
+  if (event.event_type === "live.message") return String(payload.text ?? "");
+  if (event.event_type === "live.tool") return String(payload.detail ?? "");
+  if (event.event_type === "live.command") return [payload.command, payload.detail].filter(Boolean).join("\n");
+  if (event.event_type === "live.test") return [payload.command, payload.detail].filter(Boolean).join("\n");
+  if (event.event_type === "live.phase") return String(payload.detail ?? "");
+  if (event.event_type === "live.file_change" && payload.size_delta !== undefined) return `${Number(payload.size_delta) >= 0 ? "+" : ""}${String(payload.size_delta)} B`;
   if (event.event_type === "tool.requested") return JSON.stringify(payload.arguments ?? {}, null, 2);
   if (event.event_type === "tool.completed") return JSON.stringify(payload.result ?? {}, null, 2);
   if (event.event_type === "turn.completed") return `${String(payload.steps ?? 0)} steps · ${duration(Number(payload.duration_ms ?? 0))}`;
   if (event.event_type === "turn.failed" || event.event_type === "turn.cancelled") return String(payload.message ?? "");
   return "";
+}
+
+function eventCategory(event: StudioEvent) {
+  if (event.event_type === "live.message") return "公开说明";
+  if (event.event_type.includes("tool")) return "工具";
+  if (event.event_type.includes("command")) return "命令";
+  if (event.event_type.includes("test")) return "验证";
+  if (event.event_type.includes("file")) return "文件";
+  if (event.event_type.includes("approval")) return "审批";
+  return "进度";
+}
+
+function eventTone(event: StudioEvent) {
+  if (event.event_type.includes("failed") || event.event_type.includes("cancelled")) return "failed";
+  if (event.payload.status === "completed" || event.event_type.includes("completed")) return "done";
+  if (event.event_type === "live.message") return "message";
+  if (event.event_type.includes("tool") || event.event_type.includes("command") || event.event_type.includes("test")) return "action";
+  return "running";
+}
+
+function eventIcon(event: StudioEvent) {
+  if (event.event_type === "live.message") return <Sparkles size={15} />;
+  if (event.event_type.includes("command") || event.event_type.includes("test")) return <TerminalSquare size={15} />;
+  if (event.event_type.includes("file")) return <FileDiff size={15} />;
+  if (event.event_type.includes("approval")) return <ShieldCheck size={15} />;
+  if (event.event_type.includes("tool")) return <Code2 size={15} />;
+  if (eventTone(event) === "done") return <Check size={15} />;
+  return <Brain size={15} />;
 }
 
 interface SessionForm {
@@ -146,6 +202,12 @@ interface StudioPickerOption {
   label: string;
   description: string;
   disabled?: boolean;
+}
+
+interface ComposerMenuOption {
+  value: string;
+  label: string;
+  description: string;
 }
 
 interface StudioLayoutState {
@@ -259,6 +321,80 @@ function StudioPicker({
   );
 }
 
+function ComposerMenu({
+  ariaLabel,
+  label,
+  icon,
+  value,
+  options,
+  disabled = false,
+  onChange,
+}: {
+  ariaLabel: string;
+  label: string;
+  icon: ReactNode;
+  value: string;
+  options: ComposerMenuOption[];
+  disabled?: boolean;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const selected = options.find((option) => option.value === value) ?? options[0];
+
+  useEffect(() => {
+    if (!open) return;
+    function dismiss(event: MouseEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", dismiss);
+    window.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", dismiss);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [open]);
+
+  return (
+    <div className={`v4-composer-menu ${open ? "open" : ""}`} ref={rootRef}>
+      <button
+        type="button"
+        className="v4-composer-menu-trigger"
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        disabled={disabled}
+        onClick={() => setOpen((current) => !current)}
+      >
+        {icon}<span>{label}</span><strong>{selected?.label}</strong><ChevronDown size={13} />
+      </button>
+      {open && (
+        <div className="v4-composer-menu-popover" role="listbox" aria-label={ariaLabel}>
+          <header><span>{label}</span><small>本会话立即生效</small></header>
+          {options.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              role="option"
+              aria-selected={option.value === value}
+              onClick={() => {
+                onChange(option.value);
+                setOpen(false);
+              }}
+            >
+              <span className="v4-picker-radio">{option.value === value && <Check size={12} />}</span>
+              <span><strong>{option.label}</strong><small>{option.description}</small></span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function AgentStudio() {
   const { sessionId } = useParams();
   const navigate = useNavigate();
@@ -364,6 +500,31 @@ export default function AgentStudio() {
     streamedEvents.forEach((event) => bySequence.set(event.seq, event));
     return [...bySequence.values()].sort((left, right) => left.seq - right.seq);
   }, [detail?.events, streamedEvents]);
+  const latestHeartbeat = useMemo(
+    () => [...events].reverse().find((event) => event.event_type === "live.heartbeat"),
+    [events],
+  );
+  const processEvents = useMemo(() => {
+    const keyed = new Map<string, StudioEvent>();
+    const standalone: StudioEvent[] = [];
+    for (const event of events) {
+      if (["usage.updated", "assistant.message", "native_cli.event", "live.usage", "live.heartbeat"].includes(event.event_type)) continue;
+      if (
+        event.event_type === "live.activity"
+        && !event.payload.detail
+        && ["activity", undefined].includes(event.payload.kind as string | undefined)
+      ) continue;
+      let key = "";
+      if (event.event_type === "live.message") key = `message:${String(event.payload.stream_id ?? event.seq)}`;
+      if (event.event_type === "live.tool" && event.payload.tool_id) key = `tool:${String(event.payload.tool_id)}`;
+      if (["live.command", "live.test"].includes(event.event_type) && event.payload.tool_id) key = `action:${String(event.payload.tool_id)}`;
+      if (event.event_type === "live.file_change" && event.payload.path) key = `file:${String(event.payload.path)}`;
+      if (key) keyed.set(key, event);
+      else standalone.push(event);
+    }
+    return [...standalone, ...keyed.values()].sort((left, right) => left.seq - right.seq);
+  }, [events]);
+  const collapsedEventCount = Math.max(0, events.length - processEvents.length);
   const pendingApprovals = useMemo(
     () => detail?.approvals.filter((item) => item.status === "pending") ?? [],
     [detail?.approvals],
@@ -385,29 +546,35 @@ export default function AgentStudio() {
       description: `${model.provider} · ${model.model_name}`,
     })), [models]);
   const liveUsage = useMemo(() => {
-    if (!activeStatuses.has(detail?.status ?? "")) return { input: 0, output: 0 };
+    if (!activeStatuses.has(detail?.status ?? "")) return { input: 0, output: 0, cost: 0 };
     const activeTurn = [...(detail?.turns ?? [])].reverse().find((turn) => activeStatuses.has(turn.status));
-    if (!activeTurn) return { input: 0, output: 0 };
+    if (!activeTurn) return { input: 0, output: 0, cost: 0 };
     let deltaInput = 0;
     let deltaOutput = 0;
+    let deltaCost = 0;
     let absoluteInput = 0;
     let absoluteOutput = 0;
+    let absoluteCost = 0;
     for (const event of events) {
       if (event.turn_id !== activeTurn.id || event.event_type !== "usage.updated") continue;
       const usage = event.payload.usage as Record<string, unknown> | undefined;
       const input = Number(usage?.input_tokens ?? 0);
       const output = Number(usage?.output_tokens ?? 0);
+      const cost = Number(usage?.cost_usd ?? 0);
       if (event.payload.mode === "delta") {
         deltaInput += input;
         deltaOutput += output;
+        deltaCost += cost;
       } else {
         absoluteInput = Math.max(absoluteInput, input);
         absoluteOutput = Math.max(absoluteOutput, output);
+        absoluteCost = Math.max(absoluteCost, cost);
       }
     }
     return {
       input: Math.max(deltaInput, absoluteInput),
       output: Math.max(deltaOutput, absoluteOutput),
+      cost: Math.max(deltaCost, absoluteCost),
     };
   }, [detail?.status, detail?.turns, events]);
   const quotaTokens = (detail?.tokens_input ?? 0) + (detail?.tokens_output ?? 0) + liveUsage.input + liveUsage.output;
@@ -416,8 +583,8 @@ export default function AgentStudio() {
     const liveCost = selected
       ? (liveUsage.input * selected.input_price + liveUsage.output * selected.output_price) / 1_000_000
       : 0;
-    return (detail?.cost_usd ?? 0) + liveCost;
-  }, [detail?.cost_usd, detail?.model_id, liveUsage.input, liveUsage.output, models]);
+    return (detail?.cost_usd ?? 0) + Math.max(liveCost, liveUsage.cost);
+  }, [detail?.cost_usd, detail?.model_id, liveUsage.cost, liveUsage.input, liveUsage.output, models]);
 
   useEffect(() => {
     const node = scrollRef.current;
@@ -801,7 +968,39 @@ export default function AgentStudio() {
         <div className="v4-conversation-scroll" ref={scrollRef}>
           {loading && <div className="v4-empty compact"><RefreshCw className="spin" size={22} /><strong>正在恢复会话上下文</strong></div>}
           {detail?.messages.map((item) => <article key={item.id} className={`v4-message ${item.role}`}><span>{item.role === "user" ? <User size={16} /> : <Sparkles size={16} />}</span><div><header><strong>{item.role === "user" ? "你" : detail.runner_name}</strong><time>{time(item.created_at)}</time></header><p>{item.content}</p>{item.metadata.context?.length ? <footer><Paperclip size={13} />已附加 {item.metadata.context.length} 项上下文</footer> : null}</div></article>)}
-          {!!events.length && <section className="v4-inline-activity"><header><TerminalSquare size={15} /><strong>可验证执行活动</strong><span>{connected ? "LIVE" : "PERSISTED"}</span></header>{events.slice(-8).map((event) => <article key={event.seq} className={event.event_type.includes("failed") ? "failed" : event.event_type.includes("completed") ? "done" : ""}><i /><div><strong>{eventTitle(event)}</strong>{eventDetail(event) && <pre>{eventDetail(event)}</pre>}<small>{time(event.created_at)} · EVENT {event.seq}</small></div></article>)}</section>}
+          {!!events.length && (
+            <section className="v4-inline-activity">
+              <header>
+                <span className="v4-process-mark"><Activity size={16} /></span>
+                <div><strong>Agent 执行过程</strong><small>公开进度、工具调用与可验证操作</small></div>
+                {latestHeartbeat && (
+                  <div className="v4-process-telemetry">
+                    <span><Clock3 size={12} />{duration(Number(latestHeartbeat.payload.elapsed_ms ?? 0))}</span>
+                    <span>{Number(latestHeartbeat.payload.line_count ?? 0).toLocaleString()} 流事件</span>
+                  </div>
+                )}
+                <b className={connected ? "live" : ""}><i />{connected ? "实时" : "已保存"}</b>
+              </header>
+              <div className="v4-process-list">
+                {processEvents.slice(-12).map((event, index, visible) => (
+                  <article key={`${event.event_type}-${event.seq}`} className={eventTone(event)}>
+                    <span className="v4-process-icon">{eventIcon(event)}</span>
+                    <div>
+                      <header><strong>{eventTitle(event)}</strong><em>{eventCategory(event)}</em></header>
+                      {eventDetail(event) && (event.event_type === "live.message"
+                        ? <p>{eventDetail(event)}</p>
+                        : <pre>{eventDetail(event)}</pre>)}
+                      <small>{time(event.created_at)} · 步骤 {Math.max(1, processEvents.length - visible.length + index + 1)}</small>
+                    </div>
+                  </article>
+                ))}
+                {!processEvents.length && (
+                  <div className="v4-process-waiting"><Brain size={18} /><span><strong>Agent 正在处理</strong><small>等待下一条可公开的进度说明或工具活动…</small></span></div>
+                )}
+              </div>
+              {collapsedEventCount > 0 && <footer>已自动折叠 {collapsedEventCount.toLocaleString()} 条 Token、心跳与重复底层事件</footer>}
+            </section>
+          )}
           {pendingApprovals.length > 0 && <section className="v4-approval-gate"><header><ShieldCheck size={16} /><div><strong>Agent 正在等待你的审批</strong><small>选择后任务会自动继续，无需重新发送消息</small></div><b>{pendingApprovals.length}</b></header>{pendingApprovals.map((approval) => renderApproval(approval, true))}</section>}
           {error && <div className="v4-error">{error}</div>}
         </div>
@@ -825,8 +1024,8 @@ export default function AgentStudio() {
           />
           <footer className="v4-composer-toolbar">
             <button className="v4-composer-tool" type="button" onClick={() => void attachFiles()} disabled={attachmentBusy || attachments.length >= 10} title="添加图片或文件（单个最大 50 MB）"><Upload size={14} /><span>{attachmentBusy ? "添加中" : "附件"}</span></button>
-            <label className="v4-composer-select" title="运行中的权限变更会安全地用于后续操作；切换为完全访问会继续当前待审批操作"><ShieldCheck size={14} /><span>权限</span><select aria-label="会话访问权限" value={detail?.permission_profile ?? "workspace"} disabled={configBusy} onChange={(event) => void updateRuntimeSetting({ permission_profile: event.target.value as PermissionProfile })}><option value="readonly">只读</option><option value="workspace">工作区</option><option value="standard">标准开发</option><option value="full">完全访问</option></select></label>
-            <label className="v4-composer-select" title="不同 Agent 会映射到其原生 effort、variant 或 reasoning 设置"><Brain size={14} /><span>思考</span><select aria-label="思考强度" value={detail?.reasoning_effort ?? "medium"} disabled={configBusy} onChange={(event) => void updateRuntimeSetting({ reasoning_effort: event.target.value as ReasoningEffort })}><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="max">最大</option></select></label>
+            <ComposerMenu ariaLabel="会话访问权限" label="权限" icon={<ShieldCheck size={14} />} value={detail?.permission_profile ?? "workspace"} options={permissionOptions} disabled={configBusy} onChange={(value) => void updateRuntimeSetting({ permission_profile: value as PermissionProfile })} />
+            <ComposerMenu ariaLabel="思考强度" label="思考" icon={<Brain size={14} />} value={detail?.reasoning_effort ?? "medium"} options={effortOptions} disabled={configBusy} onChange={(value) => void updateRuntimeSetting({ reasoning_effort: value as ReasoningEffort })} />
             <span className="v4-quota" title={`输入 ${(detail?.tokens_input ?? 0) + liveUsage.input} · 输出 ${(detail?.tokens_output ?? 0) + liveUsage.output} · 预计费用 $${quotaCost.toFixed(4)}`}><Gauge size={14} /><span>{quotaTokens.toLocaleString()} Tokens{activeStatuses.has(detail?.status ?? "") && (liveUsage.input + liveUsage.output > 0) ? " · LIVE" : ""}</span><b>${quotaCost.toFixed(3)}</b></span>
             {activeStatuses.has(detail?.status ?? "") ? <button className="cancel" type="button" onClick={() => void cancel()}><CircleStop size={16} />停止</button> : <button className="send" type="submit" aria-label="发送消息" title="发送 · Enter" disabled={!message.trim() || sending}><Send size={16} /></button>}
           </footer>
@@ -843,8 +1042,8 @@ export default function AgentStudio() {
       </aside>
 
       <section className="v4-studio-dock">
-        <nav><button type="button" className={studioLayout.dock && dock === "activity" ? "active" : ""} onClick={() => { setDock("activity"); setStudioLayout((current) => ({ ...current, dock: true })); }}><Activity size={14} />活动日志 <b>{events.length}</b></button><button type="button" className={studioLayout.dock && dock === "terminal" ? "active" : ""} onClick={openTerminalPanel}><TerminalSquare size={14} />交互终端 <i className={terminal?.running ? "live" : ""} /></button><button type="button" className={studioLayout.dock && dock === "file" ? "active" : ""} onClick={() => { setDock("file"); setStudioLayout((current) => ({ ...current, dock: true })); }}><Code2 size={14} />文件预览</button><button type="button" className={studioLayout.dock && dock === "changes" ? "active" : ""} onClick={() => { setDock("changes"); setStudioLayout((current) => ({ ...current, dock: true })); }}><FileDiff size={14} />变更 <b>{detail?.file_changes.length ?? 0}</b></button><span className="v4-dock-summary">{terminal?.running ? "TERMINAL LIVE · 点击终端区域直接输入" : `${events.length} EVENTS`}</span><button className="v4-dock-toggle" type="button" aria-label={studioLayout.dock ? "隐藏底部面板" : "展开底部面板"} title={`${studioLayout.dock ? "隐藏" : "展开"}底部面板 · Ctrl J`} onClick={() => setStudioLayout((current) => ({ ...current, dock: !current.dock }))}>{studioLayout.dock ? <PanelBottomClose size={16} /> : <PanelBottomOpen size={16} />}{studioLayout.dock ? "隐藏" : "展开"}</button></nav>
-        {studioLayout.dock && dock === "activity" && <div className="v4-terminal"><header><span>可验证 Agent 活动</span><small>此处为只读事件日志，命令请在“交互终端”输入</small></header>{events.slice(-16).map((event) => <div key={event.seq}><time>{time(event.created_at)}</time><span>{eventTitle(event)}</span></div>)}{!events.length && <span>等待 Agent 活动…</span>}</div>}
+        <nav><button type="button" className={studioLayout.dock && dock === "activity" ? "active" : ""} onClick={() => { setDock("activity"); setStudioLayout((current) => ({ ...current, dock: true })); }}><Activity size={14} />活动日志 <b>{processEvents.length}</b></button><button type="button" className={studioLayout.dock && dock === "terminal" ? "active" : ""} onClick={openTerminalPanel}><TerminalSquare size={14} />交互终端 <i className={terminal?.running ? "live" : ""} /></button><button type="button" className={studioLayout.dock && dock === "file" ? "active" : ""} onClick={() => { setDock("file"); setStudioLayout((current) => ({ ...current, dock: true })); }}><Code2 size={14} />文件预览</button><button type="button" className={studioLayout.dock && dock === "changes" ? "active" : ""} onClick={() => { setDock("changes"); setStudioLayout((current) => ({ ...current, dock: true })); }}><FileDiff size={14} />变更 <b>{detail?.file_changes.length ?? 0}</b></button><span className="v4-dock-summary">{terminal?.running ? "TERMINAL LIVE · 点击终端区域直接输入" : `${processEvents.length} 个可读步骤 · ${collapsedEventCount} 条底层事件已折叠`}</span><button className="v4-dock-toggle" type="button" aria-label={studioLayout.dock ? "隐藏底部面板" : "展开底部面板"} title={`${studioLayout.dock ? "隐藏" : "展开"}底部面板 · Ctrl J`} onClick={() => setStudioLayout((current) => ({ ...current, dock: !current.dock }))}>{studioLayout.dock ? <PanelBottomClose size={16} /> : <PanelBottomOpen size={16} />}{studioLayout.dock ? "隐藏" : "展开"}</button></nav>
+        {studioLayout.dock && dock === "activity" && <div className="v4-terminal"><header><span>可验证 Agent 活动</span><small>公开进度和实际操作；Token 碎片与心跳已自动合并</small></header>{processEvents.slice(-16).map((event) => <div key={event.seq}><time>{time(event.created_at)}</time><span>{eventTitle(event)}</span></div>)}{!processEvents.length && <span>等待 Agent 活动…</span>}</div>}
         {studioLayout.dock && dock === "terminal" && (terminal?.running ? <div className="v4-interactive-terminal"><header><span><i className="live" />ConPTY · PowerShell <small>点击下方终端即可直接键入</small></span><button type="button" onClick={() => void closeInteractiveTerminal()}>关闭终端</button></header><TerminalView content={terminalText} onData={(data) => void writeTerminalData(data)} onResize={(columns, rows) => void resizeTerminal(columns, rows)} /><form onSubmit={sendTerminalInput}><span>快速命令 ›</span><input aria-label="终端快速命令" value={terminalInput} onChange={(event) => setTerminalInput(event.target.value)} placeholder="也可在上方终端内直接输入" autoComplete="off" /><button type="submit" disabled={!terminalInput}>运行</button></form></div> : <div className="v4-terminal-empty"><TerminalSquare size={26} /><strong>{terminal ? "终端已退出" : "启动项目交互终端"}</strong><p>{detail?.permission_profile === "standard" || detail?.permission_profile === "full" ? "终端将在当前项目目录打开，支持直接键盘输入、快捷键与命令历史。" : "交互终端需要“标准开发”或“完全访问”权限。可在上方输入框工具栏随时切换。"}</p>{detail?.permission_profile === "standard" || detail?.permission_profile === "full" ? <button type="button" onClick={() => void startInteractiveTerminal()}><TerminalSquare size={14} />{terminal ? "重新启动终端" : "启动终端"}</button> : <button type="button" onClick={() => void updateRuntimeSetting({ permission_profile: "standard" })}><ShieldCheck size={14} />切换到标准开发</button>}</div>)}
         {studioLayout.dock && dock === "file" && <pre className="v4-file-preview">{preview ? preview.content : "从左侧项目树选择一个 UTF-8 文本文件。"}</pre>}
         {studioLayout.dock && dock === "changes" && <div className="v4-change-review"><div className="v4-change-list">{detail?.file_changes.map((change) => <button className={change.id === changePreview?.id ? "active" : ""} type="button" key={change.id} onClick={() => void openChange(change)}><span className={change.change_type}>{change.change_type.slice(0, 1).toUpperCase()}</span><code>{change.path}</code><small>{change.status} · {change.size_delta >= 0 ? "+" : ""}{change.size_delta} B</small></button>)}{!detail?.file_changes.length && <span>本会话尚未修改文件。</span>}</div>{changePreview && <section className="v4-diff-review"><header><strong>{changePreview.path}</strong><span>{changePreview.status}</span><div><button type="button" onClick={() => void reviewChange("reject")} disabled={!changePreview.can_restore || changePreview.status !== "observed"}>拒绝并还原</button><button type="button" onClick={() => void reviewChange("apply_content")} disabled={changePreview.status !== "observed"}>应用编辑内容</button><button className="accept" type="button" onClick={() => void reviewChange("accept")} disabled={changePreview.status !== "observed"}>接受变更</button></div></header><div><pre>{changePreview.diff || "此文件没有可显示的文本 Diff。"}</pre><textarea aria-label="编辑后的文件内容" value={changeEdit} onChange={(event) => setChangeEdit(event.target.value)} /></div></section>}</div>}

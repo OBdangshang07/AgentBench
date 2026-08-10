@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import threading
@@ -387,6 +388,119 @@ def test_native_studio_options_map_permission_effort_and_images() -> None:
     assert "--sandbox" not in codex
     assert 'model_reasoning_effort="xhigh"' in codex
     assert codex[codex.index("--image") + 1] == attachment["absolute_path"]
+
+
+def test_reasonix_stream_events_expose_public_progress_without_private_reasoning() -> None:
+    assert EvaluationService._normalize_native_live_event(
+        "reasonix_cli",
+        "stdout",
+        json.dumps({"kind": "reasoning", "text": "private reasoning"}),
+        1,
+    ) is None
+
+    delta = EvaluationService._normalize_native_live_event(
+        "reasonix_cli",
+        "stdout",
+        json.dumps({"kind": "text", "text": "正在读取"}, ensure_ascii=False),
+        2,
+    )
+    assert delta == (
+        "live.text_delta",
+        {
+            "runner_type": "reasonix_cli",
+            "stream": "stdout",
+            "line_no": 2,
+            "source_type": "text",
+            "delta": "正在读取",
+        },
+    )
+
+    message = EvaluationService._normalize_native_live_event(
+        "reasonix_cli",
+        "stdout",
+        json.dumps(
+            {"kind": "message", "text": "正在读取 package.json", "reasoning": "private"},
+            ensure_ascii=False,
+        ),
+        3,
+    )
+    assert message is not None
+    assert message[0] == "live.message"
+    assert message[1]["text"] == "正在读取 package.json"
+    assert "private" not in json.dumps(message[1], ensure_ascii=False)
+
+    tool = EvaluationService._normalize_native_live_event(
+        "reasonix_cli",
+        "stdout",
+        json.dumps(
+            {
+                "kind": "tool_result",
+                "tool": {
+                    "id": "call-1",
+                    "name": "read_file",
+                    "args": '{"path":"package.json"}',
+                    "output": "file contents",
+                    "readOnly": True,
+                },
+            }
+        ),
+        4,
+    )
+    assert tool is not None
+    assert tool[0] == "live.tool"
+    assert tool[1]["tool_id"] == "call-1"
+    assert tool[1]["tool"] == "read_file"
+    assert tool[1]["status"] == "completed"
+    assert "package.json" in tool[1]["detail"]
+    assert "file contents" not in tool[1]["detail"]
+
+    usage = EvaluationService._normalize_native_live_event(
+        "reasonix_cli",
+        "stdout",
+        json.dumps(
+            {
+                "kind": "usage",
+                "usage": {
+                    "promptTokens": 120,
+                    "completionTokens": 17,
+                    "costUsd": 0.0042,
+                },
+            }
+        ),
+        5,
+    )
+    assert usage is not None
+    assert usage[0] == "live.usage"
+    assert usage[1]["usage"] == {
+        "input_tokens": 120,
+        "output_tokens": 17,
+        "cost_usd": 0.0042,
+    }
+
+
+def test_reasonix_stream_output_aggregates_turn_usage_and_final_result() -> None:
+    output = "\n".join(
+        json.dumps(item, ensure_ascii=False)
+        for item in (
+            {"kind": "message", "text": "正在检查项目"},
+            {"kind": "usage", "usage": {"promptTokens": 100, "completionTokens": 10, "cost": 0.01}},
+            {"kind": "usage", "usage": {"promptTokens": 170, "completionTokens": 5, "cost": 0.02}},
+            {
+                "type": "result",
+                "result": "检查完成",
+                "total_cost_usd": 0.03,
+                "usage": {"input_tokens": 270, "output_tokens": 15},
+            },
+        )
+    )
+    final, input_tokens, output_tokens, cost, count = EvaluationService._parse_native_output(
+        "reasonix_cli", output
+    )
+    assert final == "检查完成"
+    assert input_tokens == 270
+    assert output_tokens == 15
+    assert cost == pytest.approx(0.03)
+    assert count == 4
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="ConPTY is a Windows runtime")
