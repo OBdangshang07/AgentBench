@@ -320,7 +320,9 @@
 .v4-studio-picker-menu button small { margin-top: 4px; color: #65738a; font: 9px var(--v4-mono); }
 .v4-studio-picker-menu button > i { width: 6px; height: 6px; border-radius: 50%; background: var(--v4-teal); box-shadow: 0 0 7px #42d6b077; }
 .v4-studio-picker-menu > div > p { margin: 0; padding: 30px 10px; color: #68758a; font-size: 11px; text-align: center; }
-.v4-conversation-scroll { min-height: 0; flex: 1; padding: 26px 22px 190px; overflow: auto; scroll-behavior: smooth; }
+.v4-conversation-scroll { min-height: 0; flex: 1; padding: 26px 22px 190px; overflow: auto; }
+.v4-return-latest { position: absolute; z-index: 7; left: 50%; bottom: 180px; height: 34px; padding: 0 13px; border: 1px solid #59672b; border-radius: 18px; display: flex; align-items: center; gap: 6px; color: #dfff7d; background: #151b11e8; box-shadow: 0 10px 28px #0009, inset 0 1px #ffffff0b; transform: translateX(-50%); backdrop-filter: blur(12px); font-size: 10px; font-weight: 650; }
+.v4-return-latest:hover { color: #efffb8; border-color: #788b38; background: #1c2514f2; }
 .v4-message { max-width: 850px; margin: 0 auto 24px; display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 13px; }
 .v4-message > span { width: 36px; height: 36px; border: 1px solid #3b465c; border-radius: 10px; display: grid; place-items: center; color: #b9c3d4; background: #192231; }
 .v4-message.assistant > span { color: #cdc7ff; border-color: #51499a; background: linear-gradient(145deg, #393171, #181e30); }

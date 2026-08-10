@@ -460,7 +460,10 @@ export default function AgentStudio() {
   const [createOpen, setCreateOpen] = useState(false);
   const [sessionForm, setSessionForm] = useState<SessionForm>({ project_id: "", title: "新 Agent 会话", runner_id: "", model_id: "", permission_profile: "workspace", reasoning_effort: "medium", skill_pack_id: "" });
   const [studioLayout, setStudioLayout] = useState<StudioLayoutState>(initialStudioLayout);
+  const [followingLatest, setFollowingLatest] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const followingLatestRef = useRef(true);
+  const lastScrollTopRef = useRef(0);
   const fileSearchRef = useRef<HTMLInputElement>(null);
   const terminalCursorRef = useRef(0);
   const terminalWriteChainRef = useRef<Promise<void>>(Promise.resolve());
@@ -481,6 +484,9 @@ export default function AgentStudio() {
     setTerminal(null);
     setTerminalText("");
     setTerminalInput("");
+    followingLatestRef.current = true;
+    lastScrollTopRef.current = 0;
+    setFollowingLatest(true);
     terminalCursorRef.current = 0;
   }, [sessionId]);
 
@@ -627,8 +633,34 @@ export default function AgentStudio() {
 
   useEffect(() => {
     const node = scrollRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
+    if (!node || !followingLatestRef.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      node.scrollTop = node.scrollHeight;
+      lastScrollTopRef.current = node.scrollTop;
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [detail?.messages.length, events.length]);
+
+  function handleConversationScroll() {
+    const node = scrollRef.current;
+    if (!node) return;
+    const movedUp = node.scrollTop < lastScrollTopRef.current;
+    const atLatest = node.scrollHeight - node.scrollTop - node.clientHeight <= 24;
+    const shouldFollow = movedUp ? false : atLatest || followingLatestRef.current;
+    lastScrollTopRef.current = node.scrollTop;
+    if (shouldFollow === followingLatestRef.current) return;
+    followingLatestRef.current = shouldFollow;
+    setFollowingLatest(shouldFollow);
+  }
+
+  function jumpToLatest() {
+    const node = scrollRef.current;
+    if (!node) return;
+    followingLatestRef.current = true;
+    setFollowingLatest(true);
+    node.scrollTop = node.scrollHeight;
+    lastScrollTopRef.current = node.scrollTop;
+  }
 
   useEffect(() => {
     if (!sessionId || !terminal?.id || !terminal.running) return;
@@ -1009,7 +1041,7 @@ export default function AgentStudio() {
           <button className={`v4-pane-toggle with-label ${studioLayout.right ? "active" : ""}`} type="button" aria-label={studioLayout.right ? "收起会话侧栏" : "展开会话侧栏"} title={`${studioLayout.right ? "收起" : "展开"}会话上下文`} onClick={() => setStudioLayout((current) => ({ ...current, right: !current.right }))}>{studioLayout.right ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}<span>上下文</span></button>
         </header>
 
-        <div className="v4-conversation-scroll" ref={scrollRef}>
+        <div className="v4-conversation-scroll" ref={scrollRef} onScroll={handleConversationScroll}>
           {loading && <div className="v4-empty compact"><RefreshCw className="spin" size={22} /><strong>正在恢复会话上下文</strong></div>}
           {detail?.messages.map((item) => <article key={item.id} className={`v4-message ${item.role}`}><span>{item.role === "user" ? <User size={16} /> : <Sparkles size={16} />}</span><div><header><strong>{item.role === "user" ? "你" : detail.runner_name}</strong><time>{time(item.created_at)}</time></header><p>{item.content}</p>{item.metadata.context?.length ? <footer><Paperclip size={13} />已附加 {item.metadata.context.length} 项上下文</footer> : null}</div></article>)}
           {!!events.length && (
@@ -1070,6 +1102,7 @@ export default function AgentStudio() {
           {pendingApprovals.length > 0 && <section className="v4-approval-gate"><header><ShieldCheck size={16} /><div><strong>Agent 正在等待你的审批</strong><small>选择后任务会自动继续，无需重新发送消息</small></div><b>{pendingApprovals.length}</b></header>{pendingApprovals.map((approval) => renderApproval(approval, true))}</section>}
           {error && <div className="v4-error">{error}</div>}
         </div>
+        {!followingLatest && <button className="v4-return-latest" type="button" onClick={jumpToLatest}><ChevronDown size={14} />返回最新内容</button>}
 
         <form className="v4-composer" onSubmit={sendTurn}>
           {(preview || attachments.length > 0) && <div className="v4-composer-context">

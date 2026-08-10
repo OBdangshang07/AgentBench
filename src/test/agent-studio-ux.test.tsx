@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AgentStudio from "../v4/AgentStudio";
@@ -7,6 +7,10 @@ import type { AgentSession, AgentSessionDetail, ApprovalRequest } from "../v4/ty
 const terminalHarness = vi.hoisted(() => ({
   onData: null as ((data: string) => void) | null,
 }));
+
+const eventStreamHarness = {
+  current: null as { onmessage: ((event: MessageEvent) => void) | null } | null,
+};
 
 vi.mock("@xterm/xterm", () => ({
   Terminal: class {
@@ -173,12 +177,16 @@ function renderStudio() {
 describe("Agent Studio visual workspace controls", () => {
   beforeEach(() => {
     terminalHarness.onData = null;
+    eventStreamHarness.current = null;
     window.localStorage.clear();
     vi.stubGlobal("EventSource", class {
       onopen: (() => void) | null = null;
       onerror: (() => void) | null = null;
       onmessage: ((event: MessageEvent) => void) | null = null;
       close = vi.fn();
+      constructor() {
+        eventStreamHarness.current = this;
+      }
     });
   });
 
@@ -294,6 +302,50 @@ describe("Agent Studio visual workspace controls", () => {
     expect(processList).toHaveTextContent("工具完成 · read_file");
     expect(processList).not.toHaveTextContent("Agent 产生新的可验证进度");
     expect(container.querySelector(".v4-inline-activity > footer")).toHaveTextContent("5 条");
+  });
+
+  it("stops following new events as soon as the user scrolls upward", async () => {
+    installApiMock({
+      ...detail,
+      events: [
+        { id: 1, session_id: session.id, turn_id: "turn-1", seq: 1, event_type: "turn.started", visibility: "recording_safe", payload: {}, created_at: now },
+      ],
+    }, session);
+    const { container } = renderStudio();
+
+    expect(await screen.findByText("Agent 执行过程")).toBeInTheDocument();
+    const scroller = container.querySelector<HTMLElement>(".v4-conversation-scroll");
+    expect(scroller).not.toBeNull();
+    Object.defineProperties(scroller!, {
+      scrollHeight: { configurable: true, value: 1_000 },
+      clientHeight: { configurable: true, value: 400 },
+    });
+    scroller!.scrollTop = 600;
+    fireEvent.scroll(scroller!);
+    scroller!.scrollTop = 599;
+    fireEvent.scroll(scroller!);
+
+    expect(screen.getByRole("button", { name: "返回最新内容" })).toBeInTheDocument();
+    act(() => {
+      eventStreamHarness.current?.onmessage?.(new MessageEvent("message", {
+        data: JSON.stringify({
+          id: 2,
+          session_id: session.id,
+          turn_id: "turn-1",
+          seq: 2,
+          event_type: "live.message",
+          visibility: "recording_safe",
+          payload: { stream_id: "message-2", text: "新的公开进度", status: "completed" },
+          created_at: now,
+        }),
+      }));
+    });
+
+    expect(await screen.findByText("新的公开进度")).toBeInTheDocument();
+    expect(scroller!.scrollTop).toBe(599);
+    fireEvent.click(screen.getByRole("button", { name: "返回最新内容" }));
+    expect(scroller!.scrollTop).toBe(1_000);
+    expect(screen.queryByRole("button", { name: "返回最新内容" })).not.toBeInTheDocument();
   });
 
   it("forwards direct xterm keyboard input to the interactive terminal in order", async () => {
