@@ -235,13 +235,28 @@ class BrowserRuntime:
 
     def snapshot(self, page_id: str | None = None) -> dict[str, Any]:
         value = self.evaluate(
-            """(() => ({
-              title: document.title,
-              url: location.href,
-              text: (document.body?.innerText || '').slice(0, 60000),
-              links: Array.from(document.querySelectorAll('a[href]')).slice(0, 200).map((a, index) => ({index, text: (a.innerText || a.getAttribute('aria-label') || '').trim().slice(0, 300), href: a.href})),
-              controls: Array.from(document.querySelectorAll('button,input,textarea,select,[role=button]')).slice(0, 300).map((el, index) => ({index, tag: el.tagName.toLowerCase(), type: el.getAttribute('type'), text: (el.innerText || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').trim().slice(0, 300), id: el.id || null, name: el.getAttribute('name')}))
-            }))()""",
+            """(() => {
+              const selectorFor = (element) => {
+                if (element.id) return `#${CSS.escape(element.id)}`;
+                const parts = [];
+                let current = element;
+                while (current && current.nodeType === 1 && current !== document.documentElement) {
+                  const tag = current.tagName.toLowerCase();
+                  const siblings = current.parentElement ? Array.from(current.parentElement.children).filter((item) => item.tagName === current.tagName) : [];
+                  const suffix = siblings.length > 1 ? `:nth-of-type(${siblings.indexOf(current) + 1})` : '';
+                  parts.unshift(`${tag}${suffix}`);
+                  current = current.parentElement;
+                }
+                return parts.join(' > ');
+              };
+              return {
+                title: document.title,
+                url: location.href,
+                text: (document.body?.innerText || '').slice(0, 60000),
+                links: Array.from(document.querySelectorAll('a[href]')).slice(0, 200).map((a, index) => ({index, text: (a.innerText || a.getAttribute('aria-label') || '').trim().slice(0, 300), href: a.href, selector: selectorFor(a)})),
+                controls: Array.from(document.querySelectorAll('button,input,textarea,select,[role=button]')).slice(0, 300).map((el, index) => ({index, tag: el.tagName.toLowerCase(), type: el.getAttribute('type'), text: (el.innerText || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('name') || el.tagName).trim().slice(0, 300), id: el.id || null, name: el.getAttribute('name'), value: 'value' in el ? String(el.value).slice(0, 1000) : null, disabled: Boolean(el.disabled), selector: selectorFor(el)}))
+              };
+            })()""",
             page_id,
         )
         return value if isinstance(value, dict) else {}

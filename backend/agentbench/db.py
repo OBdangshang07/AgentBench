@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
 
 
 def utc_now() -> str:
@@ -423,6 +423,34 @@ CREATE TABLE IF NOT EXISTS task_edges (
     UNIQUE(graph_id, source_node_id, target_node_id)
 );
 
+CREATE TABLE IF NOT EXISTS task_graph_versions (
+    id TEXT PRIMARY KEY,
+    graph_id TEXT NOT NULL REFERENCES task_graphs(id) ON DELETE CASCADE,
+    version_no INTEGER NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    settings_json TEXT NOT NULL DEFAULT '{}',
+    definition_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    UNIQUE(graph_id, version_no)
+);
+
+CREATE TABLE IF NOT EXISTS task_graph_runs (
+    id TEXT PRIMARY KEY,
+    graph_id TEXT NOT NULL REFERENCES task_graphs(id) ON DELETE CASCADE,
+    version_no INTEGER,
+    status TEXT NOT NULL,
+    dry_run INTEGER NOT NULL DEFAULT 0,
+    retry_node_id TEXT,
+    error_message TEXT NOT NULL DEFAULT '',
+    result_json TEXT NOT NULL DEFAULT '{}',
+    usage_json TEXT NOT NULL DEFAULT '{}',
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS task_items (
     id TEXT PRIMARY KEY,
     project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
@@ -435,6 +463,12 @@ CREATE TABLE IF NOT EXISTS task_items (
     model_id TEXT REFERENCES models(id) ON DELETE SET NULL,
     session_id TEXT REFERENCES agent_sessions(id) ON DELETE SET NULL,
     due_at TEXT,
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    depends_on_json TEXT NOT NULL DEFAULT '[]',
+    result_summary TEXT NOT NULL DEFAULT '',
+    retry_of TEXT REFERENCES task_items(id) ON DELETE SET NULL,
+    archived INTEGER NOT NULL DEFAULT 0,
+    cancelled_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     completed_at TEXT
@@ -470,6 +504,12 @@ CREATE TABLE IF NOT EXISTS prompt_templates (
     updated_at TEXT NOT NULL
 );
 
+"""
+
+# Indexes must be installed after column migrations. SQLite evaluates CREATE INDEX
+# immediately even when the table came from an older schema, so keeping these in
+# SCHEMA would make a V4 database fail before V5 could add task_items.archived.
+INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_runs_experiment ON runs(experiment_id);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 CREATE INDEX IF NOT EXISTS idx_attempts_run ON run_attempts(run_id, attempt_no);
@@ -487,6 +527,10 @@ CREATE INDEX IF NOT EXISTS idx_approvals_status ON approval_requests(status, cre
 CREATE INDEX IF NOT EXISTS idx_file_changes_session ON session_file_changes(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_task_nodes_graph ON task_nodes(graph_id, status);
 CREATE INDEX IF NOT EXISTS idx_task_items_status ON task_items(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_task_items_project ON task_items(project_id, archived, updated_at);
+CREATE INDEX IF NOT EXISTS idx_task_graphs_project ON task_graphs(project_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_task_graph_versions_graph ON task_graph_versions(graph_id, version_no DESC);
+CREATE INDEX IF NOT EXISTS idx_task_graph_runs_graph ON task_graph_runs(graph_id, created_at DESC);
 """
 
 
@@ -613,6 +657,23 @@ class Database:
                 )
             if "skill_pack_id" not in session_columns:
                 connection.execute("ALTER TABLE agent_sessions ADD COLUMN skill_pack_id TEXT")
+            task_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(task_items)").fetchall()
+            }
+            for name, declaration in (
+                ("tags_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("depends_on_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("result_summary", "TEXT NOT NULL DEFAULT ''"),
+                ("retry_of", "TEXT"),
+                ("archived", "INTEGER NOT NULL DEFAULT 0"),
+                ("cancelled_at", "TEXT"),
+            ):
+                if name not in task_columns:
+                    connection.execute(
+                        f"ALTER TABLE task_items ADD COLUMN {name} {declaration}"
+                    )
+            connection.executescript(INDEXES)
             row = connection.execute("SELECT version FROM schema_meta LIMIT 1").fetchone()
             if row is None:
                 connection.execute("INSERT INTO schema_meta(version) VALUES (?)", (SCHEMA_VERSION,))

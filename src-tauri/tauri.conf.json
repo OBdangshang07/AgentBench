@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AgentBench Desktop",
-  "version": "4.2.0",
+  "version": "5.0.0",
   "identifier": "com.agentbench.desktop",
   "build": {
     "beforeDevCommand": "powershell -ExecutionPolicy Bypass -File scripts/frontend-dev.ps1",
@@ -36,7 +36,7 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "resources/backend/agentbench-backend-4.2.0.exe",
+      "resources/backend/agentbench-backend-5.0.0.exe",
       "resources/backend/README.txt"
     ],
     "shortDescription": "Local visual Agent workspace and evaluation lab",

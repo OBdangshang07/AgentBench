@@ -437,8 +437,15 @@ class EvaluationService:
 
     def start_task(self, task_id: str) -> dict[str, Any]:
         task = self.studio.get_task(task_id)
-        if task["status"] not in {"backlog", "failed"}:
+        if task["status"] not in {"backlog", "failed", "cancelled"}:
             raise ValueError("task_not_startable")
+        blocked_dependencies = [
+            dependency_id
+            for dependency_id in task.get("depends_on") or []
+            if self.studio.get_task(str(dependency_id))["status"] != "completed"
+        ]
+        if blocked_dependencies:
+            raise ValueError(f"task_dependencies_incomplete:{','.join(blocked_dependencies)}")
         if not task.get("project_id"):
             raise ValueError("task_project_required")
         project = self.studio.get_project(str(task["project_id"]))
@@ -451,7 +458,7 @@ class EvaluationService:
         now = utc_now()
         self.database.execute(
             "UPDATE task_items SET status='queued',runner_id=?,model_id=?,session_id=NULL,"
-            "completed_at=NULL,updated_at=? WHERE id=?",
+            "completed_at=NULL,cancelled_at=NULL,result_summary='',updated_at=? WHERE id=?",
             (runner_id, model_id, now, task_id),
         )
         self.executor.submit(self._execute_task, task_id)
@@ -487,24 +494,24 @@ class EvaluationService:
             )
             self._execute_session_turn(turn["id"])
             completed_turn = self.database.fetch_one(
-                "SELECT status,error_message FROM session_turns WHERE id=?", (turn["id"],)
+                "SELECT status,error_message,final_answer FROM session_turns WHERE id=?", (turn["id"],)
             ) or {}
             now = utc_now()
             if completed_turn.get("status") == "completed":
                 self.database.execute(
-                    "UPDATE task_items SET status='completed',updated_at=?,completed_at=? WHERE id=?",
-                    (now, now, task_id),
+                    "UPDATE task_items SET status='completed',result_summary=?,updated_at=?,completed_at=? WHERE id=?",
+                    (str(completed_turn.get("final_answer") or "")[:4000], now, now, task_id),
                 )
             else:
                 self.database.execute(
-                    "UPDATE task_items SET status='failed',updated_at=? WHERE id=?",
-                    (now, task_id),
+                    "UPDATE task_items SET status='failed',result_summary=?,updated_at=? WHERE id=?",
+                    (str(completed_turn.get("error_message") or "任务执行失败")[:4000], now, task_id),
                 )
         except Exception as exc:
             logger.exception("Agent task %s failed", task_id)
             self.database.execute(
-                "UPDATE task_items SET status='failed',updated_at=? WHERE id=?",
-                (utc_now(), task_id),
+                "UPDATE task_items SET status='failed',result_summary=?,updated_at=? WHERE id=?",
+                (_redact_viewer_text(str(exc), 4000), utc_now(), task_id),
             )
             self.database.insert_audit(
                 "task.failed", "task", task_id, {"error": _redact_viewer_text(str(exc), 800)}
@@ -518,8 +525,8 @@ class EvaluationService:
             with suppress(ValueError):
                 self.cancel_session(str(task["session_id"]))
         self.database.execute(
-            "UPDATE task_items SET status='failed',updated_at=? WHERE id=?",
-            (utc_now(), task_id),
+            "UPDATE task_items SET status='cancelled',cancelled_at=?,updated_at=? WHERE id=?",
+            (utc_now(), utc_now(), task_id),
         )
         self.database.insert_audit("task.cancelled", "task", task_id)
         return self.studio.get_task(task_id)
@@ -528,10 +535,10 @@ class EvaluationService:
         graph = self.studio.get_graph(graph_id)
         if graph["status"] in {"running", "waiting_approval", "cancelling"}:
             raise ValueError("flow_already_active")
-        if any(node["node_type"] == "agent" for node in graph["nodes"]):
-            if not graph.get("project_id"):
-                raise ValueError("flow_project_required")
-            self.studio.get_project(str(graph["project_id"]))
+        validation = self.studio.validate_graph(graph_id)
+        if not validation["valid"]:
+            codes = ",".join(str(item["code"]) for item in validation["errors"])
+            raise ValueError(f"flow_validation_failed:{codes}")
         cancel_event = threading.Event()
         with self._state_lock:
             self._flow_cancel_events[graph_id] = cancel_event
@@ -547,8 +554,64 @@ class EvaluationService:
                 "output_json='{}',session_id=NULL,updated_at=? WHERE graph_id=?",
                 (now, graph_id),
             )
-        self.executor.submit(self._execute_flow, graph_id)
-        self.database.insert_audit("task_graph.started", "task_graph", graph_id)
+        run = self.studio.create_graph_run(graph_id)
+        self.executor.submit(self._execute_flow, graph_id, run["id"])
+        self.database.insert_audit(
+            "task_graph.started", "task_graph", graph_id, {"run_id": run["id"]}
+        )
+        return self.studio.get_graph(graph_id)
+
+    def retry_flow_node(self, graph_id: str, node_id: str) -> dict[str, Any]:
+        graph = self.studio.get_graph(graph_id)
+        if graph["status"] in {"running", "waiting_approval", "cancelling"}:
+            raise ValueError("flow_already_active")
+        node_map = {node["id"]: node for node in graph["nodes"]}
+        target = node_map.get(node_id)
+        if not target:
+            raise KeyError("task_graph_node_not_found")
+        if target["status"] not in {"failed", "cancelled"}:
+            raise ValueError("flow_node_not_retryable")
+        validation = self.studio.validate_graph(graph_id)
+        if not validation["valid"]:
+            codes = ",".join(str(item["code"]) for item in validation["errors"])
+            raise ValueError(f"flow_validation_failed:{codes}")
+
+        adjacency: dict[str, list[str]] = {item["id"]: [] for item in graph["nodes"]}
+        for edge in graph["edges"]:
+            adjacency[edge["source_node_id"]].append(edge["target_node_id"])
+        reset_ids: set[str] = set()
+        queue = [node_id]
+        while queue:
+            current = queue.pop(0)
+            if current in reset_ids:
+                continue
+            reset_ids.add(current)
+            queue.extend(adjacency[current])
+
+        cancel_event = threading.Event()
+        with self._state_lock:
+            self._flow_cancel_events[graph_id] = cancel_event
+        now = utc_now()
+        placeholders = ",".join("?" for _ in reset_ids)
+        with self.database.transaction() as connection:
+            connection.execute(
+                "UPDATE task_graphs SET status='running',started_at=?,completed_at=NULL,"
+                "updated_at=? WHERE id=?",
+                (now, now, graph_id),
+            )
+            connection.execute(
+                f"UPDATE task_nodes SET status='pending',attempts=0,error_message=NULL,"
+                f"output_json='{{}}',session_id=NULL,updated_at=? WHERE graph_id=? AND id IN ({placeholders})",
+                (now, graph_id, *reset_ids),
+            )
+        run = self.studio.create_graph_run(graph_id, retry_node_id=node_id)
+        self.executor.submit(self._execute_flow, graph_id, run["id"])
+        self.database.insert_audit(
+            "task_graph.node_retried",
+            "task_graph",
+            graph_id,
+            {"node_id": node_id, "run_id": run["id"], "reset_nodes": sorted(reset_ids)},
+        )
         return self.studio.get_graph(graph_id)
 
     def cancel_flow(self, graph_id: str) -> dict[str, Any]:
@@ -860,7 +923,7 @@ class EvaluationService:
         )
         raise RuntimeError(last_error or "节点执行失败")
 
-    def _execute_flow(self, graph_id: str) -> None:
+    def _execute_flow(self, graph_id: str, run_id: str) -> None:
         with self._state_lock:
             cancel_event = self._flow_cancel_events[graph_id]
         started = time.monotonic()
@@ -988,6 +1051,37 @@ class EvaluationService:
                 "task_graph",
                 graph_id,
                 {"status": final_status, "error": error_message},
+            )
+            final_graph = self.studio.get_graph(graph_id)
+            usage = self.database.fetch_one(
+                "SELECT COALESCE(SUM(s.cost_usd),0) cost_usd,"
+                "COALESCE(SUM(s.tokens_input),0) tokens_input,"
+                "COALESCE(SUM(s.tokens_output),0) tokens_output,"
+                "COALESCE(SUM(s.duration_ms),0) duration_ms "
+                "FROM task_nodes n LEFT JOIN agent_sessions s ON s.id=n.session_id "
+                "WHERE n.graph_id=?",
+                (graph_id,),
+            ) or {}
+            self.studio.finish_graph_run(
+                graph_id,
+                run_id,
+                status=final_status,
+                error_message=error_message,
+                result={
+                    "nodes": [
+                        {
+                            "id": node["id"],
+                            "name": node["name"],
+                            "status": node["status"],
+                            "attempts": node["attempts"],
+                            "error_message": node["error_message"],
+                            "output": node["output"],
+                            "session_id": node["session_id"],
+                        }
+                        for node in final_graph["nodes"]
+                    ]
+                },
+                usage=usage,
             )
             with self._state_lock:
                 self._flow_cancel_events.pop(graph_id, None)
@@ -5395,6 +5489,63 @@ class EvaluationService:
             "runners": [
                 {"id": r["id"], "name": r["name"], "capability": r["capability"]} for r in runners
             ],
+        }
+
+    def diagnostics(self) -> dict[str, Any]:
+        """Return a shareable, secret-free snapshot for local troubleshooting."""
+        integrity = self.database.fetch_one("PRAGMA quick_check") or {}
+        schema = self.database.fetch_one("SELECT version FROM schema_meta") or {}
+        counts = self.database.fetch_one(
+            "SELECT "
+            "(SELECT COUNT(*) FROM projects WHERE archived=0) projects,"
+            "(SELECT COUNT(*) FROM agent_sessions WHERE archived=0) studio_sessions,"
+            "(SELECT COUNT(*) FROM task_items WHERE archived=0) tasks,"
+            "(SELECT COUNT(*) FROM task_graphs) flows,"
+            "(SELECT COUNT(*) FROM experiments) experiments,"
+            "(SELECT COUNT(*) FROM runs) evaluation_runs"
+        ) or {}
+        studio_failures = self.database.fetch_all(
+            "SELECT s.id,s.title,s.status,s.updated_at,p.name project_name,"
+            "r.name runner_name,m.name model_name,"
+            "(SELECT st.error_code FROM session_turns st WHERE st.session_id=s.id "
+            "AND st.error_code IS NOT NULL ORDER BY st.turn_no DESC LIMIT 1) error_code,"
+            "(SELECT st.error_message FROM session_turns st WHERE st.session_id=s.id "
+            "AND st.error_message IS NOT NULL ORDER BY st.turn_no DESC LIMIT 1) error_message "
+            "FROM agent_sessions s JOIN projects p ON p.id=s.project_id "
+            "LEFT JOIN agent_runners r ON r.id=s.runner_id "
+            "LEFT JOIN models m ON m.id=s.model_id "
+            "WHERE s.status IN ('failed','interrupted') ORDER BY s.updated_at DESC LIMIT 25"
+        )
+        evaluation_failures = self.database.fetch_all(
+            "SELECT r.id,r.status,r.error_code,r.error_message,r.completed_at,"
+            "e.name experiment_name,t.title test_title,m.name model_name,a.name runner_name "
+            "FROM runs r JOIN experiments e ON e.id=r.experiment_id "
+            "JOIN test_cases t ON t.id=r.test_case_id JOIN models m ON m.id=r.model_id "
+            "JOIN agent_runners a ON a.id=r.runner_id "
+            "WHERE r.status IN ('failed','cancelled','interrupted') "
+            "ORDER BY COALESCE(r.completed_at,r.created_at) DESC LIMIT 25"
+        )
+        mcp_servers = self.database.fetch_all(
+            "SELECT id,name,transport,health_status,last_error,last_checked_at,enabled "
+            "FROM mcp_servers ORDER BY enabled DESC,name"
+        )
+        audit = self.database.fetch_all(
+            "SELECT action,subject_type,subject_id,created_at FROM audit_logs "
+            "ORDER BY id DESC LIMIT 100"
+        )
+        return {
+            "generated_at": utc_now(),
+            "system": self.system_status(),
+            "database": {
+                "schema_version": schema.get("version"),
+                "quick_check": next(iter(integrity.values()), "unknown"),
+            },
+            "counts": counts,
+            "mcp_servers": mcp_servers,
+            "recent_studio_failures": studio_failures,
+            "recent_evaluation_failures": evaluation_failures,
+            "recent_audit": audit,
+            "privacy": "No API keys, credentials, prompts, message contents, or MCP environment values are included.",
         }
 
     def dashboard(self) -> dict[str, Any]:

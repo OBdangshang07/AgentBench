@@ -4,6 +4,7 @@ import { api } from "../lib/api";
 import { useApi } from "../lib/useApi";
 import type { DiscoveredModel, ModelConfig, ModelDiscoveryResult, ModelSource, Runner, RunnerInstallJob } from "../types";
 import { Button, Card, ErrorBlock, Field, LoadingBlock, Modal } from "../components/ui";
+import { useWorkspaceUx } from "../components/WorkspaceUx";
 
 const runnerMeta: Record<Runner["runner_type"], { label: string; description: string }> = {
   unified: { label: "公平基准", description: "平台统一控制工具、步骤和工作区，适合比较底层模型本身。" },
@@ -53,18 +54,18 @@ export default function ModelsAndAgents() {
   return (
     <div className="ab-view ab-secondary-view ab-participants-view">
       <header className="ab-view-header">
-        <div className="ab-view-title"><span className="ab-view-index">05 / PARTICIPANTS</span><div><h1>参测配置</h1><p>模型身份与执行 Agent 独立建档，在评测编排中形成可审计组合。</p></div></div>
+        <div className="ab-view-title"><span className="ab-view-index">05 / RUNTIME REGISTRY</span><div><h1>模型与 Agent</h1><p>一次配置，同时供 Agent Studio、Flow 工作流和模型测评使用。</p></div></div>
         <div className="ab-header-meta"><span className="ab-meta-pill"><i />{models.data?.filter((model) => model.enabled).length ?? 0} MODELS · {runners.data?.filter((runner) => runner.capability.installed).length ?? 0} AGENTS READY</span><button className="ab-run-button" type="button" onClick={() => (tab === "models" ? setModelModal(true) : setRunnerModal(true))}><Plus size={14} />{tab === "models" ? "添加模型" : "添加 Runner"}</button></div>
       </header>
       <div className="ab-secondary-layout">
         <aside className="ab-section-pane">
-          <div className="ab-pane-label">PARTICIPANT LAYERS</div>
-          <button className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}><span><Cpu size={15} /></span><div><strong>参测模型</strong><small>身份、接口与底层模型</small></div><b>{models.data?.filter((model) => model.enabled).length ?? "—"}</b></button>
-          <button className={tab === "runners" ? "active" : ""} onClick={() => setTab("runners")}><span><TerminalSquare size={15} /></span><div><strong>执行 Agent</strong><small>工具链与本机运行能力</small></div><b>{runners.data?.length ?? "—"}</b></button>
-          <section className="ab-side-contract"><label>COMBINATION RULE</label><strong>MODEL × AGENT</strong><p>一个模型可复用多个 Agent；赛道、工具权限与结果会分别留证。</p></section>
+          <div className="ab-pane-label">RUNTIME LAYERS</div>
+          <button className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}><span><Cpu size={15} /></span><div><strong>模型目录</strong><small>推理身份、接口与计费</small></div><b>{models.data?.filter((model) => model.enabled).length ?? "—"}</b></button>
+          <button className={tab === "runners" ? "active" : ""} onClick={() => setTab("runners")}><span><TerminalSquare size={15} /></span><div><strong>Agent 运行时</strong><small>工具链、登录与本机能力</small></div><b>{runners.data?.length ?? "—"}</b></button>
+          <section className="ab-side-contract"><label>USED BY</label><strong>STUDIO · FLOW · BENCH</strong><p>日常任务使用项目默认组合；测评时再显式选择模型与 Agent，配置无需重复维护。</p></section>
         </aside>
         <main className="ab-secondary-canvas">
-          <div className="ab-canvas-intro"><span>{tab === "models" ? "MODEL REGISTRY" : "RUNNER REGISTRY"}</span><div><h2>{tab === "models" ? "模型身份账本" : "本机 Agent 矩阵"}</h2><p>{tab === "models" ? "管理被测模型、来源、上下文窗口和计费映射。" : "检测 CLI、版本、工具能力与快捷安装状态。"}</p></div><b>{tab === "models" ? `${models.data?.filter((model) => model.enabled).length ?? 0} ACTIVE` : `${runners.data?.filter((runner) => runner.capability.installed).length ?? 0} READY`}</b></div>
+          <div className="ab-canvas-intro"><span>{tab === "models" ? "MODEL REGISTRY" : "AGENT RUNTIMES"}</span><div><h2>{tab === "models" ? "可用模型目录" : "本机 Agent 矩阵"}</h2><p>{tab === "models" ? "管理日常任务与测评共用的模型来源、路由和计费映射。" : "检测 CLI、版本、工具能力与快捷安装状态；项目可选择其中一个作为默认 Agent。"}</p></div><b>{tab === "models" ? `${models.data?.filter((model) => model.enabled).length ?? 0} ACTIVE` : `${runners.data?.filter((runner) => runner.capability.installed).length ?? 0} READY`}</b></div>
           <div className="ab-secondary-scroll">
             {tab === "models" ? <ModelsPanel state={models} /> : <RunnersPanel state={runners} />}
           </div>
@@ -78,6 +79,7 @@ export default function ModelsAndAgents() {
 }
 
 function ModelsPanel({ state }: { state: ReturnType<typeof useApi<ModelConfig[]>> }) {
+  const ux = useWorkspaceUx();
   const [testing, setTesting] = useState<string | null>(null);
   const [message, setMessage] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState("");
@@ -104,11 +106,18 @@ function ModelsPanel({ state }: { state: ReturnType<typeof useApi<ModelConfig[]>
   }
 
   async function remove(model: ModelConfig) {
-    if (model.builtin || !window.confirm(`移除模型“${model.name}”？已有实验记录时会安全归档，否则永久删除。`)) return;
+    if (model.builtin || !await ux.confirm({
+      title: "移除模型？",
+      message: "有历史运行记录时会安全归档，否则将永久删除模型配置。",
+      detail: model.name,
+      confirmLabel: "移除模型",
+      tone: "danger",
+    })) return;
     setNotice("");
     try {
       const result = await api<{ action: "archived" | "deleted"; run_references: number }>(`/models/${model.id}`, { method: "DELETE" });
       setNotice(result.action === "archived" ? `“${model.name}”已有 ${result.run_references} 条运行记录，已归档并从参测下拉中移除。` : `“${model.name}”已永久删除。`);
+      ux.notify({ title: result.action === "archived" ? "模型已归档" : "模型已删除", message: model.name, kind: "success" });
       await state.refresh();
     } catch (error) {
       setNotice(error instanceof Error ? `移除失败：${error.message}` : "移除模型失败");
@@ -127,7 +136,7 @@ function ModelsPanel({ state }: { state: ReturnType<typeof useApi<ModelConfig[]>
   }
 
   return (
-    <><div className="configuration-explainer"><div><Cpu size={17} /><span><strong>模型身份</strong>决定模型 ID、接口或 CLI 模型名。</span></div><div><Zap size={17} /><span><strong>执行方式</strong>在创建实验时选择，不必为每个 Agent 重复添加模型。</span></div></div>
+    <><div className="configuration-explainer"><div><Cpu size={17} /><span><strong>日常工作台</strong>从项目默认值读取模型和 Agent，也可在新建会话时临时切换。</span></div><div><Zap size={17} /><span><strong>模型测评</strong>显式组合模型与 Agent，二者身份、权限和结果分别留证。</span></div></div>
       <div className="model-management-bar"><div><strong>{activeModels.length}</strong><span>个启用模型</span><small>{archivedModels.length} 个已归档</small></div><Button variant="secondary" onClick={() => setShowArchived((value) => !value)}>{showArchived ? <Cpu size={15} /> : <Archive size={15} />}{showArchived ? "返回启用模型" : `管理归档 (${archivedModels.length})`}</Button></div>
       {notice && <div className="inline-notice">{notice}</div>}
       <div className="model-grid">
@@ -391,7 +400,7 @@ function ModelModal({ runners, onClose, onSaved }: { runners: Runner[]; onClose:
     } catch (value) { setError(value instanceof Error ? value.message : "保存失败"); setBusy(false); }
   }
   return (
-    <Modal title="添加参测模型" description="先选择 API 或 Agent，AgentBench 会在本机识别可用模型；密钥不会显示在识别结果中。" onClose={onClose}>
+    <Modal title="添加模型" description="先选择 API 或 Agent；AgentBench 会在本机识别可用模型，保存后可用于 Studio、Flow 与测评，密钥不会显示在识别结果中。" onClose={onClose}>
       <form className="form-grid" onSubmit={(event) => void submit(event)}>
         <Field label="接入来源" hint={sourceMeta.description}>
           <select value={source} onChange={(event) => setSource(event.target.value as ModelSource)}>

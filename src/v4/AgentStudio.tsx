@@ -1,14 +1,17 @@
 import {
   Activity,
   AlertTriangle,
+  Archive,
   Bot,
   Brain,
+  Camera,
   Check,
   ChevronDown,
   ChevronRight,
   CircleStop,
   Clock3,
   Code2,
+  Copy,
   Cpu,
   File,
   FileCode2,
@@ -18,6 +21,12 @@ import {
   FolderOpen,
   Gauge,
   GitBranch,
+  GitFork,
+  Globe2,
+  Download,
+  Edit3,
+  Maximize2,
+  Minimize2,
   Paperclip,
   PanelBottomClose,
   PanelBottomOpen,
@@ -38,15 +47,23 @@ import {
   X,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { isTauri } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api } from "../lib/api";
+import { api, downloadUrl } from "../lib/api";
+import { copyText } from "../lib/clipboard";
 import { useApi } from "../lib/useApi";
+import { useWorkspaceUx } from "../components/WorkspaceUx";
 import type { ModelConfig, Runner } from "../types";
 import type {
   AgentSession,
   AgentSessionDetail,
   ApprovalRequest,
+  BrowserSnapshot,
+  BrowserStatus,
   FileChange,
   PermissionProfile,
   Project,
@@ -209,6 +226,40 @@ function operationSummary(events: StudioEvent[]) {
   ].filter(Boolean).join(" · ");
 }
 
+function MarkdownMessage({ content }: { content: string }) {
+  const [copied, setCopied] = useState<string | null>(null);
+
+  async function copyCode(value: string) {
+    if (!await copyText(value)) return;
+    setCopied(value);
+    window.setTimeout(() => setCopied((current) => current === value ? null : current), 1600);
+  }
+
+  return (
+    <div className="v5-markdown">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          pre: ({ children }) => <>{children}</>,
+          code: ({ className, children, ...props }) => {
+            const value = String(children).replace(/\n$/, "");
+            const block = Boolean(className) || value.includes("\n");
+            if (!block) return <code className={className} {...props}>{children}</code>;
+            const language = className?.replace("language-", "") || "text";
+            return (
+              <section className="v5-code-block">
+                <header><span>{language}</span><button type="button" onClick={() => void copyCode(value)}>{copied === value ? <Check size={13} /> : <Copy size={13} />}{copied === value ? "已复制" : "复制"}</button></header>
+                <pre><code className={className} {...props}>{children}</code></pre>
+              </section>
+            );
+          },
+          a: ({ href, children }) => <a href={href} target={href?.startsWith("http") ? "_blank" : undefined} rel="noreferrer">{children}</a>,
+        }}
+      >{content}</ReactMarkdown>
+    </div>
+  );
+}
+
 interface SessionForm {
   project_id: string;
   title: string;
@@ -236,6 +287,7 @@ interface StudioLayoutState {
   left: boolean;
   right: boolean;
   dock: boolean;
+  dockExpanded: boolean;
 }
 
 const studioLayoutKey = "agentbench.studio.layout.v1";
@@ -243,11 +295,11 @@ const studioLayoutKey = "agentbench.studio.layout.v1";
 function initialStudioLayout(): StudioLayoutState {
   try {
     const stored = window.localStorage.getItem(studioLayoutKey);
-    if (stored) return { left: true, right: true, dock: true, ...JSON.parse(stored) };
+    if (stored) return { left: true, right: true, dock: true, dockExpanded: false, ...JSON.parse(stored) };
   } catch {
     // A locked-down WebView may deny storage; the defaults remain fully usable.
   }
-  return { left: true, right: true, dock: true };
+  return { left: true, right: true, dock: true, dockExpanded: false };
 }
 
 function StudioPicker({
@@ -420,13 +472,16 @@ function ComposerMenu({
 export default function AgentStudio() {
   const { sessionId } = useParams();
   const navigate = useNavigate();
+  const ux = useWorkspaceUx();
+  const [messageLimit, setMessageLimit] = useState(120);
   const { data: sessions, refresh: refreshSessions } = useApi<AgentSession[]>("/sessions", 3_000);
   const { data: projects } = useApi<Project[]>("/projects");
   const { data: runners } = useApi<Runner[]>("/runners");
   const { data: models } = useApi<ModelConfig[]>("/models");
   const { data: skillPacks } = useApi<SkillPack[]>("/skill-packs", 10_000);
+  const { data: browserStatus, refresh: refreshBrowserStatus } = useApi<BrowserStatus>("/browser/status", 4_000);
   const { data: detail, loading, error, refresh } = useApi<AgentSessionDetail>(
-    sessionId ? `/sessions/${sessionId}` : null,
+    sessionId ? `/sessions/${sessionId}?message_limit=${messageLimit}` : null,
     (current) => current && activeStatuses.has(current.status) ? 750 : 2_500,
   );
   const [treePath, setTreePath] = useState(".");
@@ -439,12 +494,20 @@ export default function AgentStudio() {
       ? `/projects/${detail.project_id}/files/search?query=${encodeURIComponent(normalizedFileQuery)}&limit=120`
       : null,
   );
-  const { events: streamedEvents, connected } = useSessionStream(sessionId);
+  const persistedSequence = detail?.events.at(-1)?.seq ?? 0;
+  const { events: streamedEvents, connected } = useSessionStream(
+    sessionId,
+    persistedSequence,
+    Boolean(detail),
+  );
   const [message, setMessage] = useState("");
+  const [sessionQuery, setSessionQuery] = useState("");
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [preview, setPreview] = useState<{ path: string; content: string } | null>(null);
-  const [dock, setDock] = useState<"activity" | "terminal" | "file" | "changes">("activity");
+  const [dock, setDock] = useState<"activity" | "terminal" | "browser" | "file" | "changes">("activity");
   const [changePreview, setChangePreview] = useState<{
     id: string; path: string; change_type: string; status: string; diff: string;
     current_content: string; can_restore: boolean;
@@ -453,8 +516,16 @@ export default function AgentStudio() {
   const [terminal, setTerminal] = useState<{ id: string; running: boolean; cursor: number } | null>(null);
   const [terminalText, setTerminalText] = useState("");
   const [terminalInput, setTerminalInput] = useState("");
+  const [browserUrl, setBrowserUrl] = useState("https://example.com");
+  const [browserPageId, setBrowserPageId] = useState<string>();
+  const [browserSnapshot, setBrowserSnapshot] = useState<BrowserSnapshot | null>(null);
+  const [browserImage, setBrowserImage] = useState<string | null>(null);
+  const [browserSelector, setBrowserSelector] = useState("");
+  const [browserValue, setBrowserValue] = useState("");
+  const [browserBusy, setBrowserBusy] = useState(false);
   const [attachments, setAttachments] = useState<SessionAttachment[]>([]);
   const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const [draggingFiles, setDraggingFiles] = useState(false);
   const [approvalBusy, setApprovalBusy] = useState<string | null>(null);
   const [configBusy, setConfigBusy] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
@@ -464,6 +535,7 @@ export default function AgentStudio() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const followingLatestRef = useRef(true);
   const lastScrollTopRef = useRef(0);
+  const prependScrollHeightRef = useRef<number | null>(null);
   const fileSearchRef = useRef<HTMLInputElement>(null);
   const terminalCursorRef = useRef(0);
   const terminalWriteChainRef = useRef<Promise<void>>(Promise.resolve());
@@ -487,8 +559,30 @@ export default function AgentStudio() {
     followingLatestRef.current = true;
     lastScrollTopRef.current = 0;
     setFollowingLatest(true);
+    setMessageLimit(120);
     terminalCursorRef.current = 0;
   }, [sessionId]);
+
+  useEffect(() => {
+    if (!sessionId || !isTauri()) return;
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void getCurrentWebview().onDragDropEvent((event) => {
+      if (disposed) return;
+      if (event.payload.type === "over") setDraggingFiles(true);
+      else if (event.payload.type === "drop") {
+        setDraggingFiles(false);
+        void importAttachmentPaths(event.payload.paths);
+      } else setDraggingFiles(false);
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else stop = unlisten;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      stop?.();
+    };
+  }, [sessionId, attachments.length, attachmentBusy]);
 
   useEffect(() => {
     try {
@@ -566,6 +660,14 @@ export default function AgentStudio() {
     () => detail?.approvals.filter((item) => item.status === "pending") ?? [],
     [detail?.approvals],
   );
+  const visibleSessions = useMemo(() => {
+    const needle = sessionQuery.trim().toLowerCase();
+    return (sessions ?? []).filter((session) => !needle || `${session.title} ${session.project_name} ${session.runner_name} ${session.model_name}`.toLowerCase().includes(needle));
+  }, [sessionQuery, sessions]);
+  const retryableTurn = useMemo(() => {
+    const latest = detail?.turns.at(-1);
+    return latest && ["failed", "cancelled", "interrupted"].includes(latest.status) ? latest : null;
+  }, [detail?.turns]);
 
   const runnerOptions = useMemo<StudioPickerOption[]>(() => (runners ?? [])
     .filter((runner) => runner.enabled)
@@ -662,6 +764,26 @@ export default function AgentStudio() {
     lastScrollTopRef.current = node.scrollTop;
   }
 
+  function loadEarlierMessages() {
+    const node = scrollRef.current;
+    followingLatestRef.current = false;
+    setFollowingLatest(false);
+    prependScrollHeightRef.current = node?.scrollHeight ?? null;
+    setMessageLimit((current) => current + 120);
+  }
+
+  useEffect(() => {
+    const previousHeight = prependScrollHeightRef.current;
+    const node = scrollRef.current;
+    if (previousHeight == null || !node || loading) return;
+    prependScrollHeightRef.current = null;
+    const frame = window.requestAnimationFrame(() => {
+      node.scrollTop += node.scrollHeight - previousHeight;
+      lastScrollTopRef.current = node.scrollTop;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [detail?.messages.length, loading]);
+
   useEffect(() => {
     if (!sessionId || !terminal?.id || !terminal.running) return;
     let stopped = false;
@@ -708,6 +830,7 @@ export default function AgentStudio() {
       });
       setCreateOpen(false);
       await refreshSessions();
+      ux.notify({ kind: "success", title: "会话已创建", message: `已在 ${created.project_name} 中准备好 Agent 工作区。` });
       navigate(`/studio/${created.id}`);
     } catch (value) {
       setActionError(value instanceof Error ? value.message : "无法创建会话");
@@ -757,6 +880,94 @@ export default function AgentStudio() {
     }
   }
 
+  async function renameSession(event: FormEvent) {
+    event.preventDefault();
+    if (!detail || !titleDraft.trim()) return;
+    await updateSession({ title: titleDraft.trim() });
+    setEditingTitle(false);
+    await refreshSessions();
+    ux.notify({ kind: "success", title: "会话名称已保存" });
+  }
+
+  async function archiveSession() {
+    if (!detail || activeStatuses.has(detail.status)) return;
+    const approved = await ux.confirm({
+      title: "归档这个会话？",
+      message: "会话、消息、文件变更与用量记录都会保留，之后可以从归档列表恢复。",
+      confirmLabel: "归档会话",
+      detail: detail.title,
+    });
+    if (!approved) return;
+    try {
+      await api(`/sessions/${detail.id}`, { method: "PATCH", body: JSON.stringify({ archived: true }) });
+      const next = sessions?.find((item) => item.id !== detail.id);
+      await refreshSessions();
+      ux.notify({ kind: "success", title: "会话已归档", message: detail.title });
+      navigate(next ? `/studio/${next.id}` : "/studio");
+    } catch (value) {
+      ux.notify({ kind: "error", title: "无法归档会话", message: value instanceof Error ? value.message : "本地服务拒绝了操作" });
+    }
+  }
+
+  async function forkSession(throughMessageId?: string) {
+    if (!detail) return;
+    try {
+      const created = await api<AgentSessionDetail>(`/sessions/${detail.id}/fork`, {
+        method: "POST",
+        body: JSON.stringify({
+          title: `${detail.title} · 分支`,
+          through_message_id: throughMessageId ?? null,
+        }),
+      });
+      await refreshSessions();
+      ux.notify({ kind: "success", title: "会话分支已创建", message: `已复制 ${created.messages.length} 条上下文消息。` });
+      navigate(`/studio/${created.id}`);
+    } catch (value) {
+      ux.notify({ kind: "error", title: "无法创建会话分支", message: value instanceof Error ? value.message : "未知错误" });
+    }
+  }
+
+  function exportSession() {
+    if (!detail) return;
+    const body = [
+      `# ${detail.title}`,
+      "",
+      `- 项目：${detail.project_name}`,
+      `- Agent：${detail.runner_name}`,
+      `- 模型：${detail.model_name}`,
+      `- Token：${detail.tokens_input + detail.tokens_output}`,
+      `- 费用：$${detail.cost_usd.toFixed(4)}`,
+      "",
+      ...detail.messages.flatMap((item) => [
+        `## ${item.role === "user" ? "用户" : item.role === "assistant" ? detail.runner_name : "系统"} · ${new Date(item.created_at).toLocaleString()}`,
+        "",
+        item.content,
+        "",
+      ]),
+    ].join("\n");
+    const url = URL.createObjectURL(new Blob([body], { type: "text/markdown;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${detail.title.replace(/[\\/:*?"<>|]/g, "-")}.md`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    ux.notify({ kind: "success", title: "会话记录已导出", message: anchor.download });
+  }
+
+  async function retryLastTurn() {
+    if (!sessionId || !retryableTurn || activeStatuses.has(detail?.status ?? "")) return;
+    setSending(true);
+    try {
+      await api(`/sessions/${sessionId}/turns`, { method: "POST", body: JSON.stringify({ message: retryableTurn.user_message, context: [] }) });
+      await Promise.all([refresh(), refreshSessions()]);
+      ux.notify({ kind: "success", title: "失败轮次已重新排队" });
+    } catch (value) {
+      ux.notify({ kind: "error", title: "无法重试", message: value instanceof Error ? value.message : "未知错误" });
+    } finally {
+      setSending(false);
+    }
+  }
+
   async function updateRuntimeSetting(changes: Record<string, unknown>) {
     setConfigBusy(true);
     try {
@@ -779,6 +990,23 @@ export default function AgentStudio() {
     }
   }
 
+  async function importAttachmentPaths(paths: string[]) {
+    if (!sessionId || attachmentBusy || attachments.length >= 10 || !paths.length) return;
+    setActionError(null);
+    setAttachmentBusy(true);
+    try {
+      const imported = await api<SessionAttachment[]>(`/sessions/${sessionId}/attachments`, {
+        method: "POST",
+        body: JSON.stringify({ paths: paths.slice(0, Math.max(0, 10 - attachments.length)) }),
+      });
+      setAttachments((current) => [...current, ...imported].slice(0, 10));
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "无法添加附件");
+    } finally {
+      setAttachmentBusy(false);
+    }
+  }
+
   async function attachFiles() {
     if (!sessionId || attachmentBusy || attachments.length >= 10) return;
     setActionError(null);
@@ -789,17 +1017,9 @@ export default function AgentStudio() {
         title: "选择要发送给 Agent 的图片或文件",
       });
       const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
-      if (!paths.length) return;
-      setAttachmentBusy(true);
-      const imported = await api<SessionAttachment[]>(`/sessions/${sessionId}/attachments`, {
-        method: "POST",
-        body: JSON.stringify({ paths: paths.slice(0, Math.max(0, 10 - attachments.length)) }),
-      });
-      setAttachments((current) => [...current, ...imported].slice(0, 10));
+      await importAttachmentPaths(paths);
     } catch (value) {
-      setActionError(value instanceof Error ? value.message : "无法添加附件");
-    } finally {
-      setAttachmentBusy(false);
+      setActionError(value instanceof Error ? value.message : "无法打开文件选择器");
     }
   }
 
@@ -942,6 +1162,72 @@ export default function AgentStudio() {
     setTerminal((current) => current ? { ...current, running: false } : current);
   }
 
+  async function captureBrowser(pageId = browserPageId) {
+    if (!pageId) return;
+    const [snapshot, screenshot] = await Promise.all([
+      api<BrowserSnapshot>(`/browser/snapshot?page_id=${encodeURIComponent(pageId)}`),
+      api<{ id: string }>(`/browser/screenshots?page_id=${encodeURIComponent(pageId)}`, { method: "POST" }),
+    ]);
+    setBrowserSnapshot(snapshot);
+    setBrowserImage(`${downloadUrl(`/browser/artifacts/${screenshot.id}`)}?t=${Date.now()}`);
+    setBrowserUrl(snapshot.url);
+  }
+
+  async function openBrowserDock() {
+    setDock("browser");
+    setStudioLayout((current) => ({ ...current, dock: true, dockExpanded: true }));
+    setBrowserBusy(true);
+    setActionError(null);
+    try {
+      let status = browserStatus;
+      if (!status?.running) {
+        status = await api<BrowserStatus>("/browser/launch", { method: "POST", body: JSON.stringify({ url: "about:blank" }) });
+      }
+      const pageId = browserPageId || status.pages[0]?.id;
+      setBrowserPageId(pageId);
+      await refreshBrowserStatus();
+      if (pageId) await captureBrowser(pageId);
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "浏览器启动失败");
+    } finally {
+      setBrowserBusy(false);
+    }
+  }
+
+  async function navigateBrowser(event: FormEvent) {
+    event.preventDefault();
+    setBrowserBusy(true);
+    setActionError(null);
+    try {
+      let status = browserStatus;
+      if (!status?.running) status = await api<BrowserStatus>("/browser/launch", { method: "POST", body: JSON.stringify({ url: "about:blank" }) });
+      const pageId = browserPageId || status.pages[0]?.id;
+      if (!pageId) throw new Error("浏览器没有可用页面");
+      setBrowserPageId(pageId);
+      await api<BrowserSnapshot>("/browser/navigate", { method: "POST", body: JSON.stringify({ url: browserUrl, page_id: pageId }) });
+      await captureBrowser(pageId);
+      await refreshBrowserStatus();
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "网页导航失败");
+    } finally {
+      setBrowserBusy(false);
+    }
+  }
+
+  async function interactBrowser(action: "click" | "fill") {
+    if (!browserPageId || !browserSelector) return;
+    setBrowserBusy(true);
+    setActionError(null);
+    try {
+      await api<BrowserSnapshot>("/browser/actions", { method: "POST", body: JSON.stringify({ action, selector: browserSelector, value: action === "fill" ? browserValue : null, page_id: browserPageId }) });
+      await captureBrowser(browserPageId);
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "浏览器交互失败");
+    } finally {
+      setBrowserBusy(false);
+    }
+  }
+
   function renderApproval(approval: ApprovalRequest, inline = false) {
     const busy = approvalBusy === approval.id;
     const requestText = String(
@@ -1003,7 +1289,8 @@ export default function AgentStudio() {
   }
 
   return (
-    <div className={`v4-studio-workbench ${studioLayout.left ? "" : "left-collapsed"} ${studioLayout.right ? "" : "right-collapsed"} ${studioLayout.dock ? "" : "dock-collapsed"}`}>
+    <div className={`v4-studio-workbench ${studioLayout.left ? "" : "left-collapsed"} ${studioLayout.right ? "" : "right-collapsed"} ${studioLayout.dock ? "" : "dock-collapsed"} ${studioLayout.dockExpanded ? "dock-expanded" : ""}`}>
+      {draggingFiles && <div className="v5-studio-dropzone"><Upload size={28} /><strong>放下即可附加到当前会话</strong><span>图片和文件最多 10 个，单个最大 50 MB</span></div>}
       <aside className="v4-studio-rail">
         <header>{detail ? <><span className="v4-project-logo">{detail.project_name.slice(0, 2).toUpperCase()}</span><div><strong>{detail.project_name}</strong><small title={detail.workspace_path}><GitBranch size={11} /> {detail.workspace_path}</small></div></> : <span>加载项目…</span>}</header>
         <div className="v4-rail-tabs"><button className={railMode === "files" ? "active" : ""} type="button" onClick={() => setRailMode("files")}><Folder size={13} />文件</button><button className={railMode === "search" ? "active" : ""} type="button" onClick={() => setRailMode("search")}><Search size={13} />搜索</button></div>
@@ -1027,23 +1314,25 @@ export default function AgentStudio() {
             {searchResult && <footer>已扫描 {searchResult.scanned.toLocaleString()} 项{searchResult.truncated ? " · 已达到结果上限" : ""}</footer>}
           </section>
         )}
-        <section className="v4-session-list"><header><span>RECENT SESSIONS</span><button type="button" onClick={openCreate}><Plus size={14} /></button></header>{sessions?.slice(0, 8).map((session) => <button key={session.id} className={session.id === sessionId ? "active" : ""} type="button" onClick={() => navigate(`/studio/${session.id}`)}><i className={activeStatuses.has(session.status) ? "live" : ""} /><span><strong>{session.title}</strong><small>{session.runner_name} · {statusLabels[session.status] ?? session.status}</small></span></button>)}</section>
+        <section className="v4-session-list"><header><span>RECENT SESSIONS</span><button type="button" onClick={openCreate}><Plus size={14} /></button></header><label className="v5-session-search"><Search size={13} /><input aria-label="搜索会话" value={sessionQuery} onChange={(event) => setSessionQuery(event.target.value)} placeholder="搜索会话…" />{sessionQuery && <button type="button" aria-label="清除会话搜索" onClick={() => setSessionQuery("")}><X size={12} /></button>}</label>{visibleSessions.slice(0, 40).map((session) => <button key={session.id} className={session.id === sessionId ? "active" : ""} type="button" onClick={() => navigate(`/studio/${session.id}`)}><i className={activeStatuses.has(session.status) ? "live" : ""} /><span><strong>{session.title}</strong><small>{session.runner_name} · {statusLabels[session.status] ?? session.status}</small></span></button>)}{sessionQuery && !visibleSessions.length && <div className="v5-session-none">没有匹配会话</div>}</section>
       </aside>
 
       <section className="v4-conversation">
         <header className="v4-conversation-head">
           <button className={`v4-pane-toggle with-label ${studioLayout.left ? "active" : ""}`} type="button" aria-label={studioLayout.left ? "收起项目侧栏" : "展开项目侧栏"} title={`${studioLayout.left ? "收起" : "展开"}项目侧栏 · Ctrl B`} onClick={() => setStudioLayout((current) => ({ ...current, left: !current.left }))}>{studioLayout.left ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}<span>项目栏</span></button>
-          <div className="v4-conversation-title"><strong>{detail?.title ?? "正在加载会话"}</strong><small title={detail?.workspace_path}>SESSION / {sessionId?.slice(0, 8)} · {detail?.workspace_path}</small></div>
+          {editingTitle ? <form className="v5-session-title-edit" onSubmit={renameSession}><input autoFocus aria-label="会话名称" value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} /><button type="submit"><Check size={14} /></button><button type="button" onClick={() => setEditingTitle(false)}><X size={14} /></button></form> : <div className="v4-conversation-title"><strong>{detail?.title ?? "正在加载会话"}</strong><small title={detail?.workspace_path}>SESSION / {sessionId?.slice(0, 8)} · {detail?.workspace_path}</small></div>}
           <span className={`v4-status ${activeStatuses.has(detail?.status ?? "") ? "green" : ""}`}><i />{detail ? statusLabels[detail.status] ?? detail.status : "加载中"}</span>
           <StudioPicker ariaLabel="选择 Agent" caption="AGENT" icon={<Bot size={15} />} disabled={activeStatuses.has(detail?.status ?? "")} value={detail?.runner_id ?? ""} options={runnerOptions} onChange={(runnerId) => void updateSession({ runner_id: runnerId })} />
           <StudioPicker ariaLabel="选择模型" caption="MODEL" icon={<Cpu size={15} />} disabled={activeStatuses.has(detail?.status ?? "")} value={detail?.model_id ?? ""} options={modelOptions} onChange={(modelId) => void updateSession({ model_id: modelId })} />
           <button className="v4-pane-toggle" type="button" onClick={() => void refresh()} title="刷新会话"><RefreshCw className={loading ? "spin" : ""} size={16} /></button>
+          <button className="v4-pane-toggle" type="button" disabled={!detail} onClick={() => { setTitleDraft(detail?.title ?? ""); setEditingTitle(true); }} title="重命名会话"><Edit3 size={15} /></button>
           <button className={`v4-pane-toggle with-label ${studioLayout.right ? "active" : ""}`} type="button" aria-label={studioLayout.right ? "收起会话侧栏" : "展开会话侧栏"} title={`${studioLayout.right ? "收起" : "展开"}会话上下文`} onClick={() => setStudioLayout((current) => ({ ...current, right: !current.right }))}>{studioLayout.right ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}<span>上下文</span></button>
         </header>
 
         <div className="v4-conversation-scroll" ref={scrollRef} onScroll={handleConversationScroll}>
           {loading && <div className="v4-empty compact"><RefreshCw className="spin" size={22} /><strong>正在恢复会话上下文</strong></div>}
-          {detail?.messages.map((item) => <article key={item.id} className={`v4-message ${item.role}`}><span>{item.role === "user" ? <User size={16} /> : <Sparkles size={16} />}</span><div><header><strong>{item.role === "user" ? "你" : detail.runner_name}</strong><time>{time(item.created_at)}</time></header><p>{item.content}</p>{item.metadata.context?.length ? <footer><Paperclip size={13} />已附加 {item.metadata.context.length} 项上下文</footer> : null}</div></article>)}
+          {detail?.messages_truncated && <button className="v5-load-earlier" type="button" onClick={loadEarlierMessages}>加载更早的 {Math.min(120, detail.message_count - detail.messages.length)} 条消息</button>}
+          {detail?.messages.map((item) => <article key={item.id} className={`v4-message ${item.role}`}><span>{item.role === "user" ? <User size={16} /> : <Sparkles size={16} />}</span><div><header><strong>{item.role === "user" ? "你" : detail.runner_name}</strong><time>{time(item.created_at)}</time><button className="v5-message-action" type="button" title="从这里创建会话分支" aria-label="从这条消息创建会话分支" onClick={() => void forkSession(item.id)}><GitFork size={13} /></button></header><MarkdownMessage content={item.content} />{item.metadata.context?.length ? <footer><Paperclip size={13} />已附加 {item.metadata.context.length} 项上下文</footer> : null}</div></article>)}
           {!!events.length && (
             <section className="v4-inline-activity">
               <header>
@@ -1139,12 +1428,23 @@ export default function AgentStudio() {
         <section><label>PERMISSION REQUESTS <b>{pendingApprovals.length} PENDING</b></label>{pendingApprovals.map((approval) => renderApproval(approval))}{!pendingApprovals.length && <p className="v4-inspector-empty"><Check size={15} />没有待处理操作</p>}</section>
         <section><label>LIVE TELEMETRY</label><dl className="v4-telemetry"><div><dt>输入 Token</dt><dd>{((detail?.tokens_input ?? 0) + liveUsage.input).toLocaleString()}</dd></div><div><dt>输出 Token</dt><dd>{((detail?.tokens_output ?? 0) + liveUsage.output).toLocaleString()}</dd></div><div><dt>预计费用</dt><dd>${quotaCost.toFixed(3)}</dd></div><div><dt>累计用时</dt><dd>{duration(detail?.duration_ms ?? 0)}</dd></div></dl></section>
         <section><label>SESSION CONTEXT</label><div className="v4-context-list"><span><FolderOpen size={14} />{detail?.project_name}</span><span><ShieldCheck size={14} />{permissionLabels[detail?.permission_profile ?? "workspace"]}</span><span><Brain size={14} />{effortLabels[detail?.reasoning_effort ?? "medium"]}思考强度</span><span><FileDiff size={14} />{detail?.file_changes.length ?? 0} 个文件变更</span></div></section>
+        <section><label>SESSION ACTIONS</label><div className="v5-session-actions"><button type="button" onClick={() => void forkSession()} disabled={!detail}><GitFork size={14} />创建分支</button><button type="button" onClick={exportSession} disabled={!detail}><Download size={14} />导出记录</button>{retryableTurn && <button type="button" onClick={() => void retryLastTurn()} disabled={sending}><RefreshCw size={14} />重试上一轮</button>}<button className="danger" type="button" onClick={() => void archiveSession()} disabled={!detail || activeStatuses.has(detail?.status ?? "")}><Archive size={14} />归档会话</button></div></section>
       </aside>
 
       <section className="v4-studio-dock">
-        <nav><button type="button" className={studioLayout.dock && dock === "activity" ? "active" : ""} onClick={() => { setDock("activity"); setStudioLayout((current) => ({ ...current, dock: true })); }}><Activity size={14} />活动日志 <b>{processEvents.length}</b></button><button type="button" className={studioLayout.dock && dock === "terminal" ? "active" : ""} onClick={openTerminalPanel}><TerminalSquare size={14} />交互终端 <i className={terminal?.running ? "live" : ""} /></button><button type="button" className={studioLayout.dock && dock === "file" ? "active" : ""} onClick={() => { setDock("file"); setStudioLayout((current) => ({ ...current, dock: true })); }}><Code2 size={14} />文件预览</button><button type="button" className={studioLayout.dock && dock === "changes" ? "active" : ""} onClick={() => { setDock("changes"); setStudioLayout((current) => ({ ...current, dock: true })); }}><FileDiff size={14} />变更 <b>{detail?.file_changes.length ?? 0}</b></button><span className="v4-dock-summary">{terminal?.running ? "TERMINAL LIVE · 点击终端区域直接输入" : `${processEvents.length} 个可读步骤 · ${collapsedEventCount} 条底层事件已折叠`}</span><button className="v4-dock-toggle" type="button" aria-label={studioLayout.dock ? "隐藏底部面板" : "展开底部面板"} title={`${studioLayout.dock ? "隐藏" : "展开"}底部面板 · Ctrl J`} onClick={() => setStudioLayout((current) => ({ ...current, dock: !current.dock }))}>{studioLayout.dock ? <PanelBottomClose size={16} /> : <PanelBottomOpen size={16} />}{studioLayout.dock ? "隐藏" : "展开"}</button></nav>
+        <nav>
+          <button type="button" className={studioLayout.dock && dock === "activity" ? "active" : ""} onClick={() => { setDock("activity"); setStudioLayout((current) => ({ ...current, dock: true })); }}><Activity size={14} />活动日志 <b>{processEvents.length}</b></button>
+          <button type="button" className={studioLayout.dock && dock === "terminal" ? "active" : ""} onClick={openTerminalPanel}><TerminalSquare size={14} />交互终端 <i className={terminal?.running ? "live" : ""} /></button>
+          <button type="button" className={studioLayout.dock && dock === "browser" ? "active" : ""} onClick={() => void openBrowserDock()}><Globe2 size={14} />浏览器 <i className={browserStatus?.running ? "live" : ""} /></button>
+          <button type="button" className={studioLayout.dock && dock === "file" ? "active" : ""} onClick={() => { setDock("file"); setStudioLayout((current) => ({ ...current, dock: true })); }}><Code2 size={14} />文件预览</button>
+          <button type="button" className={studioLayout.dock && dock === "changes" ? "active" : ""} onClick={() => { setDock("changes"); setStudioLayout((current) => ({ ...current, dock: true })); }}><FileDiff size={14} />变更 <b>{detail?.file_changes.length ?? 0}</b></button>
+          <span className="v4-dock-summary">{dock === "browser" && browserStatus?.running ? "VISIBLE BROWSER · 用户可随时接管" : terminal?.running ? "TERMINAL LIVE · 点击终端区域直接输入" : `${processEvents.length} 个可读步骤 · ${collapsedEventCount} 条底层事件已折叠`}</span>
+          {studioLayout.dock && <button className="v4-dock-toggle icon" type="button" aria-label={studioLayout.dockExpanded ? "恢复底部面板高度" : "展开底部面板高度"} title={studioLayout.dockExpanded ? "恢复普通高度" : "展开工作区域"} onClick={() => setStudioLayout((current) => ({ ...current, dockExpanded: !current.dockExpanded }))}>{studioLayout.dockExpanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>}
+          <button className="v4-dock-toggle" type="button" aria-label={studioLayout.dock ? "隐藏底部面板" : "展开底部面板"} title={`${studioLayout.dock ? "隐藏" : "展开"}底部面板 · Ctrl J`} onClick={() => setStudioLayout((current) => ({ ...current, dock: !current.dock }))}>{studioLayout.dock ? <PanelBottomClose size={16} /> : <PanelBottomOpen size={16} />}{studioLayout.dock ? "隐藏" : "展开"}</button>
+        </nav>
         {studioLayout.dock && dock === "activity" && <div className="v4-terminal"><header><span>可验证 Agent 活动</span><small>公开进度和实际操作；Token 碎片与心跳已自动合并</small></header>{processEvents.slice(-16).map((event) => <div key={event.seq}><time>{time(event.created_at)}</time><span>{eventTitle(event)}</span></div>)}{!processEvents.length && <span>等待 Agent 活动…</span>}</div>}
         {studioLayout.dock && dock === "terminal" && (terminal?.running ? <div className="v4-interactive-terminal"><header><span><i className="live" />ConPTY · PowerShell <small>点击下方终端即可直接键入</small></span><button type="button" onClick={() => void closeInteractiveTerminal()}>关闭终端</button></header><TerminalView content={terminalText} onData={(data) => void writeTerminalData(data)} onResize={(columns, rows) => void resizeTerminal(columns, rows)} /><form onSubmit={sendTerminalInput}><span>快速命令 ›</span><input aria-label="终端快速命令" value={terminalInput} onChange={(event) => setTerminalInput(event.target.value)} placeholder="也可在上方终端内直接输入" autoComplete="off" /><button type="submit" disabled={!terminalInput}>运行</button></form></div> : <div className="v4-terminal-empty"><TerminalSquare size={26} /><strong>{terminal ? "终端已退出" : "启动项目交互终端"}</strong><p>{detail?.permission_profile === "standard" || detail?.permission_profile === "full" ? "终端将在当前项目目录打开，支持直接键盘输入、快捷键与命令历史。" : "交互终端需要“标准开发”或“完全访问”权限。可在上方输入框工具栏随时切换。"}</p>{detail?.permission_profile === "standard" || detail?.permission_profile === "full" ? <button type="button" onClick={() => void startInteractiveTerminal()}><TerminalSquare size={14} />{terminal ? "重新启动终端" : "启动终端"}</button> : <button type="button" onClick={() => void updateRuntimeSetting({ permission_profile: "standard" })}><ShieldCheck size={14} />切换到标准开发</button>}</div>)}
+        {studioLayout.dock && dock === "browser" && <div className="v5-studio-browser"><form onSubmit={navigateBrowser}><Globe2 size={14} /><input aria-label="浏览器地址" value={browserUrl} onChange={(event) => setBrowserUrl(event.target.value)} placeholder="https://example.com" /><button type="submit" disabled={browserBusy}>{browserBusy ? "加载中…" : "访问"}</button><button type="button" disabled={!browserPageId || browserBusy} onClick={() => void captureBrowser()}><RefreshCw size={13} />刷新</button><span><i className={browserStatus?.running ? "live" : ""} />{browserStatus?.running ? "可接管" : "未启动"}</span></form><div><section className="v5-studio-browser-view">{browserImage ? <img src={browserImage} alt="可见浏览器当前截图" /> : <div><Globe2 size={25} /><strong>启动可见浏览器</strong><small>浏览器会在独立窗口打开，你可以随时直接接管。</small><button type="button" onClick={() => void openBrowserDock()}>启动浏览器</button></div>}</section><section className="v5-studio-browser-controls"><header><div><strong>{browserSnapshot?.title || "页面控件"}</strong><small>{browserSnapshot?.url || "选择页面元素即可操作"}</small></div><button type="button" disabled={!browserPageId} onClick={() => void captureBrowser()}><Camera size={13} /></button></header><div className="fields"><input value={browserValue} onChange={(event) => setBrowserValue(event.target.value)} placeholder="为输入框准备填写内容" /><button type="button" disabled={!browserSelector || browserBusy} onClick={() => void interactBrowser("fill")}>填写</button><button type="button" disabled={!browserSelector || browserBusy} onClick={() => void interactBrowser("click")}>点击</button></div><div className="controls">{browserSnapshot?.controls.slice(0, 100).map((control) => <button className={browserSelector === control.selector ? "active" : ""} type="button" disabled={control.disabled} key={`${control.index}-${control.selector}`} onClick={() => setBrowserSelector(control.selector || "")}><b>{control.index + 1}</b><span><strong>{control.text || control.tag}</strong><small>{control.tag}{control.type ? ` · ${control.type}` : ""}</small></span></button>)}{browserSnapshot && !browserSnapshot.controls.length && <p>页面没有可操作控件。</p>}</div></section></div></div>}
         {studioLayout.dock && dock === "file" && <pre className="v4-file-preview">{preview ? preview.content : "从左侧项目树选择一个 UTF-8 文本文件。"}</pre>}
         {studioLayout.dock && dock === "changes" && <div className="v4-change-review"><div className="v4-change-list">{detail?.file_changes.map((change) => <button className={change.id === changePreview?.id ? "active" : ""} type="button" key={change.id} onClick={() => void openChange(change)}><span className={change.change_type}>{change.change_type.slice(0, 1).toUpperCase()}</span><code>{change.path}</code><small>{change.status} · {change.size_delta >= 0 ? "+" : ""}{change.size_delta} B</small></button>)}{!detail?.file_changes.length && <span>本会话尚未修改文件。</span>}</div>{changePreview && <section className="v4-diff-review"><header><strong>{changePreview.path}</strong><span>{changePreview.status}</span><div><button type="button" onClick={() => void reviewChange("reject")} disabled={!changePreview.can_restore || changePreview.status !== "observed"}>拒绝并还原</button><button type="button" onClick={() => void reviewChange("apply_content")} disabled={changePreview.status !== "observed"}>应用编辑内容</button><button className="accept" type="button" onClick={() => void reviewChange("accept")} disabled={changePreview.status !== "observed"}>接受变更</button></div></header><div><pre>{changePreview.diff || "此文件没有可显示的文本 Diff。"}</pre><textarea aria-label="编辑后的文件内容" value={changeEdit} onChange={(event) => setChangeEdit(event.target.value)} /></div></section>}</div>}
       </section>

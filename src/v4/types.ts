@@ -22,6 +22,34 @@ export interface StudioDashboardData {
   active_sessions_list: AgentSession[];
   pending_approvals_list: ApprovalRequest[];
   recent_projects: Project[];
+  recent_failures: Array<{
+    id: string;
+    title: string;
+    status: string;
+    updated_at: string;
+    project_name: string;
+    runner_name: string | null;
+    model_name: string | null;
+    error_message: string | null;
+  }>;
+  runtime_health: {
+    models_enabled: number;
+    runners_enabled: number;
+    mcp_enabled: number;
+    mcp_healthy: number;
+    mcp_error: number;
+  };
+}
+
+export interface WorkspaceSearchResult {
+  id: string;
+  kind: "project" | "session" | "task" | "flow";
+  title: string;
+  subtitle: string;
+  extra: string | null;
+  status: string | null;
+  path: string;
+  updated_at: string;
 }
 
 export interface Project {
@@ -41,6 +69,14 @@ export interface Project {
   created_at: string;
   updated_at: string;
   last_opened_at: string | null;
+  roots?: Array<{ id: string; root_path: string; label: string; access_mode: PermissionProfile; is_primary: boolean; created_at: string }>;
+}
+
+export interface ProjectHealth {
+  project_id: string;
+  ready: boolean;
+  checks: Array<{ id: string; label: string; ok: boolean; detail: string }>;
+  checked_at: string;
 }
 
 export interface ProjectTreeEntry {
@@ -166,6 +202,8 @@ export interface AgentSession {
 
 export interface AgentSessionDetail extends AgentSession {
   messages: StudioMessage[];
+  message_count: number;
+  messages_truncated: boolean;
   events: StudioEvent[];
   approvals: ApprovalRequest[];
   turns: StudioTurn[];
@@ -179,13 +217,20 @@ export interface StudioTask {
   project_name: string | null;
   title: string;
   description: string;
-  status: "backlog" | "queued" | "running" | "approval" | "completed" | "failed";
+  status: "backlog" | "queued" | "running" | "approval" | "completed" | "failed" | "cancelled";
   priority: "low" | "normal" | "high" | "urgent";
   runner_id: string | null;
   runner_name: string | null;
   model_id: string | null;
   model_name: string | null;
   session_id: string | null;
+  due_at: string | null;
+  tags: string[];
+  depends_on: string[];
+  result_summary: string;
+  retry_of: string | null;
+  archived: boolean;
+  cancelled_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -230,6 +275,55 @@ export interface AgentFlow extends AgentFlowSummary {
     edge_type: string;
     condition: Record<string, unknown>;
   }>;
+}
+
+export interface FlowValidationIssue {
+  code: string;
+  message: string;
+  node_id?: string;
+}
+
+export interface FlowValidation {
+  valid: boolean;
+  errors: FlowValidationIssue[];
+  warnings: FlowValidationIssue[];
+  roots: string[];
+  topological_order: string[];
+  levels: string[][];
+  node_count: number;
+  edge_count: number;
+}
+
+export interface AgentFlowVersion {
+  id: string;
+  graph_id: string;
+  version_no: number;
+  label: string;
+  name: string;
+  description: string;
+  settings: Record<string, unknown>;
+  definition: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface AgentFlowRun {
+  id: string;
+  graph_id: string;
+  version_no: number | null;
+  status: string;
+  dry_run: boolean;
+  retry_node_id: string | null;
+  error_message: string;
+  result: Record<string, unknown>;
+  usage: {
+    cost_usd?: number;
+    tokens_input?: number;
+    tokens_output?: number;
+    duration_ms?: number;
+  };
+  started_at: string;
+  completed_at: string | null;
+  created_at: string;
 }
 
 export interface McpServer {
@@ -291,6 +385,6 @@ export interface BrowserSnapshot {
   title: string;
   url: string;
   text: string;
-  links: Array<{ index: number; text: string; href: string }>;
-  controls: Array<{ index: number; tag: string; type: string | null; text: string; id: string | null; name: string | null }>;
+  links: Array<{ index: number; text: string; href: string; selector?: string }>;
+  controls: Array<{ index: number; tag: string; type: string | null; text: string; id: string | null; name: string | null; value?: string | null; disabled?: boolean; selector?: string }>;
 }

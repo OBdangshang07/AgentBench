@@ -34,7 +34,7 @@ describe("real Flow and tool management workbenches", () => {
   it("adds a Flow node and persists the edited graph", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "4.2.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.0.0" });
       if (url.endsWith("/flows/flow-1") && init?.method === "PATCH") return json(flow);
       if (url.endsWith("/flows/flow-1")) return json(flow);
       if (url.endsWith("/flows")) return json([flow]);
@@ -57,11 +57,64 @@ describe("real Flow and tool management workbenches", () => {
     });
   });
 
+  it("validates, dry-runs, and locally undoes Flow edits without invoking an Agent", async () => {
+    const validation = {
+      valid: true,
+      errors: [],
+      warnings: [],
+      roots: ["node-a"],
+      topological_order: ["node-a", "node-b"],
+      levels: [["node-a"], ["node-b"]],
+      node_count: 2,
+      edge_count: 1,
+    };
+    const dryRun = {
+      id: "run-1",
+      graph_id: "flow-1",
+      version_no: 1,
+      status: "completed",
+      dry_run: true,
+      retry_node_id: null,
+      error_message: "",
+      result: { validation, steps: [] },
+      usage: {},
+      started_at: now,
+      completed_at: now,
+      created_at: now,
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.0.0" });
+      if (url.endsWith("/flows/validate") && init?.method === "POST") return json(validation);
+      if (url.endsWith("/flows/flow-1/dry-run") && init?.method === "POST") return json(dryRun, 201);
+      if (url.includes("/flows/flow-1/runs")) return json([]);
+      if (url.endsWith("/flows/flow-1/versions")) return json([]);
+      if (url.endsWith("/flows/flow-1")) return json(flow);
+      if (url.endsWith("/flows")) return json([flow]);
+      if (url.endsWith("/projects")) return json([{ id: "project-1", name: "AgentBench" }]);
+      if (url.endsWith("/mcp-servers")) return json([]);
+      return json([]);
+    });
+    render(<MemoryRouter><AgentFlow /></MemoryRouter>);
+
+    expect(await screen.findByText(/2 NODES/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /条件分支/ }));
+    expect(await screen.findByText(/3 NODES/)).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle("撤销 Ctrl+Z"));
+    expect(await screen.findByText(/2 NODES/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Dry Run" }));
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith("/flows/validate") && init?.method === "POST")).toBe(true);
+      expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith("/flows/flow-1/dry-run") && init?.method === "POST")).toBe(true);
+    });
+  });
+
   it("edits persisted MCP servers and exposes the real browser console", async () => {
     const server = { id: "mcp-1", name: "Playwright MCP", transport: "stdio", command: "npx", args: ["playwright"], url: null, env_keys: ["API_KEY"], tools: [], health_status: "unknown", last_error: null, last_checked_at: null, enabled: true, builtin: false, created_at: now, updated_at: now };
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "4.2.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.0.0" });
       if (url.endsWith("/mcp-servers/mcp-1") && init?.method === "PATCH") return json(server);
       if (url.endsWith("/mcp-servers")) return json([server]);
       if (url.endsWith("/tools/status")) return json([

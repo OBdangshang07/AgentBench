@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -166,6 +167,127 @@ def create_project(service: EvaluationService, root: Path, name: str = "Studio p
     )
 
 
+def test_control_center_only_lists_active_sessions_and_surfaces_failures(
+    settings, tmp_path
+) -> None:
+    with TestClient(create_app(settings)) as client:
+        service = client.app.state.service
+        project = create_project(service, tmp_path / "dashboard-project")
+        running = service.studio.create_session(
+            SessionCreate(project_id=project["id"], title="Still running")
+        )
+        failed = service.studio.create_session(
+            SessionCreate(project_id=project["id"], title="Needs attention")
+        )
+        service.database.execute(
+            "UPDATE agent_sessions SET status='running' WHERE id=?", (running["id"],)
+        )
+        service.database.execute(
+            "UPDATE agent_sessions SET status='failed' WHERE id=?", (failed["id"],)
+        )
+
+        response = client.get("/api/v1/studio/dashboard")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert [item["id"] for item in payload["active_sessions_list"]] == [running["id"]]
+        assert payload["recent_failures"][0]["id"] == failed["id"]
+        assert payload["runtime_health"]["models_enabled"] >= 1
+        assert payload["runtime_health"]["runners_enabled"] >= 1
+
+
+def test_diagnostics_export_is_downloadable_and_excludes_private_content(
+    settings, tmp_path
+) -> None:
+    with TestClient(create_app(settings)) as client:
+        service = client.app.state.service
+        project = create_project(service, tmp_path / "diagnostics-project")
+        session = service.studio.create_session(
+            SessionCreate(project_id=project["id"], title="Diagnostic session")
+        )
+        service.database.execute(
+            "INSERT INTO session_messages(id,session_id,role,content,metadata_json,created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            ("private-message", session["id"], "user", "TOP SECRET PROMPT", "{}", "2026-01-01T00:00:00Z"),
+        )
+
+        response = client.get("/api/v1/system/diagnostics")
+
+        assert response.status_code == 200
+        assert response.headers["content-disposition"].startswith("attachment;")
+        assert response.json()["database"] == {"schema_version": 10, "quick_check": "ok"}
+        assert "TOP SECRET PROMPT" not in response.text
+        assert "prompts" in response.json()["privacy"]
+
+
+def test_session_detail_pages_messages_on_the_server(settings, tmp_path) -> None:
+    with TestClient(create_app(settings)) as client:
+        service = client.app.state.service
+        project = create_project(service, tmp_path / "long-session-project")
+        session = service.studio.create_session(
+            SessionCreate(project_id=project["id"], title="Long conversation")
+        )
+        service.database.executemany(
+            "INSERT INTO session_messages(id,session_id,role,content,metadata_json,created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            [
+                (
+                    f"message-{index:03d}",
+                    session["id"],
+                    "user" if index % 2 == 0 else "assistant",
+                    f"message {index}",
+                    "{}",
+                    f"2026-01-01T00:{index // 60:02d}:{index % 60:02d}Z",
+                )
+                for index in range(250)
+            ],
+        )
+
+        response = client.get(
+            f"/api/v1/sessions/{session['id']}?message_limit=120"
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["message_count"] == 250
+        assert payload["messages_truncated"] is True
+        assert len(payload["messages"]) == 120
+        assert payload["messages"][0]["content"] == "message 130"
+        assert payload["messages"][-1]["content"] == "message 249"
+
+
+def test_workspace_search_finds_operational_entities_without_benchmarks(settings, tmp_path) -> None:
+    app = create_app(settings)
+    with TestClient(app) as client:
+        service = app.state.service
+        project = create_project(service, tmp_path / "search-workspace", "Aurora workspace")
+        session = service.studio.create_session(
+            SessionCreate(project_id=project["id"], title="Aurora migration session")
+        )
+        task = service.studio.create_task(
+            TaskItemCreate(project_id=project["id"], title="Aurora release task")
+        )
+        flow = service.studio.create_graph(
+            TaskGraphCreate(
+                project_id=project["id"],
+                name="Aurora review flow",
+                nodes=[{"id": "review", "type": "agent", "name": "Review"}],
+            )
+        )
+
+        response = client.get("/api/v1/studio/search", params={"query": "Aurora"})
+        assert response.status_code == 200
+        results = response.json()
+        assert {(item["kind"], item["id"]) for item in results} >= {
+            ("project", project["id"]),
+            ("session", session["id"]),
+            ("task", task["id"]),
+            ("flow", flow["id"]),
+        }
+        assert all(item["path"].startswith(("/projects", "/studio", "/tasks", "/flows")) for item in results)
+        assert service.studio.search_workspace("   ") == []
+
+
 def test_v4_schema_keeps_benchmarks_separate_from_studio(settings) -> None:
     service = EvaluationService(settings)
     try:
@@ -191,7 +313,32 @@ def test_v4_schema_keeps_benchmarks_separate_from_studio(settings) -> None:
             "mcp_servers",
         } <= tables
         assert {"experiments", "runs", "run_events", "test_cases"} <= tables
-        assert service.database.fetch_one("SELECT version FROM schema_meta") == {"version": 8}
+        assert service.database.fetch_one("SELECT version FROM schema_meta") == {"version": 10}
+    finally:
+        service.close()
+
+
+def test_project_file_access_rejects_symlinks_that_leave_the_authorized_root(
+    settings, tmp_path
+) -> None:
+    service = EvaluationService(settings)
+    try:
+        root = tmp_path / "authorized-root"
+        project = create_project(service, root)
+        outside = tmp_path / "outside-secret.txt"
+        outside.write_text("must stay outside", encoding="utf-8")
+        link = root / "escape.txt"
+        try:
+            os.symlink(outside, link)
+        except OSError as exc:
+            pytest.skip(f"Symlink creation is unavailable on this Windows host: {exc}")
+
+        with pytest.raises(ValueError, match="project_path_escape"):
+            service.studio.read_project_file(project["id"], "escape.txt")
+        listed = service.studio.list_project_files(project["id"])
+        assert "escape.txt" not in {item["name"] for item in listed["entries"]}
+        searched = service.studio.search_project_files(project["id"], "escape")
+        assert searched["entries"] == []
     finally:
         service.close()
 
@@ -582,6 +729,19 @@ def test_tasks_graphs_and_mcp_definitions_are_real_local_records(settings, tmp_p
         )
         assert task["status"] == "backlog"
         assert service.studio.list_tasks(project["id"])[0]["id"] == task["id"]
+        dependent = service.studio.create_task(
+            TaskItemCreate(
+                project_id=project["id"],
+                title="Run after implementation",
+                runner_id=UNIFIED_RUNNER_ID,
+                model_id=MOCK_MODEL_ID,
+                depends_on=[task["id"]],
+            )
+        )
+        with pytest.raises(ValueError, match="task_dependencies_incomplete"):
+            service.start_task(dependent["id"])
+        with pytest.raises(ValueError, match="task_dependency_cycle"):
+            service.studio.update_task(task["id"], {"depends_on": [dependent["id"]]})
 
         graph = service.studio.create_graph(
             TaskGraphCreate(
@@ -655,6 +815,37 @@ def test_flow_mcp_skill_and_browser_management_apis_are_mutable(settings, tmp_pa
         ).json()
         assert edited["name"] == "Edited API flow"
         assert len(edited["nodes"]) == 2
+        validation = client.get(f"/api/v1/flows/{flow['id']}/validation").json()
+        assert validation["valid"] is True
+        assert validation["topological_order"]
+        draft_validation = client.post(
+            "/api/v1/flows/validate",
+            json={
+                "project_id": project["id"],
+                "name": "Invalid draft",
+                "nodes": [
+                    {"id": "tool", "type": "tool", "name": "Missing MCP", "config": {}}
+                ],
+            },
+        ).json()
+        assert draft_validation["valid"] is False
+        assert {item["code"] for item in draft_validation["errors"]} >= {
+            "tool_server_required",
+            "tool_name_required",
+        }
+        versions = client.get(f"/api/v1/flows/{flow['id']}/versions").json()
+        assert [item["version_no"] for item in versions] == [2, 1]
+        dry_run = client.post(f"/api/v1/flows/{flow['id']}/dry-run").json()
+        assert dry_run["dry_run"] is True
+        assert dry_run["status"] == "completed"
+        assert dry_run["result"]["steps"]
+        runs = client.get(f"/api/v1/flows/{flow['id']}/runs").json()
+        assert runs[0]["id"] == dry_run["id"]
+        restored = client.post(
+            f"/api/v1/flows/{flow['id']}/versions/1/restore"
+        ).json()
+        assert restored["name"] == "API flow"
+        assert len(restored["nodes"]) == 1
 
         mcp = client.post(
             "/api/v1/mcp-servers",

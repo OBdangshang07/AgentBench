@@ -293,7 +293,8 @@ body { overflow: hidden; color: var(--ab-paper); background: var(--ab-ink); font
 .ab-settings-index strong { display: block; font-size: 9px; }
 .ab-settings-index small { display: block; margin-top: 3px; color: #566068; font-size: 7px; }
 .ab-settings-grid { min-height: 0; padding: 14px; overflow: auto; grid-template-columns: repeat(2, minmax(330px, 1fr)); gap: 10px; align-content: start; background: #0d1014; }
-.ab-settings-grid > .card { scroll-margin-top: 12px; overflow: hidden; border: 1px solid var(--ab-line); border-radius: 9px; color: var(--ab-paper); background: #0e1217; box-shadow: none; }
+.ab-settings-column { min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.ab-settings-grid > .ab-settings-column > .card { scroll-margin-top: 12px; overflow: hidden; border: 1px solid var(--ab-line); border-radius: 9px; color: var(--ab-paper); background: #0e1217; box-shadow: none; }
 .ab-settings-grid .card-header { border-color: var(--ab-line); }
 .ab-settings-grid .card-header h2 { color: #d9dcde; font-size: 12px; }
 .ab-settings-grid .section-kicker { color: var(--ab-acid); }
@@ -314,10 +315,12 @@ body { overflow: hidden; color: var(--ab-paper); background: var(--ab-ink); font
 .ab-settings-grid .field { color: #8b949b; }
 .ab-settings-grid .field input, .ab-settings-grid .field select, .ab-settings-grid .field textarea { border-color: #2d353e; color: #b8bec2; background: #12171d; }
 .ab-settings-view > .success-banner { position: absolute; z-index: 8; right: 20px; top: 80px; margin: 0; border: 1px solid #2b4237; color: #82dcb7; background: #101a16; }
-.ab-settings-grid > #runtime { grid-column: 1; grid-row: 1 / span 3; }
-.ab-settings-grid > #native { grid-column: 2; grid-row: 1; }
-.ab-settings-grid > #judge { grid-column: 2; grid-row: 2; }
-.ab-settings-grid > #data { grid-column: 2; grid-row: 3; }
+.ab-settings-view > .settings-message { position: absolute; z-index: 8; right: 20px; top: 80px; margin: 0; max-width: min(520px, calc(100vw - 40px)); border-color: #64363d; color: #f6a4aa; background: #211215; }
+
+@media (max-width: 1200px) {
+  .ab-settings-body { grid-template-columns: 184px minmax(0, 1fr); }
+  .ab-settings-grid { grid-template-columns: 1fr; }
+}
 
 .ab-experiment-detail-scroll { height: calc(100% - 72px); min-height: 0; padding: 14px; overflow: auto; background: #0d1014; }
 .ab-experiment-detail-scroll .balanced-score-strip { margin: 0 0 10px; padding: 10px 13px; border: 1px solid #324025; border-radius: 8px; color: #aab58a; background: #11170f; }

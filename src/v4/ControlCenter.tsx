@@ -2,13 +2,16 @@ import {
   ArrowRight,
   Bot,
   Check,
+  CircleAlert,
   Clock3,
   Coins,
+  Cpu,
   FolderKanban,
   GitFork,
   Play,
   ShieldAlert,
   Sparkles,
+  Unplug,
   X,
   Zap,
 } from "lucide-react";
@@ -54,7 +57,7 @@ export default function ControlCenter() {
       <section className="v4-command-grid">
         <article className="v4-panel v4-hero-panel">
           <div className="v4-hero-copy">
-            <span><i />Agent Runtime 4.0 Preview</span>
+            <span><i />Agent Runtime 5.0</span>
             <h2>把所有 Agent 放进一个<br /><em>真正可操作的工作台。</em></h2>
             <p>在统一界面中对话、审阅文件、批准命令、观察终端，并把任务交给不同 Agent 协同完成。</p>
             <div><Link className="v4-button primary" to="/studio"><Play size={16} />进入 Agent Studio</Link><Link className="v4-button secondary" to="/projects"><FolderKanban size={16} />选择项目</Link><small><b>{data?.active_sessions ?? 0} 个</b> Agent 正在本机运行</small></div>
@@ -62,7 +65,7 @@ export default function ControlCenter() {
           <div className="v4-orbit" aria-hidden="true"><i /><b /><em /><span /></div>
         </article>
 
-        <article className="v4-panel v4-approval-panel">
+        <article className="v4-panel v4-approval-panel" id="pending-approvals">
           <header className="v4-panel-head"><div><strong>待你处理</strong><small>{data?.pending_approvals ?? 0} 个权限请求</small></div><span className="v4-status amber"><i />REVIEW</span></header>
           {data?.pending_approvals_list?.length ? (
             <div className="v4-approval-list">
@@ -106,11 +109,36 @@ export default function ControlCenter() {
           <header className="v4-panel-head"><div><strong>最近项目</strong><small>已授权的本地工作区</small></div><Link to="/projects">全部项目 <ArrowRight size={14} /></Link></header>
           <div className="v4-project-strip">
             {data?.recent_projects?.slice(0, 2).map((project) => (
-              <button key={project.id} type="button" onClick={() => navigate(`/projects?project=${project.id}`)}>
+              <button key={project.id} type="button" onClick={() => navigate(`/projects/${project.id}`)}>
                 <span><FolderKanban size={18} /></span><strong>{project.name}</strong><small>{project.branch || "local"}</small><p>{project.description || project.root_path}</p><footer><b>{project.session_count} 会话</b><time>{relativeTime(project.last_opened_at)}</time></footer>
               </button>
             ))}
             {!data?.recent_projects?.length && <div className="v4-empty compact"><FolderKanban size={22} /><strong>还没有项目</strong><span>添加本地目录后即可交给 Agent 操作</span></div>}
+          </div>
+        </article>
+      </section>
+
+      <section className="v5-observability-grid">
+        <article className="v4-panel v5-runtime-health">
+          <header className="v4-panel-head"><div><strong>运行环境摘要</strong><small>模型、Agent 与 MCP 配置状态</small></div><Link to="/models">管理运行时 <ArrowRight size={14} /></Link></header>
+          <div className="v5-health-grid">
+            <Link to="/models"><Cpu size={18} /><span><strong>{data?.runtime_health?.models_enabled ?? 0} 个模型</strong><small>可供 Studio、Flow 与测评选择</small></span><i className={(data?.runtime_health?.models_enabled ?? 0) > 0 ? "healthy" : "warning"} /></Link>
+            <Link to="/models"><Bot size={18} /><span><strong>{data?.runtime_health?.runners_enabled ?? 0} 个 Agent</strong><small>进入运行时页可执行真实能力检测</small></span><i className={(data?.runtime_health?.runners_enabled ?? 0) > 0 ? "healthy" : "warning"} /></Link>
+            <Link to="/tools"><Unplug size={18} /><span><strong>{data?.runtime_health?.mcp_healthy ?? 0} / {data?.runtime_health?.mcp_enabled ?? 0} MCP 健康</strong><small>{(data?.runtime_health?.mcp_error ?? 0) > 0 ? `${data?.runtime_health?.mcp_error} 个连接需要处理` : "工具连接没有已知错误"}</small></span><i className={(data?.runtime_health?.mcp_error ?? 0) > 0 ? "danger" : (data?.runtime_health?.mcp_enabled ?? 0) > 0 ? "healthy" : "muted"} /></Link>
+          </div>
+        </article>
+
+        <article className="v4-panel v5-recent-failures">
+          <header className="v4-panel-head"><div><strong>最近需要关注</strong><small>失败或因重启中断的 Agent 会话</small></div><Link to="/studio">全部会话 <ArrowRight size={14} /></Link></header>
+          <div className="v5-failure-list">
+            {data?.recent_failures?.length ? data.recent_failures.map((failure) => (
+              <button key={failure.id} type="button" onClick={() => navigate(`/studio/${failure.id}`)}>
+                <CircleAlert size={17} />
+                <span><strong>{failure.title}</strong><small>{failure.project_name} · {failure.runner_name || "Agent"} · {relativeTime(failure.updated_at)}</small></span>
+                <p>{failure.error_message || (failure.status === "interrupted" ? "应用退出时任务仍在运行，可打开会话继续处理。" : "会话执行失败，打开查看公开进度与错误详情。")}</p>
+                <ArrowRight size={14} />
+              </button>
+            )) : <div className="v4-empty compact"><Check size={22} /><strong>最近没有 Agent 失败</strong><span>失败和意外中断会集中显示在这里</span></div>}
           </div>
         </article>
       </section>

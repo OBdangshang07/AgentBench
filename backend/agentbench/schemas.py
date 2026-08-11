@@ -200,6 +200,13 @@ class SessionUpdate(BaseModel):
     archived: bool | None = None
 
 
+class SessionForkCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, min_length=1, max_length=180)
+    through_message_id: str | None = None
+
+
 class SessionTurnCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -294,6 +301,9 @@ class TaskItemCreate(BaseModel):
     priority: Literal["low", "normal", "high", "urgent"] = "normal"
     runner_id: str | None = None
     model_id: str | None = None
+    due_at: str | None = Field(default=None, max_length=80)
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    depends_on: list[str] = Field(default_factory=list, max_length=50)
 
 
 class TaskItemUpdate(BaseModel):
@@ -301,10 +311,15 @@ class TaskItemUpdate(BaseModel):
 
     title: str | None = Field(default=None, min_length=1, max_length=180)
     description: str | None = Field(default=None, max_length=4000)
-    status: Literal["backlog", "queued", "running", "approval", "completed", "failed"] | None = None
+    project_id: str | None = None
+    status: Literal["backlog", "queued", "running", "approval", "completed", "failed", "cancelled"] | None = None
     priority: Literal["low", "normal", "high", "urgent"] | None = None
     runner_id: str | None = None
     model_id: str | None = None
+    due_at: str | None = Field(default=None, max_length=80)
+    tags: list[str] | None = Field(default=None, max_length=20)
+    depends_on: list[str] | None = Field(default=None, max_length=50)
+    archived: bool | None = None
 
 
 class McpServerCreate(BaseModel):

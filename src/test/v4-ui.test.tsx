@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 
 const systemStatus = {
-  version: "4.2.0",
+  version: "5.0.0",
   data_dir: "C:/AgentBench",
   database: { path: "C:/AgentBench/agentbench.db", ready: true },
   docker: { installed: true, available: true, executable: "docker" },
@@ -67,7 +67,7 @@ describe("AgentBench V4 application shell", () => {
   it("renders the real Agent operations navigation and control center", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "4.2.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.0.0" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       return json([]);
@@ -80,14 +80,14 @@ describe("AgentBench V4 application shell", () => {
     expect(screen.getByText("Agent Flow")).toBeInTheDocument();
     expect(screen.getByText("工具与 MCP")).toBeInTheDocument();
     expect(screen.getByText(/把所有 Agent 放进一个/)).toBeInTheDocument();
-    expect(screen.getByText(/42\.8万|428K/)).toBeInTheDocument();
+    expect(await screen.findByText(/42\.8万|428K/)).toBeInTheDocument();
   });
 
   it("creates an authorized local project through the V4 form", async () => {
     let posted: Record<string, unknown> | null = null;
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "4.2.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.0.0" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       if (url.endsWith("/runners")) return json([runner]);

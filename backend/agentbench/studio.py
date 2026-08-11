@@ -20,6 +20,7 @@ from .schemas import (
     ProjectRootCreate,
     SessionAttachmentImport,
     SessionCreate,
+    SessionForkCreate,
     SessionTurnCreate,
     SkillPackCreate,
     TaskGraphCreate,
@@ -130,6 +131,22 @@ class StudioService:
                 "UPDATE agent_sessions SET status='interrupted',updated_at=?,completed_at=? "
                 "WHERE status IN ('queued','preparing','running','waiting_approval')",
                 (now, now),
+            )
+            connection.execute(
+                "UPDATE task_nodes SET status='failed',error_message='AgentBench exited while this flow was active',"
+                "updated_at=? WHERE status IN ('running','retrying','waiting_approval')",
+                (now,),
+            )
+            connection.execute(
+                "UPDATE task_graphs SET status='interrupted',updated_at=?,completed_at=? "
+                "WHERE status IN ('running','waiting_approval','cancelling')",
+                (now, now),
+            )
+            connection.execute(
+                "UPDATE task_graph_runs SET status='interrupted',"
+                "error_message='AgentBench exited while this flow was active',completed_at=? "
+                "WHERE status='running'",
+                (now,),
             )
         for row in active:
             self.append_event(
@@ -357,6 +374,111 @@ class StudioService:
         elif int(active["count"]):
             raise ValueError("project_has_active_sessions")
         return self.update_project(project_id, {"archived": True})
+
+    def project_health(self, project_id: str) -> dict[str, Any]:
+        project = self.get_project(project_id)
+        root = Path(project["root_path"])
+        runner = self.database.fetch_one(
+            "SELECT id,name,enabled FROM agent_runners WHERE id=?",
+            (project.get("default_runner_id"),),
+        )
+        model = self.database.fetch_one(
+            "SELECT id,name,enabled FROM models WHERE id=?",
+            (project.get("default_model_id"),),
+        )
+        checks = [
+            {
+                "id": "root",
+                "label": "项目目录",
+                "ok": root.is_dir(),
+                "detail": str(root),
+            },
+            {
+                "id": "read",
+                "label": "读取权限",
+                "ok": root.is_dir() and os.access(root, os.R_OK),
+                "detail": "目录可读取" if root.is_dir() and os.access(root, os.R_OK) else "目录不可读取",
+            },
+            {
+                "id": "write",
+                "label": "写入权限",
+                "ok": project["permission_profile"] == "readonly" or (root.is_dir() and os.access(root, os.W_OK)),
+                "detail": "只读配置" if project["permission_profile"] == "readonly" else "目录可写" if root.is_dir() and os.access(root, os.W_OK) else "目录不可写",
+            },
+            {
+                "id": "runner",
+                "label": "默认 Agent",
+                "ok": bool(runner and runner["enabled"]),
+                "detail": runner["name"] if runner else "未配置",
+            },
+            {
+                "id": "model",
+                "label": "默认模型",
+                "ok": bool(model and model["enabled"]),
+                "detail": model["name"] if model else "未配置",
+            },
+            {
+                "id": "git",
+                "label": "Git 工作区",
+                "ok": bool(project.get("branch")) or shutil.which("git") is not None,
+                "detail": project.get("branch") or ("Git 可用，当前目录未初始化仓库" if shutil.which("git") else "未检测到 Git"),
+            },
+        ]
+        return {
+            "project_id": project_id,
+            "ready": all(item["ok"] for item in checks if item["id"] != "git"),
+            "checks": checks,
+            "checked_at": utc_now(),
+        }
+
+    def search_workspace(self, query: str, limit: int = 30) -> list[dict[str, Any]]:
+        """Search the operational workspace without mixing in benchmark history."""
+        needle = query.strip()
+        if not needle:
+            return []
+        pattern = f"%{needle}%"
+        per_kind = max(3, min(20, limit))
+        results: list[dict[str, Any]] = []
+
+        for row in self.database.fetch_all(
+            "SELECT p.id,p.name title,p.description subtitle,p.updated_at,NULL status,"
+            "pr.root_path extra FROM projects p "
+            "LEFT JOIN project_roots pr ON pr.project_id=p.id AND pr.is_primary=1 "
+            "WHERE p.archived=0 AND (p.name LIKE ? OR p.description LIKE ? OR pr.root_path LIKE ?) "
+            "ORDER BY p.pinned DESC,COALESCE(p.last_opened_at,p.updated_at) DESC LIMIT ?",
+            (pattern, pattern, pattern, per_kind),
+        ):
+            results.append({**row, "kind": "project", "path": f"/projects/{row['id']}"})
+
+        for row in self.database.fetch_all(
+            "SELECT s.id,s.title,COALESCE(s.summary,'') subtitle,s.updated_at,s.status,p.name extra "
+            "FROM agent_sessions s JOIN projects p ON p.id=s.project_id "
+            "WHERE s.archived=0 AND (s.title LIKE ? OR s.summary LIKE ? OR p.name LIKE ?) "
+            "ORDER BY s.updated_at DESC LIMIT ?",
+            (pattern, pattern, pattern, per_kind),
+        ):
+            results.append({**row, "kind": "session", "path": f"/studio/{row['id']}"})
+
+        for row in self.database.fetch_all(
+            "SELECT t.id,t.title,t.description subtitle,t.updated_at,t.status,p.name extra "
+            "FROM task_items t LEFT JOIN projects p ON p.id=t.project_id "
+            "WHERE t.title LIKE ? OR t.description LIKE ? OR p.name LIKE ? "
+            "ORDER BY t.updated_at DESC LIMIT ?",
+            (pattern, pattern, pattern, per_kind),
+        ):
+            results.append({**row, "kind": "task", "path": f"/tasks?task={row['id']}"})
+
+        for row in self.database.fetch_all(
+            "SELECT g.id,g.name title,g.description subtitle,g.updated_at,g.status,p.name extra "
+            "FROM task_graphs g LEFT JOIN projects p ON p.id=g.project_id "
+            "WHERE g.name LIKE ? OR g.description LIKE ? OR p.name LIKE ? "
+            "ORDER BY g.updated_at DESC LIMIT ?",
+            (pattern, pattern, pattern, per_kind),
+        ):
+            results.append({**row, "kind": "flow", "path": f"/flows?flow={row['id']}"})
+
+        results.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
+        return results[: max(1, min(limit, 80))]
 
     def _primary_root(self, project_id: str) -> Path:
         row = self.database.fetch_one(
@@ -612,19 +734,39 @@ class StudioService:
         rows = self._session_query(where, tuple(params))[: max(1, min(limit, 1000))]
         return [self._session_summary(row) for row in rows]
 
-    def get_session(self, session_id: str) -> dict[str, Any]:
+    def get_session(self, session_id: str, message_limit: int | None = None) -> dict[str, Any]:
         rows = self._session_query("WHERE s.id=?", (session_id,))
         if not rows:
             raise KeyError("session_not_found")
         output = self._session_summary(rows[0])
-        messages = self.database.fetch_all(
-            "SELECT id,turn_id,role,content,metadata_json,created_at FROM session_messages "
-            "WHERE session_id=? ORDER BY created_at,id",
-            (session_id,),
+        message_count = int(
+            (
+                self.database.fetch_one(
+                    "SELECT COUNT(*) count FROM session_messages WHERE session_id=?",
+                    (session_id,),
+                )
+                or {}
+            ).get("count", 0)
         )
+        if message_limit is None:
+            messages = self.database.fetch_all(
+                "SELECT id,turn_id,role,content,metadata_json,created_at FROM session_messages "
+                "WHERE session_id=? ORDER BY created_at,id",
+                (session_id,),
+            )
+        else:
+            limit = max(20, min(int(message_limit), 2000))
+            messages = self.database.fetch_all(
+                "SELECT * FROM (SELECT id,turn_id,role,content,metadata_json,created_at "
+                "FROM session_messages WHERE session_id=? ORDER BY created_at DESC,id DESC LIMIT ?) "
+                "ORDER BY created_at,id",
+                (session_id, limit),
+            )
         for message in messages:
             message["metadata"] = _json(message.pop("metadata_json"), {})
         output["messages"] = messages
+        output["message_count"] = message_count
+        output["messages_truncated"] = len(messages) < message_count
         output["events"] = self.get_events(session_id, max(0, self._latest_seq(session_id) - 300))
         output["approvals"] = self.list_approvals(session_id=session_id)
         output["turns"] = self.database.fetch_all(
@@ -687,6 +829,58 @@ class StudioService:
                     ),
                 )
         return self.get_session(session_id)
+
+    def fork_session(self, session_id: str, value: SessionForkCreate) -> dict[str, Any]:
+        source = self.get_session(session_id)
+        selected: list[dict[str, Any]] = []
+        found_boundary = value.through_message_id is None
+        for message in source["messages"]:
+            selected.append(message)
+            if value.through_message_id and message["id"] == value.through_message_id:
+                found_boundary = True
+                break
+        if not found_boundary:
+            raise KeyError("session_message_not_found")
+        created = self.create_session(
+            SessionCreate(
+                project_id=source["project_id"],
+                runner_id=source["runner_id"],
+                model_id=source["model_id"],
+                title=value.title or f"{source['title']} · 分支",
+                permission_profile=source["permission_profile"],
+                reasoning_effort=source["reasoning_effort"],
+                skill_pack_id=source.get("skill_pack_id"),
+            )
+        )
+        now = utc_now()
+        with self.database.transaction() as connection:
+            for message in selected:
+                metadata = dict(message.get("metadata") or {})
+                metadata["forked_from"] = {"session_id": session_id, "message_id": message["id"]}
+                connection.execute(
+                    "INSERT INTO session_messages(id,session_id,turn_id,role,content,metadata_json,created_at) "
+                    "VALUES (?,?,NULL,?,?,?,?)",
+                    (
+                        new_id(),
+                        created["id"],
+                        message["role"],
+                        message["content"],
+                        json.dumps(metadata, ensure_ascii=False),
+                        now,
+                    ),
+                )
+        self.append_event(
+            created["id"],
+            "session.forked",
+            {"source_session_id": session_id, "message_count": len(selected)},
+        )
+        self.database.insert_audit(
+            "session.forked",
+            "session",
+            created["id"],
+            {"source_session_id": session_id, "message_count": len(selected)},
+        )
+        return self.get_session(created["id"])
 
     def import_session_attachments(
         self, session_id: str, value: SessionAttachmentImport
@@ -1229,11 +1423,14 @@ class StudioService:
             self._enabled_entity("agent_runners", value.runner_id)
         if value.model_id:
             self._enabled_entity("models", value.model_id)
+        for dependency_id in value.depends_on:
+            self.get_task(dependency_id)
         task_id = new_id()
         now = utc_now()
         self.database.execute(
             "INSERT INTO task_items(id,project_id,title,description,status,priority,runner_id,"
-            "model_id,created_at,updated_at) VALUES (?,?,?,?,'backlog',?,?,?,?,?)",
+            "model_id,due_at,tags_json,depends_on_json,created_at,updated_at) "
+            "VALUES (?,?,?,?,'backlog',?,?,?,?,?,?,?,?)",
             (
                 task_id,
                 value.project_id,
@@ -1242,6 +1439,9 @@ class StudioService:
                 value.priority,
                 value.runner_id,
                 value.model_id,
+                value.due_at,
+                json.dumps(sorted({item.strip() for item in value.tags if item.strip()}), ensure_ascii=False),
+                json.dumps(list(dict.fromkeys(value.depends_on)), ensure_ascii=False),
                 now,
                 now,
             ),
@@ -1251,48 +1451,121 @@ class StudioService:
 
     def get_task(self, task_id: str) -> dict[str, Any]:
         row = self.database.fetch_one(
-            "SELECT t.*,p.name project_name,r.name runner_name,m.name model_name "
+            "SELECT t.*,p.name project_name,r.name runner_name,m.name model_name,s.status session_status "
             "FROM task_items t LEFT JOIN projects p ON p.id=t.project_id "
             "LEFT JOIN agent_runners r ON r.id=t.runner_id LEFT JOIN models m ON m.id=t.model_id "
+            "LEFT JOIN agent_sessions s ON s.id=t.session_id "
             "WHERE t.id=?",
             (task_id,),
         )
         if not row:
             raise KeyError("task_not_found")
-        return row
+        return self._task_summary(row)
 
-    def list_tasks(self, project_id: str | None = None) -> list[dict[str, Any]]:
-        where = "WHERE t.project_id=?" if project_id else ""
-        params: tuple[Any, ...] = (project_id,) if project_id else ()
-        return self.database.fetch_all(
-            "SELECT t.*,p.name project_name,r.name runner_name,m.name model_name "
+    @staticmethod
+    def _task_summary(row: dict[str, Any]) -> dict[str, Any]:
+        output = dict(row)
+        session_status = output.pop("session_status", None)
+        if output.get("status") == "running" and session_status == "waiting_approval":
+            output["status"] = "approval"
+        output["tags"] = _json(output.pop("tags_json", "[]"), [])
+        output["depends_on"] = _json(output.pop("depends_on_json", "[]"), [])
+        output["archived"] = bool(output.get("archived"))
+        return output
+
+    def _validate_task_dependencies(self, task_id: str, dependencies: list[str]) -> None:
+        if task_id in dependencies:
+            raise ValueError("task_cannot_depend_on_itself")
+        queue = list(dependencies)
+        visited: set[str] = set()
+        while queue:
+            dependency_id = queue.pop(0)
+            if dependency_id == task_id:
+                raise ValueError("task_dependency_cycle")
+            if dependency_id in visited:
+                continue
+            visited.add(dependency_id)
+            dependency = self.get_task(dependency_id)
+            queue.extend(str(item) for item in dependency.get("depends_on") or [])
+
+    def list_tasks(self, project_id: str | None = None, include_archived: bool = False) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if project_id:
+            clauses.append("t.project_id=?")
+            params.append(project_id)
+        if not include_archived:
+            clauses.append("t.archived=0")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.database.fetch_all(
+            "SELECT t.*,p.name project_name,r.name runner_name,m.name model_name,s.status session_status "
             "FROM task_items t LEFT JOIN projects p ON p.id=t.project_id "
             "LEFT JOIN agent_runners r ON r.id=t.runner_id LEFT JOIN models m ON m.id=t.model_id "
+            "LEFT JOIN agent_sessions s ON s.id=t.session_id "
             f"{where} ORDER BY CASE t.status WHEN 'running' THEN 0 WHEN 'approval' THEN 1 "
             "WHEN 'queued' THEN 2 WHEN 'backlog' THEN 3 ELSE 4 END,t.updated_at DESC",
-            params,
+            tuple(params),
         )
+        return [self._task_summary(row) for row in rows]
 
     def update_task(self, task_id: str, changes: dict[str, Any]) -> dict[str, Any]:
         self.get_task(task_id)
-        allowed = {"title", "description", "status", "priority", "runner_id", "model_id"}
+        allowed = {"project_id", "title", "description", "status", "priority", "runner_id", "model_id", "due_at", "tags", "depends_on", "archived"}
         values = {key: value for key, value in changes.items() if key in allowed}
+        if "project_id" in values and values["project_id"]:
+            self.get_project(values["project_id"])
         if "runner_id" in values and values["runner_id"]:
             self._enabled_entity("agent_runners", values["runner_id"])
         if "model_id" in values and values["model_id"]:
             self._enabled_entity("models", values["model_id"])
+        if "tags" in values:
+            values["tags_json"] = json.dumps(
+                sorted({str(item).strip() for item in values.pop("tags") if str(item).strip()}),
+                ensure_ascii=False,
+            )
+        if "depends_on" in values:
+            dependencies = list(dict.fromkeys(str(item) for item in values.pop("depends_on")))
+            self._validate_task_dependencies(task_id, dependencies)
+            values["depends_on_json"] = json.dumps(dependencies, ensure_ascii=False)
+        if "archived" in values:
+            values["archived"] = int(bool(values["archived"]))
         if not values:
             return self.get_task(task_id)
         now = utc_now()
         values["updated_at"] = now
         if values.get("status") == "completed":
             values["completed_at"] = now
+            values["cancelled_at"] = None
+        elif values.get("status") == "cancelled":
+            values["cancelled_at"] = now
+            values["completed_at"] = None
         assignments = ",".join(f"{key}=?" for key in values)
         self.database.execute(
             f"UPDATE task_items SET {assignments} WHERE id=?", (*values.values(), task_id)
         )
         self.database.insert_audit("task.updated", "task", task_id, changes)
         return self.get_task(task_id)
+
+    def duplicate_task(self, task_id: str) -> dict[str, Any]:
+        source = self.get_task(task_id)
+        created = self.create_task(
+            TaskItemCreate(
+                project_id=source.get("project_id"),
+                title=f"{source['title']} · 副本",
+                description=source.get("description") or "",
+                priority=source.get("priority") or "normal",
+                runner_id=source.get("runner_id"),
+                model_id=source.get("model_id"),
+                due_at=source.get("due_at"),
+                tags=source.get("tags") or [],
+                depends_on=source.get("depends_on") or [],
+            )
+        )
+        self.database.execute(
+            "UPDATE task_items SET retry_of=? WHERE id=?", (task_id, created["id"])
+        )
+        self.database.insert_audit("task.duplicated", "task", created["id"], {"source": task_id})
+        return self.get_task(created["id"])
 
     def create_graph(self, value: TaskGraphCreate) -> dict[str, Any]:
         if value.project_id:
@@ -1315,7 +1588,415 @@ class StudioService:
             )
             self._insert_graph_definition(connection, graph_id, value.nodes, value.edges, now)
         self.database.insert_audit("task_graph.created", "task_graph", graph_id)
+        self.create_graph_version(graph_id, "初始版本")
         return self.get_graph(graph_id)
+
+    @staticmethod
+    def _graph_definition(graph: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "nodes": [
+                {
+                    "id": node["id"],
+                    "type": node["node_type"],
+                    "name": node["name"],
+                    "x": node["position_x"],
+                    "y": node["position_y"],
+                    "config": node.get("config") or {},
+                }
+                for node in graph["nodes"]
+            ],
+            "edges": [
+                {
+                    "source": edge["source_node_id"],
+                    "target": edge["target_node_id"],
+                    "condition": edge.get("condition") or {},
+                }
+                for edge in graph["edges"]
+            ],
+        }
+
+    @staticmethod
+    def _canonical_json(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    def create_graph_version(self, graph_id: str, label: str = "自动保存") -> dict[str, Any]:
+        graph = self.get_graph(graph_id)
+        definition = self._graph_definition(graph)
+        settings_json = self._canonical_json(graph.get("settings") or {})
+        definition_json = self._canonical_json(definition)
+        latest = self.database.fetch_one(
+            "SELECT * FROM task_graph_versions WHERE graph_id=? ORDER BY version_no DESC LIMIT 1",
+            (graph_id,),
+        )
+        if (
+            latest
+            and latest["name"] == graph["name"]
+            and latest["description"] == graph["description"]
+            and latest["settings_json"] == settings_json
+            and latest["definition_json"] == definition_json
+        ):
+            return self.get_graph_version(graph_id, int(latest["version_no"]))
+        version_no = int(latest["version_no"]) + 1 if latest else 1
+        version_id = new_id()
+        self.database.execute(
+            "INSERT INTO task_graph_versions(id,graph_id,version_no,label,name,description,"
+            "settings_json,definition_json,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                version_id,
+                graph_id,
+                version_no,
+                label[:180],
+                graph["name"],
+                graph["description"],
+                settings_json,
+                definition_json,
+                utc_now(),
+            ),
+        )
+        self.database.insert_audit(
+            "task_graph.version_created",
+            "task_graph",
+            graph_id,
+            {"version_no": version_no, "label": label[:180]},
+        )
+        return self.get_graph_version(graph_id, version_no)
+
+    @staticmethod
+    def _graph_version_summary(row: dict[str, Any]) -> dict[str, Any]:
+        value = dict(row)
+        value["settings"] = _json(value.pop("settings_json", "{}"), {})
+        value["definition"] = _json(value.pop("definition_json", "{}"), {})
+        return value
+
+    def get_graph_version(self, graph_id: str, version_no: int) -> dict[str, Any]:
+        row = self.database.fetch_one(
+            "SELECT * FROM task_graph_versions WHERE graph_id=? AND version_no=?",
+            (graph_id, version_no),
+        )
+        if not row:
+            raise KeyError("task_graph_version_not_found")
+        return self._graph_version_summary(row)
+
+    def list_graph_versions(self, graph_id: str) -> list[dict[str, Any]]:
+        self.get_graph(graph_id)
+        rows = self.database.fetch_all(
+            "SELECT * FROM task_graph_versions WHERE graph_id=? ORDER BY version_no DESC",
+            (graph_id,),
+        )
+        return [self._graph_version_summary(row) for row in rows]
+
+    def restore_graph_version(self, graph_id: str, version_no: int) -> dict[str, Any]:
+        graph = self.get_graph(graph_id)
+        if graph["status"] in {"running", "waiting_approval", "cancelling"}:
+            raise ValueError("active_flow_locked")
+        version = self.get_graph_version(graph_id, version_no)
+        definition = version["definition"]
+        now = utc_now()
+        with self.database.transaction() as connection:
+            connection.execute("DELETE FROM task_edges WHERE graph_id=?", (graph_id,))
+            connection.execute("DELETE FROM task_nodes WHERE graph_id=?", (graph_id,))
+            self._insert_graph_definition(
+                connection,
+                graph_id,
+                definition.get("nodes") or [],
+                definition.get("edges") or [],
+                now,
+            )
+            connection.execute(
+                "UPDATE task_graphs SET name=?,description=?,settings_json=?,status='draft',"
+                "updated_at=?,completed_at=NULL WHERE id=?",
+                (
+                    version["name"],
+                    version["description"],
+                    self._canonical_json(version["settings"]),
+                    now,
+                    graph_id,
+                ),
+            )
+        restored = self.create_graph_version(graph_id, f"恢复自 V{version_no}")
+        self.database.insert_audit(
+            "task_graph.version_restored",
+            "task_graph",
+            graph_id,
+            {"source_version": version_no, "new_version": restored["version_no"]},
+        )
+        return self.get_graph(graph_id)
+
+    def validate_graph_definition(
+        self,
+        *,
+        project_id: str | None,
+        settings: dict[str, Any],
+        nodes: list[dict[str, Any]],
+        edges: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        errors: list[dict[str, Any]] = []
+        warnings: list[dict[str, Any]] = []
+
+        def issue(collection: list[dict[str, Any]], code: str, message: str, node_id: str | None = None) -> None:
+            item: dict[str, Any] = {"code": code, "message": message}
+            if node_id:
+                item["node_id"] = node_id
+            collection.append(item)
+
+        if not nodes:
+            issue(errors, "flow_requires_node", "工作流至少需要一个节点")
+            return {
+                "valid": False,
+                "errors": errors,
+                "warnings": warnings,
+                "roots": [],
+                "topological_order": [],
+                "levels": [],
+                "node_count": 0,
+                "edge_count": len(edges),
+            }
+
+        allowed_types = {"agent", "approval", "condition", "tool"}
+        aliases: list[str] = []
+        node_map: dict[str, dict[str, Any]] = {}
+        for index, node in enumerate(nodes):
+            alias = str(node.get("id") or f"node-{index + 1}")
+            if alias in node_map:
+                issue(errors, "duplicate_graph_node_id", f"节点标识重复：{alias}", alias)
+                continue
+            aliases.append(alias)
+            node_map[alias] = node
+            node_type = str(node.get("type") or node.get("node_type") or "agent")
+            name = str(node.get("name") or "").strip()
+            config = node.get("config") if isinstance(node.get("config"), dict) else {}
+            if node_type not in allowed_types:
+                issue(errors, "invalid_graph_node_type", f"节点类型无效：{node_type}", alias)
+            if not name:
+                issue(errors, "flow_node_name_required", "节点名称不能为空", alias)
+            if node_type == "agent" and not str(config.get("prompt") or "").strip():
+                issue(warnings, "agent_prompt_empty", "Agent 节点尚未填写任务提示词", alias)
+            elif node_type == "approval" and not str(config.get("description") or "").strip():
+                issue(warnings, "approval_description_empty", "审批节点没有说明需要检查的内容", alias)
+            elif node_type == "condition" and not str(config.get("value") or "").strip():
+                issue(warnings, "condition_value_empty", "条件节点的比较值为空", alias)
+            elif node_type == "tool":
+                server_id = str(config.get("server_id") or "")
+                tool_name = str(config.get("tool_name") or "")
+                if not server_id:
+                    issue(errors, "tool_server_required", "MCP 工具节点必须选择 Server", alias)
+                if not tool_name:
+                    issue(errors, "tool_name_required", "MCP 工具节点必须选择工具", alias)
+                if server_id:
+                    try:
+                        server = self.get_mcp_server(server_id)
+                        if not server["enabled"]:
+                            issue(errors, "tool_server_disabled", f"MCP Server“{server['name']}”已禁用", alias)
+                        elif server["health_status"] == "offline":
+                            issue(warnings, "tool_server_offline", f"MCP Server“{server['name']}”当前离线", alias)
+                        if tool_name and server.get("tools") and tool_name not in {
+                            str(tool.get("name") or "") for tool in server["tools"]
+                        }:
+                            issue(warnings, "tool_not_discovered", f"尚未在 Server 中发现工具“{tool_name}”", alias)
+                    except KeyError:
+                        issue(errors, "tool_server_missing", "所选 MCP Server 已不存在", alias)
+
+        incoming: dict[str, list[str]] = {alias: [] for alias in aliases}
+        outgoing: dict[str, list[str]] = {alias: [] for alias in aliases}
+        seen_edges: set[tuple[str, str]] = set()
+        for edge in edges:
+            source = str(edge.get("source") or edge.get("source_node_id") or "")
+            target = str(edge.get("target") or edge.get("target_node_id") or "")
+            if source not in node_map or target not in node_map or source == target:
+                issue(errors, "invalid_graph_edge", "连线包含不存在的节点或指向节点自身")
+                continue
+            if (source, target) in seen_edges:
+                issue(errors, "duplicate_graph_edge", f"存在重复连线：{source} → {target}")
+                continue
+            seen_edges.add((source, target))
+            incoming[target].append(source)
+            outgoing[source].append(target)
+
+        indegree = {alias: len(incoming[alias]) for alias in aliases}
+        queue = [alias for alias in aliases if indegree[alias] == 0]
+        roots = list(queue)
+        topological: list[str] = []
+        levels: list[list[str]] = []
+        current = list(queue)
+        while current:
+            levels.append(current)
+            following: list[str] = []
+            for alias in current:
+                topological.append(alias)
+                for target in outgoing[alias]:
+                    indegree[target] -= 1
+                    if indegree[target] == 0:
+                        following.append(target)
+            current = following
+        if len(topological) != len(aliases):
+            issue(errors, "graph_cycle_not_allowed", "工作流存在循环依赖")
+        if len(roots) > 1:
+            issue(warnings, "multiple_flow_roots", f"工作流包含 {len(roots)} 个并行起点")
+        if len(nodes) > 1:
+            for alias in aliases:
+                if not incoming[alias] and not outgoing[alias]:
+                    issue(warnings, "isolated_flow_node", "节点未与工作流其他部分连接", alias)
+                node_type = str(node_map[alias].get("type") or node_map[alias].get("node_type") or "agent")
+                if node_type == "condition" and not outgoing[alias]:
+                    issue(warnings, "condition_has_no_branch", "条件节点没有下游分支", alias)
+
+        if any(str(node.get("type") or node.get("node_type") or "agent") in {"agent", "approval"} for node in nodes):
+            if not project_id:
+                issue(errors, "flow_project_required", "包含 Agent 或审批节点的工作流必须绑定项目")
+            else:
+                try:
+                    project = self.get_project(project_id)
+                    if not project.get("default_runner_id"):
+                        issue(errors, "flow_runner_required", "项目没有默认 Agent")
+                    if not project.get("default_model_id"):
+                        issue(errors, "flow_model_required", "项目没有默认模型")
+                except KeyError:
+                    issue(errors, "project_not_found", "工作流绑定的项目已不存在")
+
+        max_concurrency = int(settings.get("max_concurrency", 4) or 0)
+        if max_concurrency < 1 or max_concurrency > 8:
+            issue(errors, "invalid_flow_concurrency", "并发 Agent 必须在 1 到 8 之间")
+        if int(settings.get("max_retries", 1) or 0) < 0:
+            issue(errors, "invalid_flow_retries", "失败重试次数不能为负数")
+
+        return {
+            "valid": not errors,
+            "errors": errors,
+            "warnings": warnings,
+            "roots": roots,
+            "topological_order": topological,
+            "levels": levels,
+            "node_count": len(nodes),
+            "edge_count": len(seen_edges),
+        }
+
+    def validate_graph(self, graph_id: str) -> dict[str, Any]:
+        graph = self.get_graph(graph_id)
+        definition = self._graph_definition(graph)
+        return self.validate_graph_definition(
+            project_id=graph.get("project_id"),
+            settings=graph.get("settings") or {},
+            nodes=definition["nodes"],
+            edges=definition["edges"],
+        )
+
+    @staticmethod
+    def _graph_run_summary(row: dict[str, Any]) -> dict[str, Any]:
+        value = dict(row)
+        value["dry_run"] = bool(value.get("dry_run"))
+        value["result"] = _json(value.pop("result_json", "{}"), {})
+        value["usage"] = _json(value.pop("usage_json", "{}"), {})
+        return value
+
+    def create_graph_run(
+        self,
+        graph_id: str,
+        *,
+        status: str = "running",
+        dry_run: bool = False,
+        retry_node_id: str | None = None,
+        result: dict[str, Any] | None = None,
+        error_message: str = "",
+    ) -> dict[str, Any]:
+        self.get_graph(graph_id)
+        version = self.database.fetch_one(
+            "SELECT version_no FROM task_graph_versions WHERE graph_id=? ORDER BY version_no DESC LIMIT 1",
+            (graph_id,),
+        )
+        run_id = new_id()
+        now = utc_now()
+        completed_at = now if status in {"completed", "failed", "cancelled"} else None
+        self.database.execute(
+            "INSERT INTO task_graph_runs(id,graph_id,version_no,status,dry_run,retry_node_id,"
+            "error_message,result_json,usage_json,started_at,completed_at,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                run_id,
+                graph_id,
+                version.get("version_no") if version else None,
+                status,
+                int(dry_run),
+                retry_node_id,
+                error_message,
+                json.dumps(result or {}, ensure_ascii=False),
+                "{}",
+                now,
+                completed_at,
+                now,
+            ),
+        )
+        return self.get_graph_run(graph_id, run_id)
+
+    def get_graph_run(self, graph_id: str, run_id: str) -> dict[str, Any]:
+        row = self.database.fetch_one(
+            "SELECT * FROM task_graph_runs WHERE graph_id=? AND id=?",
+            (graph_id, run_id),
+        )
+        if not row:
+            raise KeyError("task_graph_run_not_found")
+        return self._graph_run_summary(row)
+
+    def list_graph_runs(self, graph_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        self.get_graph(graph_id)
+        rows = self.database.fetch_all(
+            "SELECT * FROM task_graph_runs WHERE graph_id=? ORDER BY created_at DESC LIMIT ?",
+            (graph_id, max(1, min(limit, 200))),
+        )
+        return [self._graph_run_summary(row) for row in rows]
+
+    def finish_graph_run(
+        self,
+        graph_id: str,
+        run_id: str,
+        *,
+        status: str,
+        error_message: str,
+        result: dict[str, Any],
+        usage: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.get_graph_run(graph_id, run_id)
+        self.database.execute(
+            "UPDATE task_graph_runs SET status=?,error_message=?,result_json=?,usage_json=?,"
+            "completed_at=? WHERE id=? AND graph_id=?",
+            (
+                status,
+                error_message,
+                json.dumps(result, ensure_ascii=False),
+                json.dumps(usage, ensure_ascii=False),
+                utc_now(),
+                run_id,
+                graph_id,
+            ),
+        )
+        return self.get_graph_run(graph_id, run_id)
+
+    def dry_run_graph(self, graph_id: str) -> dict[str, Any]:
+        graph = self.get_graph(graph_id)
+        validation = self.validate_graph(graph_id)
+        node_map = {node["id"]: node for node in graph["nodes"]}
+        steps = [
+            {
+                "wave": wave + 1,
+                "nodes": [
+                    {
+                        "id": node_id,
+                        "name": node_map[node_id]["name"],
+                        "type": node_map[node_id]["node_type"],
+                    }
+                    for node_id in node_ids
+                    if node_id in node_map
+                ],
+            }
+            for wave, node_ids in enumerate(validation["levels"])
+        ]
+        result = {"validation": validation, "steps": steps}
+        return self.create_graph_run(
+            graph_id,
+            status="completed" if validation["valid"] else "failed",
+            dry_run=True,
+            result=result,
+            error_message="" if validation["valid"] else "工作流静态验证未通过",
+        )
 
     @staticmethod
     def _insert_graph_definition(connection, graph_id: str, nodes: list[dict[str, Any]], edges: list[dict[str, Any]], now: str) -> None:
@@ -1421,6 +2102,7 @@ class StudioService:
                     (*values.values(), graph_id),
                 )
         self.database.insert_audit("task_graph.updated", "task_graph", graph_id)
+        self.create_graph_version(graph_id)
         return self.get_graph(graph_id)
 
     def delete_graph(self, graph_id: str) -> None:
@@ -1689,9 +2371,38 @@ class StudioService:
             "(SELECT COALESCE(SUM(tokens_input+tokens_output),0) FROM agent_sessions) total_tokens,"
             "(SELECT COALESCE(SUM(cost_usd),0) FROM agent_sessions) total_cost"
         ) or {}
+        active_rows = self._session_query(
+            "WHERE s.archived=0 AND s.status IN "
+            "('queued','preparing','running','waiting_approval')",
+            (),
+        )[:5]
+        recent_failures = self.database.fetch_all(
+            "SELECT s.id,s.title,s.status,s.updated_at,p.name project_name,"
+            "r.name runner_name,m.name model_name,"
+            "(SELECT st.error_message FROM session_turns st WHERE st.session_id=s.id "
+            "AND st.error_message IS NOT NULL AND st.error_message<>'' "
+            "ORDER BY st.turn_no DESC LIMIT 1) error_message "
+            "FROM agent_sessions s JOIN projects p ON p.id=s.project_id "
+            "LEFT JOIN agent_runners r ON r.id=s.runner_id "
+            "LEFT JOIN models m ON m.id=s.model_id "
+            "WHERE s.archived=0 AND s.status IN ('failed','interrupted') "
+            "ORDER BY s.updated_at DESC LIMIT 4"
+        )
+        runtime_health = self.database.fetch_one(
+            "SELECT "
+            "(SELECT COUNT(*) FROM models WHERE enabled=1) models_enabled,"
+            "(SELECT COUNT(*) FROM agent_runners WHERE enabled=1) runners_enabled,"
+            "(SELECT COUNT(*) FROM mcp_servers WHERE enabled=1) mcp_enabled,"
+            "(SELECT COUNT(*) FROM mcp_servers WHERE enabled=1 AND health_status='healthy') "
+            "mcp_healthy,"
+            "(SELECT COUNT(*) FROM mcp_servers WHERE enabled=1 AND health_status='error') "
+            "mcp_error"
+        ) or {}
         return {
             **row,
-            "active_sessions_list": self.list_sessions(limit=5),
+            "active_sessions_list": [self._session_summary(item) for item in active_rows],
             "pending_approvals_list": self.list_approvals(status="pending")[:5],
             "recent_projects": self.list_projects()[:6],
+            "recent_failures": recent_failures,
+            "runtime_health": runtime_health,
         }

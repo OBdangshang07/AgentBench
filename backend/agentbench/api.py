@@ -36,6 +36,7 @@ from .schemas import (
     RunnerCreate,
     SessionAttachmentImport,
     SessionCreate,
+    SessionForkCreate,
     SessionTurnCreate,
     SessionUpdate,
     SkillPackCreate,
@@ -129,6 +130,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def studio_dashboard(svc: Service) -> dict[str, Any]:
         return svc.studio.dashboard()
 
+    @app.get("/api/v1/studio/search")
+    def studio_search(
+        svc: Service,
+        query: str = Query(min_length=1, max_length=160),
+        limit: int = Query(default=30, ge=1, le=80),
+    ) -> list[dict[str, Any]]:
+        return svc.studio.search_workspace(query, limit)
+
     @app.get("/api/v1/projects")
     def projects(svc: Service, include_archived: bool = False) -> list[dict[str, Any]]:
         return svc.studio.list_projects(include_archived)
@@ -140,6 +149,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/v1/projects/{project_id}")
     def project(project_id: str, svc: Service) -> dict[str, Any]:
         return svc.studio.get_project(project_id)
+
+    @app.get("/api/v1/projects/{project_id}/health")
+    def project_health(project_id: str, svc: Service) -> dict[str, Any]:
+        return svc.studio.project_health(project_id)
 
     @app.patch("/api/v1/projects/{project_id}")
     def update_project(
@@ -197,14 +210,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return svc.studio.create_session(payload)
 
     @app.get("/api/v1/sessions/{session_id}")
-    def session(session_id: str, svc: Service) -> dict[str, Any]:
-        return svc.studio.get_session(session_id)
+    def session(
+        session_id: str,
+        svc: Service,
+        message_limit: int | None = Query(default=None, ge=20, le=2000),
+    ) -> dict[str, Any]:
+        return svc.studio.get_session(session_id, message_limit)
 
     @app.patch("/api/v1/sessions/{session_id}")
     def update_session(
         session_id: str, payload: SessionUpdate, svc: Service
     ) -> dict[str, Any]:
         return svc.studio.update_session(session_id, payload.model_dump(exclude_unset=True))
+
+    @app.post("/api/v1/sessions/{session_id}/fork", status_code=201)
+    def fork_session(
+        session_id: str, payload: SessionForkCreate, svc: Service
+    ) -> dict[str, Any]:
+        return svc.studio.fork_session(session_id, payload)
 
     @app.post("/api/v1/sessions/{session_id}/turns", status_code=202)
     def create_session_turn(
@@ -293,6 +316,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/v1/sessions/{session_id}/events/stream")
     async def session_event_stream(
         session_id: str,
+        request: Request,
         svc: Service,
         after: int = Query(default=0, ge=0),
     ) -> StreamingResponse:
@@ -302,22 +326,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             cursor = after
             idle_ticks = 0
             while True:
+                if await request.is_disconnected():
+                    break
                 events = svc.studio.get_events(session_id, cursor)
                 for item in events:
                     cursor = item["seq"]
                     yield f"id: {cursor}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
                     idle_ticks = 0
-                current = svc.database.fetch_one(
-                    "SELECT status FROM agent_sessions WHERE id=?", (session_id,)
-                )
-                if current and current["status"] in {
-                    "idle",
-                    "completed",
-                    "failed",
-                    "cancelled",
-                    "interrupted",
-                } and not events:
-                    break
                 idle_ticks += 1
                 if idle_ticks % 15 == 0:
                     yield ": keepalive\n\n"
@@ -340,8 +355,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return svc.studio.decide_approval(approval_id, payload)
 
     @app.get("/api/v1/tasks")
-    def tasks(svc: Service, project_id: str | None = None) -> list[dict[str, Any]]:
-        return svc.studio.list_tasks(project_id)
+    def tasks(
+        svc: Service,
+        project_id: str | None = None,
+        include_archived: bool = False,
+    ) -> list[dict[str, Any]]:
+        return svc.studio.list_tasks(project_id, include_archived)
 
     @app.post("/api/v1/tasks", status_code=201)
     def create_task(payload: TaskItemCreate, svc: Service) -> dict[str, Any]:
@@ -352,6 +371,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         task_id: str, payload: TaskItemUpdate, svc: Service
     ) -> dict[str, Any]:
         return svc.studio.update_task(task_id, payload.model_dump(exclude_unset=True))
+
+    @app.delete("/api/v1/tasks/{task_id}")
+    def archive_task(task_id: str, svc: Service) -> dict[str, Any]:
+        task = svc.studio.get_task(task_id)
+        if task["status"] in {"queued", "running", "approval"}:
+            raise ValueError("active_task_cannot_be_archived")
+        return svc.studio.update_task(task_id, {"archived": True})
+
+    @app.post("/api/v1/tasks/{task_id}/duplicate", status_code=201)
+    def duplicate_task(task_id: str, svc: Service) -> dict[str, Any]:
+        return svc.studio.duplicate_task(task_id)
 
     @app.post("/api/v1/tasks/{task_id}/start", status_code=202)
     def start_task(task_id: str, svc: Service) -> dict[str, Any]:
@@ -369,6 +399,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def create_flow(payload: TaskGraphCreate, svc: Service) -> dict[str, Any]:
         return svc.studio.create_graph(payload)
 
+    @app.post("/api/v1/flows/validate")
+    def validate_flow_draft(payload: TaskGraphCreate, svc: Service) -> dict[str, Any]:
+        return svc.studio.validate_graph_definition(
+            project_id=payload.project_id,
+            settings=payload.settings,
+            nodes=payload.nodes,
+            edges=payload.edges,
+        )
+
     @app.get("/api/v1/flows/{graph_id}")
     def flow(graph_id: str, svc: Service) -> dict[str, Any]:
         return svc.studio.get_graph(graph_id)
@@ -378,6 +417,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         graph_id: str, payload: TaskGraphUpdate, svc: Service
     ) -> dict[str, Any]:
         return svc.studio.update_graph(graph_id, payload)
+
+    @app.get("/api/v1/flows/{graph_id}/validation")
+    def validate_flow(graph_id: str, svc: Service) -> dict[str, Any]:
+        return svc.studio.validate_graph(graph_id)
+
+    @app.post("/api/v1/flows/{graph_id}/dry-run", status_code=201)
+    def dry_run_flow(graph_id: str, svc: Service) -> dict[str, Any]:
+        return svc.studio.dry_run_graph(graph_id)
+
+    @app.get("/api/v1/flows/{graph_id}/versions")
+    def flow_versions(graph_id: str, svc: Service) -> list[dict[str, Any]]:
+        return svc.studio.list_graph_versions(graph_id)
+
+    @app.post("/api/v1/flows/{graph_id}/versions/{version_no}/restore")
+    def restore_flow_version(graph_id: str, version_no: int, svc: Service) -> dict[str, Any]:
+        return svc.studio.restore_graph_version(graph_id, version_no)
+
+    @app.get("/api/v1/flows/{graph_id}/runs")
+    def flow_runs(
+        graph_id: str, svc: Service, limit: int = Query(default=50, ge=1, le=200)
+    ) -> list[dict[str, Any]]:
+        return svc.studio.list_graph_runs(graph_id, limit)
 
     @app.delete("/api/v1/flows/{graph_id}", status_code=204)
     def delete_flow(graph_id: str, svc: Service) -> Response:
@@ -391,6 +452,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/v1/flows/{graph_id}/cancel", status_code=202)
     def cancel_flow(graph_id: str, svc: Service) -> dict[str, Any]:
         return svc.cancel_flow(graph_id)
+
+    @app.post("/api/v1/flows/{graph_id}/nodes/{node_id}/retry", status_code=202)
+    def retry_flow_node(graph_id: str, node_id: str, svc: Service) -> dict[str, Any]:
+        return svc.retry_flow_node(graph_id, node_id)
 
     @app.get("/api/v1/mcp-servers")
     def mcp_servers(svc: Service) -> list[dict[str, Any]]:
@@ -506,6 +571,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/v1/system/status")
     def system_status(svc: Service) -> dict[str, Any]:
         return svc.system_status()
+
+    @app.get("/api/v1/system/diagnostics")
+    def system_diagnostics(svc: Service) -> Response:
+        content = json.dumps(svc.diagnostics(), ensure_ascii=False, indent=2).encode("utf-8")
+        return Response(
+            content=content,
+            media_type="application/json",
+            headers={"Content-Disposition": 'attachment; filename="agentbench-diagnostics.json"'},
+        )
 
     @app.patch("/api/v1/settings")
     def update_settings(payload: AppSettingUpdate, svc: Service) -> dict[str, Any]:

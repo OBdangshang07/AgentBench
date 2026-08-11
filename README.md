@@ -1,21 +1,20 @@
 # AgentBench Desktop
 
-AgentBench Desktop 是一个 Windows 优先的本地 AI Agent 能力评测客户端。它将不同模型放入统一的 Agent Harness，在隔离工作区中执行同一批任务，并结合确定性验证器、匿名 AI 裁判和运行成本指标生成可追溯的评分。
+AgentBench Desktop 是一个 Windows 优先、本地运行的全 Agent 可视化工作台，同时保留完整的 AI 模型能力评测系统。它既能在图形界面中管理项目、长期会话、任务、Flow、MCP、终端与浏览器，也能将不同模型放入统一 Agent Harness，通过确定性验证器、匿名 AI 裁判和成本指标生成可追溯评分。
 
-## V4.1.0：全 Agent 可视化工作台
+## V5.0.0：从“能用”到“好用”
 
-- 从单一评测平台扩展为本地 Agent 操作平台，同时完整保留 Benchmarks、Ultra、考研数学和 NCRE Office。
-- 控制中心统一显示项目、会话、审批、任务、Token 与费用；项目中心使用原生目录选择器注册本地工作区。
-- Agent Studio 支持持久会话、实时活动流、文件树、文件预览、Diff 审核、接受/拒绝/部分应用以及 ConPTY 交互终端。
-- 原生 CLI Agent 启动前必须经过平台审批，可选择仅本次、当前会话、当前项目或拒绝；等待期间 Turn 会真实挂起并在批准后自动恢复。
-- Agent Flow 支持 DAG 依赖、同层 Agent 并行、Git worktree 隔离与安全合并、重试、人工审批、取消及时间/Token/费用预算。
-- 任务中心可直接创建真实 Agent Session 并执行任务，不再只是看板状态管理。
-- MCP 支持 stdio、Streamable HTTP 和 SSE 健康检查，能够读取工具目录、调用工具并作为 Flow 节点执行。
-- Codex、Claude Code、OpenCode、Reasonix、Gemini CLI、Aider、Kimi Code、Qoder CLI 与自定义适配器使用统一的能力探测和模型选择界面。
-- SQLite Schema v7 会保留旧实验和运行记录，并在迁移前自动创建数据库备份。
-- 录屏界面只展示命令、工具、文件变化和简短进度，不展示或存储模型私有思维链。
+- 新增首次使用向导、真实全局搜索、全局审批入口，以及包含运行环境健康和最近失败的控制中心。
+- Agent Studio 支持服务端长会话分页、原生文件拖放、停止自动滚动、流式公开进度、折叠工具调用、附件、权限/思考强度切换、Token/费用、Diff、ConPTY 终端和可接管浏览器。
+- Agent Flow 新增自动保存、Undo/Redo、缩放/平移/小地图、静态验证、无副作用 Dry Run、自动版本快照、运行历史、版本恢复和失败节点局部重试。
+- 项目与任务中心补齐项目健康检查、详情页、前置依赖阻塞、依赖环防护、审批状态同步和明确的下一步操作。
+- MCP 工具页提供常用模板、标准 JSON 导入、结构化密钥编辑、离线诊断和真实工具调用测试台。
+- 模型与 Agent 配置明确区分模型身份和运行时，并在 Studio、Flow 与测评之间复用；设置页支持无密钥、无提示词的一键诊断报告。
+- 路由按需拆包，核心前端包从约 739 KB 降至约 248 KB；高频轮询不再反复传输完整长会话。
+- SQLite Schema v10 保留旧项目、会话和全部测评历史，迁移前自动备份，并补充重启恢复、路径越界、符号链接和附件边界回归。
+- 测评区及 NCRE Office 题库和评分逻辑保持不变；录屏界面仍只展示公开进度和可验证操作，不展示模型私有思维链。
 
-详细使用方法见 [`docs/V4-GUIDE.md`](docs/V4-GUIDE.md)。
+完整变更见 [`docs/releases/V5.0.0.md`](docs/releases/V5.0.0.md)，基础使用方法见 [`docs/V4-GUIDE.md`](docs/V4-GUIDE.md)。
 
 ### 评测能力
 

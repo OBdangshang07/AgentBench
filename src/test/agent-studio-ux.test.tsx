@@ -70,6 +70,8 @@ const session: AgentSession = {
 const detail: AgentSessionDetail = {
   ...session,
   messages: [],
+  message_count: 0,
+  messages_truncated: false,
   events: [],
   approvals: [],
   turns: [],
@@ -136,10 +138,10 @@ function installApiMock(
 ) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = String(input);
-    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "4.2.0" });
+    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.0.0" });
     if (url.endsWith("/sessions")) return json([currentSession]);
     if (url.endsWith("/sessions/session-1") && init?.method === "PATCH") return json({ ...currentDetail, ...JSON.parse(String(init.body)) });
-    if (url.endsWith("/sessions/session-1")) return json(currentDetail);
+    if (url.includes("/sessions/session-1?message_limit=")) return json(currentDetail);
     if (url.endsWith("/sessions/session-1/terminals") && init?.method === "POST") {
       return json({ id: "terminal-1", running: true, cursor: 0, chunks: [] }, 201);
     }
@@ -215,7 +217,12 @@ describe("Agent Studio visual workspace controls", () => {
 
     const workbench = container.querySelector(".v4-studio-workbench");
     expect(workbench).toHaveClass("left-collapsed", "right-collapsed", "dock-collapsed");
-    await waitFor(() => expect(JSON.parse(window.localStorage.getItem("agentbench.studio.layout.v1") ?? "{}")).toEqual({ left: false, right: false, dock: false }));
+    await waitFor(() => expect(JSON.parse(window.localStorage.getItem("agentbench.studio.layout.v1") ?? "{}")).toEqual({
+      left: false,
+      right: false,
+      dock: false,
+      dockExpanded: false,
+    }));
   });
 
   it("filters custom Agent and model menus and applies a selected option", async () => {
