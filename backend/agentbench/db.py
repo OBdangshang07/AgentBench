@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 12
 
 
 def utc_now() -> str:
@@ -253,6 +253,21 @@ CREATE TABLE IF NOT EXISTS projects (
     last_opened_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS runtime_profiles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    runner_id TEXT REFERENCES agent_runners(id) ON DELETE SET NULL,
+    model_id TEXT REFERENCES models(id) ON DELETE SET NULL,
+    permission_profile TEXT NOT NULL DEFAULT 'workspace',
+    reasoning_effort TEXT NOT NULL DEFAULT 'medium',
+    skill_pack_id TEXT REFERENCES prompt_templates(id) ON DELETE SET NULL,
+    mcp_server_ids_json TEXT NOT NULL DEFAULT '[]',
+    builtin INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS project_roots (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -273,6 +288,7 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
     status TEXT NOT NULL DEFAULT 'idle',
     permission_profile TEXT NOT NULL DEFAULT 'workspace',
     reasoning_effort TEXT NOT NULL DEFAULT 'medium',
+    profile_id TEXT REFERENCES runtime_profiles(id) ON DELETE SET NULL,
     skill_pack_id TEXT REFERENCES prompt_templates(id) ON DELETE SET NULL,
     native_session_id TEXT,
     workspace_path TEXT NOT NULL,
@@ -465,6 +481,7 @@ CREATE TABLE IF NOT EXISTS task_items (
     due_at TEXT,
     tags_json TEXT NOT NULL DEFAULT '[]',
     depends_on_json TEXT NOT NULL DEFAULT '[]',
+    acceptance_json TEXT NOT NULL DEFAULT '[]',
     result_summary TEXT NOT NULL DEFAULT '',
     retry_of TEXT REFERENCES task_items(id) ON DELETE SET NULL,
     archived INTEGER NOT NULL DEFAULT 0,
@@ -472,6 +489,14 @@ CREATE TABLE IF NOT EXISTS task_items (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS task_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL REFERENCES task_items(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS mcp_servers (
@@ -520,6 +545,7 @@ CREATE INDEX IF NOT EXISTS idx_projects_archived ON projects(archived, updated_a
 CREATE INDEX IF NOT EXISTS idx_project_roots_project ON project_roots(project_id, is_primary);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON agent_sessions(project_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON agent_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_runtime_profiles_name ON runtime_profiles(name);
 CREATE INDEX IF NOT EXISTS idx_session_turns_session ON session_turns(session_id, turn_no);
 CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, seq);
@@ -528,6 +554,7 @@ CREATE INDEX IF NOT EXISTS idx_file_changes_session ON session_file_changes(sess
 CREATE INDEX IF NOT EXISTS idx_task_nodes_graph ON task_nodes(graph_id, status);
 CREATE INDEX IF NOT EXISTS idx_task_items_status ON task_items(status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_task_items_project ON task_items(project_id, archived, updated_at);
+CREATE INDEX IF NOT EXISTS idx_task_events_task ON task_events(task_id, id);
 CREATE INDEX IF NOT EXISTS idx_task_graphs_project ON task_graphs(project_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_task_graph_versions_graph ON task_graph_versions(graph_id, version_no DESC);
 CREATE INDEX IF NOT EXISTS idx_task_graph_runs_graph ON task_graph_runs(graph_id, created_at DESC);
@@ -657,6 +684,8 @@ class Database:
                 )
             if "skill_pack_id" not in session_columns:
                 connection.execute("ALTER TABLE agent_sessions ADD COLUMN skill_pack_id TEXT")
+            if "profile_id" not in session_columns:
+                connection.execute("ALTER TABLE agent_sessions ADD COLUMN profile_id TEXT")
             task_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(task_items)").fetchall()
@@ -664,6 +693,7 @@ class Database:
             for name, declaration in (
                 ("tags_json", "TEXT NOT NULL DEFAULT '[]'"),
                 ("depends_on_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("acceptance_json", "TEXT NOT NULL DEFAULT '[]'"),
                 ("result_summary", "TEXT NOT NULL DEFAULT ''"),
                 ("retry_of", "TEXT"),
                 ("archived", "INTEGER NOT NULL DEFAULT 0"),

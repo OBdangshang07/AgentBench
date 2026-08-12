@@ -38,6 +38,7 @@ GEMINI_RUNNER_ID = stable_id("runner", "gemini-cli")
 AIDER_RUNNER_ID = stable_id("runner", "aider-cli")
 KIMI_RUNNER_ID = stable_id("runner", "kimi-code-cli")
 QODER_RUNNER_ID = stable_id("runner", "qoder-cli")
+CURSOR_RUNNER_ID = stable_id("runner", "cursor-cli")
 FULL_SUITE_ID = stable_id("suite", "v1-full")
 SMOKE_SUITE_ID = stable_id("suite", "v1-smoke")
 V2_FULL_SUITE_ID = stable_id("suite", "v2-full")
@@ -3020,11 +3021,36 @@ def seed_builtin_data(database: Database) -> None:
                 "--output-format",
                 "json",
                 "--dangerously-skip-permissions",
+                "--model",
+                "{model_name}",
                 "{prompt}",
             ],
             "",
             ["native-cli", "filesystem", "shell"],
-            False,
+            True,
+        ),
+        (
+            CURSOR_RUNNER_ID,
+            "Cursor Agent CLI",
+            "cursor_cli",
+            "agent",
+            [
+                "--print",
+                "--output-format",
+                "stream-json",
+                "--stream-partial-output",
+                "--trust",
+                "--sandbox",
+                "enabled",
+                "--workspace",
+                "{workspace}",
+                "--model",
+                "{model_name}",
+                "{prompt}",
+            ],
+            "",
+            ["native-cli", "filesystem", "shell"],
+            True,
         ),
         (
             CUSTOM_RUNNER_ID,

@@ -303,6 +303,19 @@ CLI_INSTALL_RECIPES: dict[str, dict[str, Any]] = {
         "command": "uv tool install --python 3.13 kimi-cli",
         "source": "PyPI · kimi-cli（由 uv tool 隔离安装）",
     },
+    "cursor_cli": {
+        "manager": "powershell",
+        "manager_candidates": ["powershell.exe", "powershell"],
+        "args": [
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "irm 'https://cursor.com/install?win32=true' | iex",
+        ],
+        "command": "irm 'https://cursor.com/install?win32=true' | iex",
+        "source": "Cursor 官方 Windows 安装器 · cursor.com/install",
+    },
 }
 
 MANUAL_INSTALL_GUIDANCE = {
@@ -318,6 +331,7 @@ INSTALL_COMMAND_BY_EXECUTABLE = {
     "aider": CLI_INSTALL_RECIPES["aider_cli"]["command"],
     "kimi": CLI_INSTALL_RECIPES["kimi_code_cli"]["command"],
     "qoderclicn": CLI_INSTALL_RECIPES["qoder_cli"]["command"],
+    "agent": CLI_INSTALL_RECIPES["cursor_cli"]["command"],
 }
 
 
@@ -468,6 +482,20 @@ def _native_cli_candidates(executable: str | None) -> list[str]:
             if key not in seen:
                 seen.add(key)
                 candidates.append(resolved)
+    if not explicit_path and _executable_name(executable) == "agent":
+        # Cursor's official Windows installer updates the user PATH, which a
+        # running desktop process may not inherit until restart. Probe its
+        # documented install directory as a portable fallback.
+        local_app_data = os.getenv("LOCALAPPDATA")
+        if local_app_data:
+            cursor_root = Path(local_app_data) / "cursor-agent"
+            for filename in ("agent.exe", "cursor-agent.exe", "agent.cmd"):
+                resolved = cursor_root / filename
+                if resolved.is_file():
+                    key = os.path.normcase(os.path.abspath(resolved))
+                    if key not in seen:
+                        seen.add(key)
+                        candidates.append(str(resolved))
     expanded: list[str] = []
     expanded_seen: set[str] = set()
     for candidate in candidates:
@@ -547,6 +575,33 @@ def native_cli_status(executable: str | None) -> dict[str, Any]:
         version_text = (result.stdout or result.stderr).strip()
         version = version_text.splitlines()[0][:200] if version_text else None
         if result.returncode == 0:
+            if _executable_name(executable) == "agent":
+                cursor_identity = "cursor" in (version_text + " " + resolved).lower()
+                if not cursor_identity:
+                    try:
+                        help_result = subprocess.run(
+                            [resolved, "--help"],
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                            check=False,
+                        )
+                        help_text = (help_result.stdout or help_result.stderr).lower()
+                        cursor_identity = "cursor agent" in help_text or all(
+                            marker in help_text
+                            for marker in ("create-chat", "install-shell-integration", "models")
+                        )
+                    except (OSError, subprocess.TimeoutExpired):
+                        cursor_identity = False
+                if not cursor_identity:
+                    last_failure = {
+                        "installed": False,
+                        "executable": resolved,
+                        "version": version or None,
+                        "error": "检测到同名 agent 命令，但它不是 Cursor Agent CLI",
+                        "install_command": INSTALL_COMMAND_BY_EXECUTABLE["agent"],
+                    }
+                    continue
             status = {
                 "installed": True,
                 "executable": resolved,

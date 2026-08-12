@@ -18,6 +18,7 @@ from .schemas import (
     McpServerCreate,
     ProjectCreate,
     ProjectRootCreate,
+    RuntimeProfileCreate,
     SessionAttachmentImport,
     SessionCreate,
     SessionForkCreate,
@@ -75,6 +76,7 @@ class StudioService:
         self.settings = settings
         self.secrets = secrets
         self.seed_skill_packs()
+        self.seed_runtime_profiles()
         self.recover_interrupted_sessions()
 
     def seed_skill_packs(self) -> None:
@@ -114,11 +116,57 @@ class StudioService:
                 ],
             )
 
+    def seed_runtime_profiles(self) -> None:
+        if self.database.fetch_one("SELECT id FROM runtime_profiles LIMIT 1"):
+            return
+        now = utc_now()
+        skill_rows = {
+            row["name"]: row["id"]
+            for row in self.database.fetch_all("SELECT id,name FROM prompt_templates")
+        }
+        defaults = [
+            (
+                "日常开发",
+                "适合常规实现、调试和测试，保留逐项审批保护。",
+                "standard",
+                "medium",
+                skill_rows.get("前端实现"),
+            ),
+            (
+                "深度实现",
+                "为复杂工程任务提供更高思考强度与完整开发工具。",
+                "standard",
+                "high",
+                None,
+            ),
+            (
+                "只读审查",
+                "只分析项目并给出有证据的结论，不写入文件。",
+                "readonly",
+                "high",
+                skill_rows.get("代码审查"),
+            ),
+        ]
+        with self.database.transaction() as connection:
+            connection.executemany(
+                "INSERT INTO runtime_profiles(id,name,description,permission_profile,"
+                "reasoning_effort,skill_pack_id,builtin,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,1,?,?)",
+                [
+                    (new_id(), name, description, permission, effort, skill_id, now, now)
+                    for name, description, permission, effort, skill_id in defaults
+                ],
+            )
+
     def recover_interrupted_sessions(self) -> None:
         now = utc_now()
         active = self.database.fetch_all(
             "SELECT id FROM agent_sessions WHERE status IN "
             "('queued','preparing','running','waiting_approval')"
+        )
+        active_tasks = self.database.fetch_all(
+            "SELECT id,session_id,status FROM task_items "
+            "WHERE status IN ('queued','running','approval')"
         )
         with self.database.transaction() as connection:
             connection.execute(
@@ -139,7 +187,7 @@ class StudioService:
             )
             connection.execute(
                 "UPDATE task_graphs SET status='interrupted',updated_at=?,completed_at=? "
-                "WHERE status IN ('running','waiting_approval','cancelling')",
+                "WHERE status IN ('running','waiting_approval','testing','cancelling')",
                 (now, now),
             )
             connection.execute(
@@ -148,12 +196,28 @@ class StudioService:
                 "WHERE status='running'",
                 (now,),
             )
+            connection.execute(
+                "UPDATE task_items SET status='failed',"
+                "result_summary='AgentBench exited while this task was active',updated_at=? "
+                "WHERE status IN ('queued','running','approval')",
+                (now,),
+            )
         for row in active:
             self.append_event(
                 row["id"],
                 "session.interrupted",
                 {"reason": "app_restarted"},
                 visibility="user",
+            )
+        for row in active_tasks:
+            self.append_task_event(
+                str(row["id"]),
+                "task.interrupted",
+                {
+                    "reason": "app_restarted",
+                    "previous_status": row["status"],
+                    "session_id": row.get("session_id"),
+                },
             )
 
     # Projects
@@ -628,6 +692,8 @@ class StudioService:
             "status": row["status"],
             "permission_profile": row["permission_profile"],
             "reasoning_effort": row.get("reasoning_effort") or "medium",
+            "profile_id": row.get("profile_id"),
+            "profile_name": row.get("profile_name"),
             "skill_pack_id": row.get("skill_pack_id"),
             "skill_pack_name": row.get("skill_pack_name"),
             "native_session_id": row.get("native_session_id"),
@@ -649,43 +715,147 @@ class StudioService:
     def _session_query(self, where: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
         return self.database.fetch_all(
             "SELECT s.*,p.name project_name,r.name runner_name,r.runner_type,m.name model_name,"
-            "pt.name skill_pack_name,"
+            "pt.name skill_pack_name,rp.name profile_name,"
             "(SELECT COUNT(*) FROM session_turns t WHERE t.session_id=s.id) turn_count,"
             "(SELECT COUNT(*) FROM approval_requests a WHERE a.session_id=s.id "
             "AND a.status='pending') pending_approvals "
             "FROM agent_sessions s JOIN projects p ON p.id=s.project_id "
             "JOIN agent_runners r ON r.id=s.runner_id JOIN models m ON m.id=s.model_id "
             "LEFT JOIN prompt_templates pt ON pt.id=s.skill_pack_id "
+            "LEFT JOIN runtime_profiles rp ON rp.id=s.profile_id "
             f"{where} ORDER BY s.updated_at DESC",
             params,
         )
+
+    @staticmethod
+    def _runtime_profile(row: dict[str, Any]) -> dict[str, Any]:
+        output = dict(row)
+        output["mcp_server_ids"] = _json(output.pop("mcp_server_ids_json", "[]"), [])
+        output["builtin"] = bool(output.get("builtin"))
+        return output
+
+    def get_runtime_profile(self, profile_id: str) -> dict[str, Any]:
+        row = self.database.fetch_one(
+            "SELECT rp.*,r.name runner_name,m.name model_name,pt.name skill_pack_name "
+            "FROM runtime_profiles rp LEFT JOIN agent_runners r ON r.id=rp.runner_id "
+            "LEFT JOIN models m ON m.id=rp.model_id "
+            "LEFT JOIN prompt_templates pt ON pt.id=rp.skill_pack_id WHERE rp.id=?",
+            (profile_id,),
+        )
+        if not row:
+            raise KeyError("runtime_profile_not_found")
+        return self._runtime_profile(row)
+
+    def list_runtime_profiles(self) -> list[dict[str, Any]]:
+        rows = self.database.fetch_all(
+            "SELECT rp.*,r.name runner_name,m.name model_name,pt.name skill_pack_name "
+            "FROM runtime_profiles rp LEFT JOIN agent_runners r ON r.id=rp.runner_id "
+            "LEFT JOIN models m ON m.id=rp.model_id "
+            "LEFT JOIN prompt_templates pt ON pt.id=rp.skill_pack_id "
+            "ORDER BY rp.builtin DESC,rp.name"
+        )
+        return [self._runtime_profile(row) for row in rows]
+
+    def _validate_runtime_profile_links(self, values: dict[str, Any]) -> None:
+        if values.get("runner_id"):
+            self._enabled_entity("agent_runners", str(values["runner_id"]))
+        if values.get("model_id"):
+            self._enabled_entity("models", str(values["model_id"]))
+        if values.get("skill_pack_id"):
+            self.get_skill_pack(str(values["skill_pack_id"]))
+        for server_id in values.get("mcp_server_ids") or []:
+            self.get_mcp_server(str(server_id))
+
+    def create_runtime_profile(self, value: RuntimeProfileCreate) -> dict[str, Any]:
+        values = value.model_dump()
+        self._validate_runtime_profile_links(values)
+        profile_id = new_id()
+        now = utc_now()
+        self.database.execute(
+            "INSERT INTO runtime_profiles(id,name,description,runner_id,model_id,"
+            "permission_profile,reasoning_effort,skill_pack_id,mcp_server_ids_json,builtin,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,0,?,?)",
+            (
+                profile_id,
+                value.name.strip(),
+                value.description.strip(),
+                value.runner_id,
+                value.model_id,
+                value.permission_profile,
+                value.reasoning_effort,
+                value.skill_pack_id,
+                json.dumps(list(dict.fromkeys(value.mcp_server_ids))),
+                now,
+                now,
+            ),
+        )
+        self.database.insert_audit("runtime_profile.created", "runtime_profile", profile_id)
+        return self.get_runtime_profile(profile_id)
+
+    def update_runtime_profile(self, profile_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+        current = self.get_runtime_profile(profile_id)
+        self._validate_runtime_profile_links(changes)
+        values = dict(changes)
+        if "name" in values:
+            values["name"] = str(values["name"]).strip()
+        if "description" in values:
+            values["description"] = str(values["description"] or "").strip()
+        if "mcp_server_ids" in values:
+            values["mcp_server_ids_json"] = json.dumps(
+                list(dict.fromkeys(values.pop("mcp_server_ids") or []))
+            )
+        if not values:
+            return current
+        values["updated_at"] = utc_now()
+        assignments = ",".join(f"{key}=?" for key in values)
+        self.database.execute(
+            f"UPDATE runtime_profiles SET {assignments} WHERE id=?",
+            (*values.values(), profile_id),
+        )
+        self.database.insert_audit(
+            "runtime_profile.updated", "runtime_profile", profile_id, changes
+        )
+        return self.get_runtime_profile(profile_id)
+
+    def delete_runtime_profile(self, profile_id: str) -> None:
+        profile = self.get_runtime_profile(profile_id)
+        if profile["builtin"]:
+            raise ValueError("builtin_runtime_profile_cannot_be_deleted")
+        with self.database.transaction() as connection:
+            connection.execute("UPDATE agent_sessions SET profile_id=NULL WHERE profile_id=?", (profile_id,))
+            connection.execute("DELETE FROM runtime_profiles WHERE id=?", (profile_id,))
+        self.database.insert_audit("runtime_profile.deleted", "runtime_profile", profile_id)
 
     def create_session(self, value: SessionCreate) -> dict[str, Any]:
         project = self.get_project(value.project_id)
         if project["archived"]:
             raise ValueError("project_archived")
-        runner_id = value.runner_id or project.get("default_runner_id")
-        model_id = value.model_id or project.get("default_model_id")
+        profile = self.get_runtime_profile(value.profile_id) if value.profile_id else None
+        runner_id = value.runner_id or (profile or {}).get("runner_id") or project.get("default_runner_id")
+        model_id = value.model_id or (profile or {}).get("model_id") or project.get("default_model_id")
         if not runner_id:
             runner_id = self._default_entity_id("agent_runners")
         if not model_id:
             model_id = self._default_entity_id("models")
         self._enabled_entity("agent_runners", runner_id)
         self._enabled_entity("models", model_id)
-        skill_pack = self.get_skill_pack(value.skill_pack_id) if value.skill_pack_id else None
+        skill_pack_id = value.skill_pack_id or (profile or {}).get("skill_pack_id")
+        skill_pack = self.get_skill_pack(skill_pack_id) if skill_pack_id else None
         root = self._primary_root(value.project_id)
         session_id = new_id()
         now = utc_now()
         permission_profile = (
             value.permission_profile
+            or (profile or {}).get("permission_profile")
             or (skill_pack or {}).get("permission_profile")
             or project["permission_profile"]
         )
+        reasoning_effort = value.reasoning_effort or (profile or {}).get("reasoning_effort") or "medium"
         with self.database.transaction() as connection:
             connection.execute(
                 "INSERT INTO agent_sessions(id,project_id,title,runner_id,model_id,status,"
-                "permission_profile,reasoning_effort,skill_pack_id,workspace_path,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,'idle',?,?,?,?,?,?)",
+                "permission_profile,reasoning_effort,profile_id,skill_pack_id,workspace_path,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,'idle',?,?,?,?,?,?,?)",
                 (
                     session_id,
                     value.project_id,
@@ -693,8 +863,9 @@ class StudioService:
                     runner_id,
                     model_id,
                     permission_profile,
-                    value.reasoning_effort,
-                    value.skill_pack_id,
+                    reasoning_effort,
+                    value.profile_id,
+                    skill_pack_id,
                     str(root),
                     now,
                     now,
@@ -711,7 +882,8 @@ class StudioService:
                 "runner_id": runner_id,
                 "model_id": model_id,
                 "permission_profile": permission_profile,
-                "reasoning_effort": value.reasoning_effort,
+                "reasoning_effort": reasoning_effort,
+                "profile_id": value.profile_id,
             },
         )
         self.database.insert_audit("session.created", "session", session_id)
@@ -790,6 +962,7 @@ class StudioService:
         session = self.get_session(session_id)
         allowed = {
             "title",
+            "profile_id",
             "runner_id",
             "model_id",
             "permission_profile",
@@ -798,8 +971,21 @@ class StudioService:
             "archived",
         }
         values = {key: value for key, value in changes.items() if key in allowed}
+        if "profile_id" in values and values["profile_id"]:
+            profile = self.get_runtime_profile(str(values["profile_id"]))
+            profile_values = {
+                "profile_id": profile["id"],
+                "permission_profile": profile["permission_profile"],
+                "reasoning_effort": profile["reasoning_effort"],
+                "skill_pack_id": profile.get("skill_pack_id"),
+            }
+            if profile.get("runner_id"):
+                profile_values["runner_id"] = profile["runner_id"]
+            if profile.get("model_id"):
+                profile_values["model_id"] = profile["model_id"]
+            values = {**profile_values, **values}
         if session["status"] in ACTIVE_SESSION_STATUSES and any(
-            key in values for key in ("runner_id", "model_id")
+            key in values for key in ("runner_id", "model_id", "profile_id")
         ):
             raise ValueError("active_session_configuration_locked")
         if "runner_id" in values and values["runner_id"] is not None:
@@ -844,6 +1030,7 @@ class StudioService:
         created = self.create_session(
             SessionCreate(
                 project_id=source["project_id"],
+                profile_id=source.get("profile_id"),
                 runner_id=source["runner_id"],
                 model_id=source["model_id"],
                 title=value.title or f"{source['title']} · 分支",
@@ -1004,8 +1191,7 @@ class StudioService:
         session = self.get_session(session_id)
         if session["archived"]:
             raise ValueError("session_archived")
-        if session["status"] in ACTIVE_SESSION_STATUSES:
-            raise ValueError("session_already_active")
+        queued_behind_active = session["status"] in ACTIVE_SESSION_STATUSES
         turn_id = new_id()
         message_id = new_id()
         context = self._normalize_turn_context(session_id, value.context)
@@ -1045,21 +1231,70 @@ class StudioService:
                     f"AND kind='attachment' AND turn_id IS NULL AND id IN ({placeholders})",
                     (turn_id, session_id, *attachment_ids),
                 )
-            connection.execute(
-                "UPDATE agent_sessions SET status='queued',updated_at=?,started_at=COALESCE(started_at,?) "
-                "WHERE id=?",
-                (now, now, session_id),
-            )
+            if not queued_behind_active:
+                connection.execute(
+                    "UPDATE agent_sessions SET status='queued',updated_at=?,"
+                    "started_at=COALESCE(started_at,?) WHERE id=?",
+                    (now, now, session_id),
+                )
         self.append_event(
             session_id,
-            "turn.queued",
-            {"turn_id": turn_id, "turn_no": turn_no, "context_items": len(context)},
+            "turn.enqueued" if queued_behind_active else "turn.queued",
+            {
+                "turn_id": turn_id,
+                "turn_no": turn_no,
+                "context_items": len(context),
+                "queued_behind_active": queued_behind_active,
+            },
             turn_id=turn_id,
         )
         self.database.insert_audit(
             "session.turn_queued", "session", session_id, {"turn_id": turn_id}
         )
-        return self.database.fetch_one("SELECT * FROM session_turns WHERE id=?", (turn_id,)) or {}
+        output = self.database.fetch_one(
+            "SELECT * FROM session_turns WHERE id=?", (turn_id,)
+        ) or {}
+        output["queued_behind_active"] = queued_behind_active
+        return output
+
+    def cancel_queued_turn(self, session_id: str, turn_id: str) -> dict[str, Any]:
+        """Cancel one not-yet-started instruction without disturbing the active turn."""
+        self.get_session(session_id)
+        turn = self.database.fetch_one(
+            "SELECT id,turn_no,status FROM session_turns WHERE id=? AND session_id=?",
+            (turn_id, session_id),
+        )
+        if not turn:
+            raise KeyError("session_turn_not_found")
+        if turn["status"] != "queued":
+            raise ValueError("session_turn_not_queued")
+        now = utc_now()
+        with self.database.transaction() as connection:
+            connection.execute(
+                "UPDATE session_turns SET status='cancelled',error_code='queue_removed',"
+                "error_message='Removed from the pending instruction queue',completed_at=? "
+                "WHERE id=? AND status='queued'",
+                (now, turn_id),
+            )
+            connection.execute(
+                "DELETE FROM session_messages WHERE session_id=? AND turn_id=? AND role='user'",
+                (session_id, turn_id),
+            )
+            connection.execute(
+                "UPDATE session_artifacts SET turn_id=NULL WHERE session_id=? AND turn_id=? "
+                "AND kind='attachment'",
+                (session_id, turn_id),
+            )
+        self.append_event(
+            session_id,
+            "turn.queue_removed",
+            {"turn_id": turn_id, "turn_no": turn["turn_no"]},
+            turn_id=turn_id,
+        )
+        self.database.insert_audit(
+            "session.turn_queue_removed", "session", session_id, {"turn_id": turn_id}
+        )
+        return {**self.get_session(session_id), "removed_turn_id": turn_id}
 
     def _latest_seq(self, session_id: str) -> int:
         row = self.database.fetch_one(
@@ -1311,6 +1546,25 @@ class StudioService:
             },
             turn_id=turn_id,
         )
+        task = self.database.fetch_one(
+            "SELECT id,status FROM task_items WHERE session_id=? AND archived=0",
+            (session_id,),
+        )
+        if task and task["status"] in {"queued", "running"}:
+            self.database.execute(
+                "UPDATE task_items SET status='approval',updated_at=? WHERE id=?",
+                (now, task["id"]),
+            )
+            self.append_task_event(
+                str(task["id"]),
+                "task.awaiting_approval",
+                {
+                    "approval_id": approval_id,
+                    "request_type": request_type,
+                    "title": title,
+                    "risk_level": risk_level,
+                },
+            )
         return self.get_approval(approval_id)
 
     def _public_approval(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -1410,12 +1664,62 @@ class StudioService:
             {"approval_id": approval_id, "status": status, **decision},
             turn_id=approval.get("turn_id"),
         )
+        task = self.database.fetch_one(
+            "SELECT id,status FROM task_items WHERE session_id=? AND archived=0",
+            (approval["session_id"],),
+        )
+        if task and task["status"] == "approval":
+            self.database.execute(
+                "UPDATE task_items SET status='running',updated_at=? WHERE id=?",
+                (now, task["id"]),
+            )
+            self.append_task_event(
+                str(task["id"]),
+                "task.approval_resolved",
+                {"approval_id": approval_id, "status": status, **decision},
+            )
         self.database.insert_audit(
             "approval.resolved", "approval", approval_id, {"status": status, **decision}
         )
         return self.get_approval(approval_id)
 
     # Tasks and flow definitions
+    def append_task_event(
+        self, task_id: str, event_type: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        self.get_task(task_id)
+        created_at = utc_now()
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                "INSERT INTO task_events(task_id,event_type,payload_json,created_at) "
+                "VALUES (?,?,?,?)",
+                (
+                    task_id,
+                    event_type,
+                    json.dumps(payload or {}, ensure_ascii=False),
+                    created_at,
+                ),
+            )
+        return {
+            "id": int(cursor.lastrowid),
+            "task_id": task_id,
+            "event_type": event_type,
+            "payload": payload or {},
+            "created_at": created_at,
+        }
+
+    def list_task_events(self, task_id: str, limit: int = 300) -> list[dict[str, Any]]:
+        self.get_task(task_id)
+        rows = self.database.fetch_all(
+            "SELECT id,task_id,event_type,payload_json,created_at FROM task_events "
+            "WHERE task_id=? ORDER BY id DESC LIMIT ?",
+            (task_id, max(1, min(limit, 1000))),
+        )
+        rows.reverse()
+        for row in rows:
+            row["payload"] = _json(row.pop("payload_json"), {})
+        return rows
+
     def create_task(self, value: TaskItemCreate) -> dict[str, Any]:
         if value.project_id:
             self.get_project(value.project_id)
@@ -1429,8 +1733,8 @@ class StudioService:
         now = utc_now()
         self.database.execute(
             "INSERT INTO task_items(id,project_id,title,description,status,priority,runner_id,"
-            "model_id,due_at,tags_json,depends_on_json,created_at,updated_at) "
-            "VALUES (?,?,?,?,'backlog',?,?,?,?,?,?,?,?)",
+            "model_id,due_at,tags_json,depends_on_json,acceptance_json,created_at,updated_at) "
+            "VALUES (?,?,?,?,'backlog',?,?,?,?,?,?,?,?,?)",
             (
                 task_id,
                 value.project_id,
@@ -1442,9 +1746,18 @@ class StudioService:
                 value.due_at,
                 json.dumps(sorted({item.strip() for item in value.tags if item.strip()}), ensure_ascii=False),
                 json.dumps(list(dict.fromkeys(value.depends_on)), ensure_ascii=False),
+                json.dumps(
+                    [item.model_dump() for item in value.acceptance_criteria],
+                    ensure_ascii=False,
+                ),
                 now,
                 now,
             ),
+        )
+        self.append_task_event(
+            task_id,
+            "task.created",
+            {"title": value.title.strip(), "priority": value.priority},
         )
         self.database.insert_audit("task.created", "task", task_id)
         return self.get_task(task_id)
@@ -1462,6 +1775,14 @@ class StudioService:
             raise KeyError("task_not_found")
         return self._task_summary(row)
 
+    def get_task_detail(self, task_id: str) -> dict[str, Any]:
+        output = self.get_task(task_id)
+        output["events"] = self.list_task_events(task_id)
+        output["dependencies"] = [
+            self.get_task(str(item)) for item in output.get("depends_on") or []
+        ]
+        return output
+
     @staticmethod
     def _task_summary(row: dict[str, Any]) -> dict[str, Any]:
         output = dict(row)
@@ -1470,6 +1791,7 @@ class StudioService:
             output["status"] = "approval"
         output["tags"] = _json(output.pop("tags_json", "[]"), [])
         output["depends_on"] = _json(output.pop("depends_on_json", "[]"), [])
+        output["acceptance_criteria"] = _json(output.pop("acceptance_json", "[]"), [])
         output["archived"] = bool(output.get("archived"))
         return output
 
@@ -1510,8 +1832,9 @@ class StudioService:
 
     def update_task(self, task_id: str, changes: dict[str, Any]) -> dict[str, Any]:
         self.get_task(task_id)
-        allowed = {"project_id", "title", "description", "status", "priority", "runner_id", "model_id", "due_at", "tags", "depends_on", "archived"}
+        allowed = {"project_id", "title", "description", "status", "priority", "runner_id", "model_id", "due_at", "tags", "depends_on", "acceptance_criteria", "archived"}
         values = {key: value for key, value in changes.items() if key in allowed}
+        previous_status = self.get_task(task_id)["status"]
         if "project_id" in values and values["project_id"]:
             self.get_project(values["project_id"])
         if "runner_id" in values and values["runner_id"]:
@@ -1527,6 +1850,17 @@ class StudioService:
             dependencies = list(dict.fromkeys(str(item) for item in values.pop("depends_on")))
             self._validate_task_dependencies(task_id, dependencies)
             values["depends_on_json"] = json.dumps(dependencies, ensure_ascii=False)
+        if "acceptance_criteria" in values:
+            criteria = []
+            seen: set[str] = set()
+            for item in values.pop("acceptance_criteria"):
+                raw = item.model_dump() if hasattr(item, "model_dump") else dict(item)
+                text = str(raw.get("text") or "").strip()
+                if not text or text in seen:
+                    continue
+                seen.add(text)
+                criteria.append({"text": text, "completed": bool(raw.get("completed"))})
+            values["acceptance_json"] = json.dumps(criteria, ensure_ascii=False)
         if "archived" in values:
             values["archived"] = int(bool(values["archived"]))
         if not values:
@@ -1543,8 +1877,21 @@ class StudioService:
         self.database.execute(
             f"UPDATE task_items SET {assignments} WHERE id=?", (*values.values(), task_id)
         )
+        updated = self.get_task(task_id)
+        if updated["status"] != previous_status:
+            self.append_task_event(
+                task_id,
+                "task.status_changed",
+                {"from": previous_status, "to": updated["status"]},
+            )
+        else:
+            self.append_task_event(
+                task_id,
+                "task.updated",
+                {"fields": sorted(key for key in changes if key in allowed)},
+            )
         self.database.insert_audit("task.updated", "task", task_id, changes)
-        return self.get_task(task_id)
+        return updated
 
     def duplicate_task(self, task_id: str) -> dict[str, Any]:
         source = self.get_task(task_id)
@@ -1559,13 +1906,52 @@ class StudioService:
                 due_at=source.get("due_at"),
                 tags=source.get("tags") or [],
                 depends_on=source.get("depends_on") or [],
+                acceptance_criteria=source.get("acceptance_criteria") or [],
             )
         )
         self.database.execute(
             "UPDATE task_items SET retry_of=? WHERE id=?", (task_id, created["id"])
         )
         self.database.insert_audit("task.duplicated", "task", created["id"], {"source": task_id})
+        self.append_task_event(created["id"], "task.duplicated", {"source": task_id})
         return self.get_task(created["id"])
+
+    def bulk_update_tasks(
+        self, task_ids: list[str], action: str, value: str | None = None
+    ) -> dict[str, Any]:
+        unique_ids = list(dict.fromkeys(task_ids))
+        updated: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
+        for task_id in unique_ids:
+            try:
+                task = self.get_task(task_id)
+                if action == "archive":
+                    if task["status"] in ACTIVE_SESSION_STATUSES or task["status"] == "approval":
+                        raise ValueError("active_task_cannot_be_archived")
+                    updated.append(self.update_task(task_id, {"archived": True}))
+                elif action == "duplicate":
+                    updated.append(self.duplicate_task(task_id))
+                elif action == "set_priority":
+                    if value not in {"low", "normal", "high", "urgent"}:
+                        raise ValueError("invalid_task_priority")
+                    updated.append(self.update_task(task_id, {"priority": value}))
+                elif action == "set_status":
+                    if task["status"] in {"queued", "running", "approval"}:
+                        raise ValueError("active_task_status_locked")
+                    if value not in {"backlog", "completed"}:
+                        raise ValueError("invalid_manual_task_status")
+                    updated.append(self.update_task(task_id, {"status": value}))
+                else:
+                    raise ValueError("invalid_task_bulk_action")
+            except (KeyError, ValueError) as exc:
+                errors.append({"task_id": task_id, "error": str(exc)})
+        self.database.insert_audit(
+            "task.bulk_updated",
+            "task",
+            "bulk",
+            {"action": action, "requested": len(unique_ids), "updated": len(updated)},
+        )
+        return {"requested": len(unique_ids), "updated": updated, "errors": errors}
 
     def create_graph(self, value: TaskGraphCreate) -> dict[str, Any]:
         if value.project_id:
@@ -1590,6 +1976,190 @@ class StudioService:
         self.database.insert_audit("task_graph.created", "task_graph", graph_id)
         self.create_graph_version(graph_id, "初始版本")
         return self.get_graph(graph_id)
+
+    @staticmethod
+    def list_graph_templates() -> list[dict[str, Any]]:
+        """Return curated local templates that remain editable after creation."""
+        defaults = {
+            "max_retries": 1,
+            "max_concurrency": 2,
+            "max_runtime_seconds": 2700,
+            "max_cost_usd": 3,
+            "max_tokens": 500_000,
+            "parallel_worktrees": True,
+        }
+        return [
+            {
+                "id": "single-delivery",
+                "name": "单 Agent 交付",
+                "description": "一个 Agent 完成实施，再由人工确认结果。",
+                "category": "STARTER",
+                "settings": defaults,
+                "nodes": [
+                    {
+                        "id": "implement",
+                        "type": "agent",
+                        "name": "实施任务",
+                        "x": 90,
+                        "y": 170,
+                        "config": {
+                            "prompt": "理解目标，在项目中完成实施与验证，并汇报可检查的结果。",
+                            "error_strategy": "fail_flow",
+                            "retry_count": 1,
+                        },
+                    },
+                    {
+                        "id": "approve",
+                        "type": "approval",
+                        "name": "确认结果",
+                        "x": 410,
+                        "y": 170,
+                        "config": {
+                            "description": "检查 Agent 的结果、测试和文件变更后决定是否接受。",
+                            "error_strategy": "fail_flow",
+                            "retry_count": 0,
+                            "input_bindings": [
+                                {
+                                    "source_node_id": "implement",
+                                    "path": "summary",
+                                    "target": "result",
+                                }
+                            ],
+                        },
+                    },
+                ],
+                "edges": [{"source": "implement", "target": "approve"}],
+            },
+            {
+                "id": "parallel-review",
+                "name": "双路并行评审",
+                "description": "两个 Agent 并行分析，由第三个 Agent 汇总并交给人工审批。",
+                "category": "MULTI AGENT",
+                "settings": {**defaults, "max_concurrency": 3},
+                "nodes": [
+                    {
+                        "id": "quality",
+                        "type": "agent",
+                        "name": "质量评审",
+                        "x": 70,
+                        "y": 80,
+                        "config": {
+                            "prompt": "检查正确性、可维护性和测试覆盖，给出有证据的结论。",
+                            "error_strategy": "continue",
+                            "retry_count": 1,
+                        },
+                    },
+                    {
+                        "id": "risk",
+                        "type": "agent",
+                        "name": "风险评审",
+                        "x": 70,
+                        "y": 280,
+                        "config": {
+                            "prompt": "检查安全、权限、兼容性和发布风险，给出有证据的结论。",
+                            "error_strategy": "continue",
+                            "retry_count": 1,
+                        },
+                    },
+                    {
+                        "id": "synthesis",
+                        "type": "agent",
+                        "name": "汇总结论",
+                        "x": 410,
+                        "y": 180,
+                        "config": {
+                            "prompt": "合并两路评审，消除重复并输出按优先级排列的最终结论。",
+                            "error_strategy": "fail_flow",
+                            "retry_count": 1,
+                            "input_bindings": [
+                                {"source_node_id": "quality", "path": "summary", "target": "quality_review"},
+                                {"source_node_id": "risk", "path": "summary", "target": "risk_review"},
+                            ],
+                        },
+                    },
+                    {
+                        "id": "approve",
+                        "type": "approval",
+                        "name": "人工决策",
+                        "x": 740,
+                        "y": 180,
+                        "config": {
+                            "description": "审阅汇总结论并决定是否继续。",
+                            "error_strategy": "fail_flow",
+                            "retry_count": 0,
+                        },
+                    },
+                ],
+                "edges": [
+                    {"source": "quality", "target": "synthesis"},
+                    {"source": "risk", "target": "synthesis"},
+                    {"source": "synthesis", "target": "approve"},
+                ],
+            },
+            {
+                "id": "conditional-recovery",
+                "name": "条件分支与恢复",
+                "description": "先检查项目，再按结构化结果选择修复或直接复核。",
+                "category": "CONTROL FLOW",
+                "settings": defaults,
+                "nodes": [
+                    {
+                        "id": "inspect",
+                        "type": "agent",
+                        "name": "项目检查",
+                        "x": 70,
+                        "y": 180,
+                        "config": {
+                            "prompt": "检查项目并在结论中明确写出 NEEDS_FIX 或 READY。",
+                            "error_strategy": "fail_flow",
+                            "retry_count": 1,
+                        },
+                    },
+                    {
+                        "id": "gate",
+                        "type": "condition",
+                        "name": "是否需要修复",
+                        "x": 380,
+                        "y": 180,
+                        "config": {
+                            "operator": "contains",
+                            "value": "NEEDS_FIX",
+                            "error_strategy": "fail_flow",
+                            "retry_count": 0,
+                        },
+                    },
+                    {
+                        "id": "fix",
+                        "type": "agent",
+                        "name": "实施修复",
+                        "x": 700,
+                        "y": 90,
+                        "config": {
+                            "prompt": "依据检查结论实施修复，并运行相关验证。",
+                            "error_strategy": "skip_branch",
+                            "retry_count": 2,
+                        },
+                    },
+                    {
+                        "id": "review",
+                        "type": "approval",
+                        "name": "最终复核",
+                        "x": 700,
+                        "y": 290,
+                        "config": {
+                            "description": "复核检查结论或修复结果。",
+                            "error_strategy": "fail_flow",
+                            "retry_count": 0,
+                        },
+                    },
+                ],
+                "edges": [
+                    {"source": "inspect", "target": "gate"},
+                    {"source": "gate", "target": "fix", "condition": {"when": True}},
+                    {"source": "gate", "target": "review", "condition": {"when": False}},
+                ],
+            },
+        ]
 
     @staticmethod
     def _graph_definition(graph: dict[str, Any]) -> dict[str, Any]:
@@ -1687,7 +2257,7 @@ class StudioService:
 
     def restore_graph_version(self, graph_id: str, version_no: int) -> dict[str, Any]:
         graph = self.get_graph(graph_id)
-        if graph["status"] in {"running", "waiting_approval", "cancelling"}:
+        if graph["status"] in {"running", "waiting_approval", "testing", "cancelling"}:
             raise ValueError("active_flow_locked")
         version = self.get_graph_version(graph_id, version_no)
         definition = version["definition"]
@@ -1769,6 +2339,27 @@ class StudioService:
                 issue(errors, "invalid_graph_node_type", f"节点类型无效：{node_type}", alias)
             if not name:
                 issue(errors, "flow_node_name_required", "节点名称不能为空", alias)
+            error_strategy = str(config.get("error_strategy") or "fail_flow")
+            if error_strategy not in {"fail_flow", "continue", "skip_branch"}:
+                issue(errors, "invalid_node_error_strategy", "节点失败策略无效", alias)
+            try:
+                retry_count = int(config.get("retry_count", settings.get("max_retries", 1)))
+            except (TypeError, ValueError):
+                retry_count = -1
+            if retry_count < 0 or retry_count > 3:
+                issue(errors, "invalid_node_retry_count", "节点重试次数必须在 0 到 3 之间", alias)
+            bindings = config.get("input_bindings") or []
+            if not isinstance(bindings, list):
+                issue(errors, "invalid_flow_input_bindings", "节点输入绑定必须是列表", alias)
+            else:
+                for binding in bindings:
+                    if not isinstance(binding, dict):
+                        issue(errors, "invalid_flow_input_binding", "节点包含无效的输入绑定", alias)
+                        continue
+                    if not str(binding.get("source_node_id") or ""):
+                        issue(errors, "flow_binding_source_required", "输入绑定必须选择来源节点", alias)
+                    if not str(binding.get("target") or "").strip():
+                        issue(errors, "flow_binding_target_required", "输入绑定必须填写目标字段", alias)
             if node_type == "agent" and not str(config.get("prompt") or "").strip():
                 issue(warnings, "agent_prompt_empty", "Agent 节点尚未填写任务提示词", alias)
             elif node_type == "approval" and not str(config.get("description") or "").strip():
@@ -1811,6 +2402,25 @@ class StudioService:
             seen_edges.add((source, target))
             incoming[target].append(source)
             outgoing[source].append(target)
+
+        for alias, node in node_map.items():
+            config = node.get("config") if isinstance(node.get("config"), dict) else {}
+            bindings = config.get("input_bindings") or []
+            if not isinstance(bindings, list):
+                continue
+            for binding in bindings:
+                if not isinstance(binding, dict):
+                    continue
+                source = str(binding.get("source_node_id") or "")
+                if source and source not in node_map:
+                    issue(errors, "flow_binding_source_missing", "输入绑定引用的来源节点不存在", alias)
+                elif source and source not in incoming.get(alias, []):
+                    issue(
+                        errors,
+                        "flow_binding_source_not_upstream",
+                        "输入绑定来源必须通过连线直接连接到当前节点",
+                        alias,
+                    )
 
         indegree = {alias: len(incoming[alias]) for alias in aliases}
         queue = [alias for alias in aliases if indegree[alias] == 0]
@@ -2005,6 +2615,7 @@ class StudioService:
         allowed_types = {"agent", "approval", "condition", "tool"}
         node_ids: dict[str, str] = {}
         normalized_edges: list[tuple[str, str, dict[str, Any]]] = []
+        normalized_nodes: list[tuple[str, str, str, dict[str, Any]]] = []
         for index, node in enumerate(nodes):
             alias = str(node.get("id") or f"node-{index + 1}")
             if alias in node_ids:
@@ -2014,6 +2625,19 @@ class StudioService:
                 raise ValueError("invalid_graph_node_type")
             node_id = new_id()
             node_ids[alias] = node_id
+            normalized_nodes.append((alias, node_id, node_type, node))
+        for alias, node_id, node_type, node in normalized_nodes:
+            config = json.loads(json.dumps(node.get("config") or {}, ensure_ascii=False))
+            bindings = config.get("input_bindings") or []
+            if not isinstance(bindings, list):
+                raise ValueError("invalid_flow_input_bindings")
+            for binding in bindings:
+                if not isinstance(binding, dict):
+                    raise ValueError("invalid_flow_input_binding")
+                source_alias = str(binding.get("source_node_id") or "")
+                if not source_alias or source_alias not in node_ids:
+                    raise ValueError("flow_binding_source_missing")
+                binding["source_node_id"] = node_ids[source_alias]
             connection.execute(
                 "INSERT INTO task_nodes(id,graph_id,node_type,name,position_x,position_y,"
                 "config_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,'pending',?,?)",
@@ -2024,7 +2648,7 @@ class StudioService:
                     str(node.get("name") or alias)[:180],
                     float(node.get("x", node.get("position_x", 0)) or 0),
                     float(node.get("y", node.get("position_y", 0)) or 0),
-                    json.dumps(node.get("config") or {}, ensure_ascii=False),
+                    json.dumps(config, ensure_ascii=False),
                     now,
                     now,
                 ),
@@ -2069,7 +2693,7 @@ class StudioService:
 
     def update_graph(self, graph_id: str, value) -> dict[str, Any]:
         graph = self.get_graph(graph_id)
-        if graph["status"] in {"running", "waiting_approval", "cancelling"}:
+        if graph["status"] in {"running", "waiting_approval", "testing", "cancelling"}:
             raise ValueError("active_flow_locked")
         changes = value.model_dump(exclude_unset=True)
         if "project_id" in changes and changes["project_id"]:
@@ -2107,7 +2731,7 @@ class StudioService:
 
     def delete_graph(self, graph_id: str) -> None:
         graph = self.get_graph(graph_id)
-        if graph["status"] in {"running", "waiting_approval", "cancelling"}:
+        if graph["status"] in {"running", "waiting_approval", "testing", "cancelling"}:
             raise ValueError("active_flow_locked")
         self.database.execute("DELETE FROM task_graphs WHERE id=?", (graph_id,))
         self.database.insert_audit("task_graph.deleted", "task_graph", graph_id)
@@ -2357,6 +2981,145 @@ class StudioService:
             )
         ]
 
+    def unified_activity(self, limit: int = 30) -> list[dict[str, Any]]:
+        """Return one presentation-safe activity stream across sessions, tasks and Flows."""
+        per_source = max(8, min(limit, 100))
+        activity: list[dict[str, Any]] = []
+        session_rows = self.database.fetch_all(
+            "SELECT e.id,e.session_id,e.event_type,e.payload_json,e.created_at,"
+            "s.title source_title,p.id project_id,p.name project_name "
+            "FROM session_events e JOIN agent_sessions s ON s.id=e.session_id "
+            "JOIN projects p ON p.id=s.project_id "
+            "WHERE e.visibility IN ('user','recording_safe') "
+            "AND e.event_type NOT IN ('live.heartbeat','usage.updated','model.requested') "
+            "ORDER BY e.created_at DESC,e.id DESC LIMIT ?",
+            (per_source,),
+        )
+        session_labels = {
+            "session.created": "会话已创建",
+            "turn.started": "Agent 开始执行",
+            "assistant.message": "Agent 已交付回复",
+            "turn.completed": "Agent 本轮完成",
+            "turn.failed": "Agent 本轮失败",
+            "turn.cancelled": "Agent 本轮已取消",
+            "approval.requested": "Agent 正在等待审批",
+            "approval.resolved": "审批已处理",
+            "file.changed": "项目文件发生变更",
+        }
+        for row in session_rows:
+            event_type = str(row["event_type"])
+            payload = _json(row.pop("payload_json"), {})
+            activity.append(
+                {
+                    "id": f"session:{row['id']}",
+                    "source_type": "session",
+                    "source_id": row["session_id"],
+                    "source_title": row["source_title"],
+                    "project_id": row["project_id"],
+                    "project_name": row["project_name"],
+                    "event_type": event_type,
+                    "summary": session_labels.get(event_type, event_type.replace(".", " · ")),
+                    "status": (
+                        "failed"
+                        if "failed" in event_type
+                        else "attention"
+                        if "approval" in event_type
+                        else "completed"
+                        if event_type.endswith("completed") or event_type == "assistant.message"
+                        else "running"
+                        if event_type.endswith("started")
+                        else "info"
+                    ),
+                    "payload": payload,
+                    "href": f"/studio/{row['session_id']}",
+                    "created_at": row["created_at"],
+                }
+            )
+
+        task_rows = self.database.fetch_all(
+            "SELECT e.id,e.task_id,e.event_type,e.payload_json,e.created_at,"
+            "t.title source_title,t.project_id,p.name project_name "
+            "FROM task_events e JOIN task_items t ON t.id=e.task_id "
+            "LEFT JOIN projects p ON p.id=t.project_id "
+            "ORDER BY e.created_at DESC,e.id DESC LIMIT ?",
+            (per_source,),
+        )
+        task_labels = {
+            "task.created": "任务已创建",
+            "task.queued": "任务已进入队列",
+            "task.running": "任务开始执行",
+            "task.approval": "任务等待验收",
+            "task.completed": "任务已完成",
+            "task.failed": "任务执行失败",
+            "task.cancelled": "任务已取消",
+            "task.updated": "任务已更新",
+        }
+        for row in task_rows:
+            event_type = str(row["event_type"])
+            activity.append(
+                {
+                    "id": f"task:{row['id']}",
+                    "source_type": "task",
+                    "source_id": row["task_id"],
+                    "source_title": row["source_title"],
+                    "project_id": row["project_id"],
+                    "project_name": row["project_name"],
+                    "event_type": event_type,
+                    "summary": task_labels.get(event_type, event_type.replace(".", " · ")),
+                    "status": (
+                        "failed"
+                        if "failed" in event_type
+                        else "attention"
+                        if "approval" in event_type
+                        else "completed"
+                        if event_type.endswith("completed")
+                        else "running"
+                        if event_type.endswith(("queued", "running"))
+                        else "info"
+                    ),
+                    "payload": _json(row.pop("payload_json"), {}),
+                    "href": f"/tasks/{row['task_id']}",
+                    "created_at": row["created_at"],
+                }
+            )
+
+        flow_rows = self.database.fetch_all(
+            "SELECT r.id,r.graph_id,r.status,r.dry_run,r.created_at,g.name source_title,"
+            "g.project_id,p.name project_name FROM task_graph_runs r "
+            "JOIN task_graphs g ON g.id=r.graph_id LEFT JOIN projects p ON p.id=g.project_id "
+            "ORDER BY r.created_at DESC LIMIT ?",
+            (per_source,),
+        )
+        for row in flow_rows:
+            status = str(row["status"])
+            activity.append(
+                {
+                    "id": f"flow:{row['id']}",
+                    "source_type": "flow",
+                    "source_id": row["graph_id"],
+                    "source_title": row["source_title"],
+                    "project_id": row["project_id"],
+                    "project_name": row["project_name"],
+                    "event_type": f"flow.{status}",
+                    "summary": (
+                        "Flow 静态试运行完成"
+                        if row["dry_run"] and status == "completed"
+                        else f"Flow {status}"
+                    ),
+                    "status": (
+                        "failed"
+                        if status in {"failed", "cancelled"}
+                        else "completed"
+                        if status == "completed"
+                        else "running"
+                    ),
+                    "payload": {"run_id": row["id"], "dry_run": bool(row["dry_run"])},
+                    "href": f"/flows?flow={row['graph_id']}",
+                    "created_at": row["created_at"],
+                }
+            )
+        return sorted(activity, key=lambda item: item["created_at"], reverse=True)[:limit]
+
     def dashboard(self) -> dict[str, Any]:
         row = self.database.fetch_one(
             "SELECT "
@@ -2393,11 +3156,25 @@ class StudioService:
             "(SELECT COUNT(*) FROM models WHERE enabled=1) models_enabled,"
             "(SELECT COUNT(*) FROM agent_runners WHERE enabled=1) runners_enabled,"
             "(SELECT COUNT(*) FROM mcp_servers WHERE enabled=1) mcp_enabled,"
-            "(SELECT COUNT(*) FROM mcp_servers WHERE enabled=1 AND health_status='healthy') "
+            "(SELECT COUNT(*) FROM mcp_servers WHERE enabled=1 AND health_status='online') "
             "mcp_healthy,"
-            "(SELECT COUNT(*) FROM mcp_servers WHERE enabled=1 AND health_status='error') "
+            "(SELECT COUNT(*) FROM mcp_servers WHERE enabled=1 AND health_status='offline') "
             "mcp_error"
         ) or {}
+        active_tasks = self.database.fetch_all(
+            "SELECT t.id,t.title,t.status,t.priority,t.session_id,t.updated_at,"
+            "p.id project_id,p.name project_name FROM task_items t "
+            "LEFT JOIN projects p ON p.id=t.project_id WHERE t.archived=0 "
+            "AND t.status IN ('queued','running','approval') "
+            "ORDER BY t.updated_at DESC LIMIT 6"
+        )
+        active_flows = self.database.fetch_all(
+            "SELECT g.id,g.name,g.status,g.updated_at,g.project_id,p.name project_name,"
+            "(SELECT COUNT(*) FROM task_nodes n WHERE n.graph_id=g.id) node_count,"
+            "(SELECT COUNT(*) FROM task_nodes n WHERE n.graph_id=g.id AND n.status='completed') "
+            "completed_nodes FROM task_graphs g LEFT JOIN projects p ON p.id=g.project_id "
+            "WHERE g.status='running' ORDER BY g.updated_at DESC LIMIT 6"
+        )
         return {
             **row,
             "active_sessions_list": [self._session_summary(item) for item in active_rows],
@@ -2405,4 +3182,7 @@ class StudioService:
             "recent_projects": self.list_projects()[:6],
             "recent_failures": recent_failures,
             "runtime_health": runtime_health,
+            "active_tasks_list": active_tasks,
+            "active_flows_list": active_flows,
+            "activity": self.unified_activity(30),
         }

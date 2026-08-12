@@ -34,6 +34,8 @@ from .schemas import (
     ProjectRootCreate,
     ProjectUpdate,
     RunnerCreate,
+    RuntimeProfileCreate,
+    RuntimeProfileUpdate,
     SessionAttachmentImport,
     SessionCreate,
     SessionForkCreate,
@@ -41,6 +43,8 @@ from .schemas import (
     SessionUpdate,
     SkillPackCreate,
     SkillPackUpdate,
+    StudioToolCall,
+    TaskBulkAction,
     TaskGraphCreate,
     TaskGraphUpdate,
     TaskItemCreate,
@@ -205,6 +209,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> list[dict[str, Any]]:
         return svc.studio.list_sessions(project_id, include_archived, limit)
 
+    @app.get("/api/v1/runtime-profiles")
+    def runtime_profiles(svc: Service) -> list[dict[str, Any]]:
+        return svc.studio.list_runtime_profiles()
+
+    @app.post("/api/v1/runtime-profiles", status_code=201)
+    def create_runtime_profile(
+        payload: RuntimeProfileCreate, svc: Service
+    ) -> dict[str, Any]:
+        return svc.studio.create_runtime_profile(payload)
+
+    @app.patch("/api/v1/runtime-profiles/{profile_id}")
+    def update_runtime_profile(
+        profile_id: str, payload: RuntimeProfileUpdate, svc: Service
+    ) -> dict[str, Any]:
+        return svc.studio.update_runtime_profile(
+            profile_id, payload.model_dump(exclude_unset=True)
+        )
+
+    @app.delete("/api/v1/runtime-profiles/{profile_id}", status_code=204)
+    def delete_runtime_profile(profile_id: str, svc: Service) -> Response:
+        svc.studio.delete_runtime_profile(profile_id)
+        return Response(status_code=204)
+
     @app.post("/api/v1/sessions", status_code=201)
     def create_session(payload: SessionCreate, svc: Service) -> dict[str, Any]:
         return svc.studio.create_session(payload)
@@ -235,6 +262,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         return svc.queue_session_turn(session_id, payload)
 
+    @app.delete("/api/v1/sessions/{session_id}/turns/{turn_id}")
+    def cancel_queued_session_turn(
+        session_id: str, turn_id: str, svc: Service
+    ) -> dict[str, Any]:
+        return svc.studio.cancel_queued_turn(session_id, turn_id)
+
     @app.post("/api/v1/sessions/{session_id}/attachments", status_code=201)
     def import_session_attachments(
         session_id: str, payload: SessionAttachmentImport, svc: Service
@@ -259,6 +292,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         session_id: str, payload: TerminalCreate, svc: Service
     ) -> dict[str, Any]:
         return svc.start_terminal(session_id, payload)
+
+    @app.get("/api/v1/sessions/{session_id}/terminals")
+    def list_terminals(session_id: str, svc: Service) -> list[dict[str, Any]]:
+        return svc.list_terminals(session_id)
 
     @app.get("/api/v1/sessions/{session_id}/terminals/{terminal_id}")
     def read_terminal(
@@ -366,6 +403,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def create_task(payload: TaskItemCreate, svc: Service) -> dict[str, Any]:
         return svc.studio.create_task(payload)
 
+    @app.post("/api/v1/tasks/bulk")
+    def bulk_update_tasks(payload: TaskBulkAction, svc: Service) -> dict[str, Any]:
+        return svc.studio.bulk_update_tasks(
+            payload.task_ids,
+            payload.action,
+            payload.value,
+        )
+
+    @app.get("/api/v1/tasks/{task_id}")
+    def task_detail(task_id: str, svc: Service) -> dict[str, Any]:
+        return svc.studio.get_task_detail(task_id)
+
+    @app.get("/api/v1/tasks/{task_id}/events")
+    def task_events(
+        task_id: str,
+        svc: Service,
+        limit: int = Query(default=300, ge=1, le=1000),
+    ) -> list[dict[str, Any]]:
+        return svc.studio.list_task_events(task_id, limit)
+
     @app.patch("/api/v1/tasks/{task_id}")
     def update_task(
         task_id: str, payload: TaskItemUpdate, svc: Service
@@ -394,6 +451,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/v1/flows")
     def flows(svc: Service, project_id: str | None = None) -> list[dict[str, Any]]:
         return svc.studio.list_graphs(project_id)
+
+    @app.get("/api/v1/flow-templates")
+    def flow_templates(svc: Service) -> list[dict[str, Any]]:
+        return svc.studio.list_graph_templates()
 
     @app.post("/api/v1/flows", status_code=201)
     def create_flow(payload: TaskGraphCreate, svc: Service) -> dict[str, Any]:
@@ -456,6 +517,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/v1/flows/{graph_id}/nodes/{node_id}/retry", status_code=202)
     def retry_flow_node(graph_id: str, node_id: str, svc: Service) -> dict[str, Any]:
         return svc.retry_flow_node(graph_id, node_id)
+
+    @app.post("/api/v1/flows/{graph_id}/nodes/{node_id}/test", status_code=202)
+    def test_flow_node(graph_id: str, node_id: str, svc: Service) -> dict[str, Any]:
+        return svc.start_flow_node_test(graph_id, node_id)
 
     @app.get("/api/v1/mcp-servers")
     def mcp_servers(svc: Service) -> list[dict[str, Any]]:
@@ -529,6 +594,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def browser_pages(svc: Service) -> list[dict[str, Any]]:
         return svc.browser.pages()
 
+    @app.delete("/api/v1/browser/pages/{page_id}")
+    def browser_close_page(page_id: str, svc: Service) -> dict[str, Any]:
+        return svc.browser.close_page(page_id)
+
     @app.post("/api/v1/browser/navigate")
     def browser_navigate(payload: BrowserNavigate, svc: Service) -> dict[str, Any]:
         return svc.browser.navigate(payload.url, payload.page_id)
@@ -557,6 +626,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         bridge_token: str, payload: BrowserToolCall, svc: Service
     ) -> dict[str, Any]:
         return svc.execute_browser_bridge_tool(
+            bridge_token, payload.tool_name, payload.arguments
+        )
+
+    @app.get("/api/v1/studio/bridge/{bridge_token}/tools", include_in_schema=False)
+    def studio_bridge_tools(bridge_token: str, svc: Service) -> dict[str, Any]:
+        return {"tools": svc.list_studio_bridge_tools(bridge_token)}
+
+    @app.post("/api/v1/studio/bridge/{bridge_token}", include_in_schema=False)
+    def studio_bridge_call(
+        bridge_token: str, payload: StudioToolCall, svc: Service
+    ) -> dict[str, Any]:
+        return svc.execute_studio_bridge_tool(
             bridge_token, payload.tool_name, payload.arguments
         )
 

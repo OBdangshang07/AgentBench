@@ -23,7 +23,7 @@ from typing import Any
 import httpx
 
 from . import __version__
-from .agent import AgentHarness, AgentResult
+from .agent import TOOL_DEFINITIONS, AgentHarness, AgentResult
 from .browser_runtime import BrowserRuntime
 from .catalog import seed_builtin_data
 from .config import Settings
@@ -271,7 +271,13 @@ def public_runner(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def runner_adapter_capabilities(runner_type: str, tools: list[str]) -> dict[str, Any]:
-    native_resume = runner_type in {"codex_cli", "claude_code_cli"}
+    native_resume = runner_type in {
+        "codex_cli",
+        "claude_code_cli",
+        "kimi_code_cli",
+        "qoder_cli",
+        "cursor_cli",
+    }
     browser_bridge = runner_type in {
         "unified",
         "codex_cli",
@@ -279,6 +285,7 @@ def runner_adapter_capabilities(runner_type: str, tools: list[str]) -> dict[str,
         "opencode_cli",
         "reasonix_cli",
         "kimi_code_cli",
+        "qoder_cli",
     }
     structured = runner_type in {
         "unified",
@@ -288,6 +295,7 @@ def runner_adapter_capabilities(runner_type: str, tools: list[str]) -> dict[str,
         "reasonix_cli",
         "gemini_cli",
         "kimi_code_cli",
+        "cursor_cli",
     }
     return {
         "conversation_mode": "native_resume" if native_resume else "history_replay",
@@ -297,7 +305,7 @@ def runner_adapter_capabilities(runner_type: str, tools: list[str]) -> dict[str,
         ),
         "mcp": browser_bridge or "mcp" in tools,
         "visible_browser": browser_bridge,
-        "model_override": runner_type != "qoder_cli",
+        "model_override": True,
         "approval_gate": True,
         "process_tree_cancel": True,
         "interactive_terminal": False,
@@ -364,6 +372,7 @@ class EvaluationService:
         self._session_cancel_events: dict[str, threading.Event] = {}
         self._flow_cancel_events: dict[str, threading.Event] = {}
         self._browser_bridges: dict[str, dict[str, Any]] = {}
+        self._studio_bridges: dict[str, dict[str, Any]] = {}
         self._terminals: dict[str, tuple[str, InteractiveTerminal]] = {}
         self._experiment_semaphores: dict[str, threading.Semaphore] = {}
         self._install_jobs: dict[str, dict[str, Any]] = {}
@@ -404,6 +413,7 @@ class EvaluationService:
             for event in self._flow_cancel_events.values():
                 event.set()
             self._browser_bridges.clear()
+            self._studio_bridges.clear()
             terminals = list(self._terminals.values())
             self._terminals.clear()
         for _, terminal in terminals:
@@ -432,8 +442,40 @@ class EvaluationService:
         self, session_id: str, value: SessionTurnCreate
     ) -> dict[str, Any]:
         turn = self.studio.queue_turn(session_id, value)
-        self.executor.submit(self._execute_session_turn, turn["id"])
+        if not turn.get("queued_behind_active"):
+            self.executor.submit(self._execute_session_turn, turn["id"])
         return turn
+
+    def _dispatch_next_session_turn(self, session_id: str) -> None:
+        """Start the oldest queued instruction after a successful turn completes."""
+        with self.database.transaction() as connection:
+            active = connection.execute(
+                "SELECT 1 FROM session_turns WHERE session_id=? "
+                "AND status IN ('preparing','running','waiting_approval') LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            if active:
+                return
+            next_turn = connection.execute(
+                "SELECT id,turn_no FROM session_turns WHERE session_id=? AND status='queued' "
+                "ORDER BY turn_no LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            if not next_turn:
+                return
+            now = utc_now()
+            connection.execute(
+                "UPDATE agent_sessions SET status='queued',updated_at=?,completed_at=NULL "
+                "WHERE id=?",
+                (now, session_id),
+            )
+        self.studio.append_event(
+            session_id,
+            "turn.dequeued",
+            {"turn_id": next_turn["id"], "turn_no": next_turn["turn_no"]},
+            turn_id=next_turn["id"],
+        )
+        self.executor.submit(self._execute_session_turn, next_turn["id"])
 
     def start_task(self, task_id: str) -> dict[str, Any]:
         task = self.studio.get_task(task_id)
@@ -461,6 +503,11 @@ class EvaluationService:
             "completed_at=NULL,cancelled_at=NULL,result_summary='',updated_at=? WHERE id=?",
             (runner_id, model_id, now, task_id),
         )
+        self.studio.append_task_event(
+            task_id,
+            "task.queued",
+            {"runner_id": str(runner_id), "model_id": str(model_id)},
+        )
         self.executor.submit(self._execute_task, task_id)
         self.database.insert_audit("task.started", "task", task_id)
         return self.studio.get_task(task_id)
@@ -482,12 +529,31 @@ class EvaluationService:
                 "UPDATE task_items SET status='running',session_id=?,updated_at=? WHERE id=?",
                 (session["id"], utc_now(), task_id),
             )
+            self.studio.append_task_event(
+                task_id,
+                "task.running",
+                {"session_id": session["id"]},
+            )
             instruction = task["description"].strip() or task["title"]
+            acceptance_criteria = [
+                str(item.get("text") or "").strip()
+                for item in task.get("acceptance_criteria") or []
+                if str(item.get("text") or "").strip()
+            ]
+            acceptance_block = ""
+            if acceptance_criteria:
+                acceptance_block = (
+                    "\n\n验收标准：\n"
+                    + "\n".join(
+                        f"- [ ] {criterion}" for criterion in acceptance_criteria
+                    )
+                    + "\n\n请逐项验证并在最终汇报中说明证据；不要在未验证时宣称已满足。"
+                )
             turn = self.studio.queue_turn(
                 session["id"],
                 SessionTurnCreate(
                     message=(
-                        f"完成任务：{task['title']}\n\n{instruction}\n\n"
+                        f"完成任务：{task['title']}\n\n{instruction}{acceptance_block}\n\n"
                         "请直接在项目中实施、验证，并用简洁摘要汇报结果。"
                     )
                 ),
@@ -502,16 +568,38 @@ class EvaluationService:
                     "UPDATE task_items SET status='completed',result_summary=?,updated_at=?,completed_at=? WHERE id=?",
                     (str(completed_turn.get("final_answer") or "")[:4000], now, now, task_id),
                 )
+                self.studio.append_task_event(
+                    task_id,
+                    "task.completed",
+                    {"session_id": session["id"], "turn_id": turn["id"]},
+                )
             else:
+                failure_message = str(
+                    completed_turn.get("error_message") or "任务执行失败"
+                )[:4000]
                 self.database.execute(
                     "UPDATE task_items SET status='failed',result_summary=?,updated_at=? WHERE id=?",
-                    (str(completed_turn.get("error_message") or "任务执行失败")[:4000], now, task_id),
+                    (failure_message, now, task_id),
+                )
+                self.studio.append_task_event(
+                    task_id,
+                    "task.failed",
+                    {
+                        "session_id": session["id"],
+                        "turn_id": turn["id"],
+                        "message": _redact_viewer_text(failure_message, 800),
+                    },
                 )
         except Exception as exc:
             logger.exception("Agent task %s failed", task_id)
             self.database.execute(
                 "UPDATE task_items SET status='failed',result_summary=?,updated_at=? WHERE id=?",
                 (_redact_viewer_text(str(exc), 4000), utc_now(), task_id),
+            )
+            self.studio.append_task_event(
+                task_id,
+                "task.failed",
+                {"message": _redact_viewer_text(str(exc), 800)},
             )
             self.database.insert_audit(
                 "task.failed", "task", task_id, {"error": _redact_viewer_text(str(exc), 800)}
@@ -528,12 +616,17 @@ class EvaluationService:
             "UPDATE task_items SET status='cancelled',cancelled_at=?,updated_at=? WHERE id=?",
             (utc_now(), utc_now(), task_id),
         )
+        self.studio.append_task_event(
+            task_id,
+            "task.cancelled",
+            {"session_id": task.get("session_id")},
+        )
         self.database.insert_audit("task.cancelled", "task", task_id)
         return self.studio.get_task(task_id)
 
     def start_flow(self, graph_id: str) -> dict[str, Any]:
         graph = self.studio.get_graph(graph_id)
-        if graph["status"] in {"running", "waiting_approval", "cancelling"}:
+        if graph["status"] in {"running", "waiting_approval", "testing", "cancelling"}:
             raise ValueError("flow_already_active")
         validation = self.studio.validate_graph(graph_id)
         if not validation["valid"]:
@@ -561,9 +654,45 @@ class EvaluationService:
         )
         return self.studio.get_graph(graph_id)
 
+    def start_flow_node_test(self, graph_id: str, node_id: str) -> dict[str, Any]:
+        graph = self.studio.get_graph(graph_id)
+        if graph["status"] in {"running", "waiting_approval", "testing", "cancelling"}:
+            raise ValueError("flow_already_active")
+        node = next((item for item in graph["nodes"] if item["id"] == node_id), None)
+        if not node:
+            raise KeyError("task_graph_node_not_found")
+        if node["node_type"] == "approval":
+            raise ValueError("approval_node_test_not_supported")
+        if node["node_type"] == "agent" and not graph.get("project_id"):
+            raise ValueError("flow_project_required")
+        cancel_event = threading.Event()
+        with self._state_lock:
+            self._flow_cancel_events[graph_id] = cancel_event
+        now = utc_now()
+        with self.database.transaction() as connection:
+            connection.execute(
+                "UPDATE task_graphs SET status='testing',updated_at=?,completed_at=NULL "
+                "WHERE id=?",
+                (now, graph_id),
+            )
+            connection.execute(
+                "UPDATE task_nodes SET status='pending',attempts=0,error_message=NULL,"
+                "output_json='{}',session_id=NULL,updated_at=? WHERE id=? AND graph_id=?",
+                (now, node_id, graph_id),
+            )
+        run = self.studio.create_graph_run(graph_id, retry_node_id=node_id)
+        self.executor.submit(self._execute_flow_node_test, graph_id, node_id, run["id"])
+        self.database.insert_audit(
+            "task_graph.node_tested",
+            "task_graph",
+            graph_id,
+            {"node_id": node_id, "run_id": run["id"]},
+        )
+        return {"graph": self.studio.get_graph(graph_id), "run": run}
+
     def retry_flow_node(self, graph_id: str, node_id: str) -> dict[str, Any]:
         graph = self.studio.get_graph(graph_id)
-        if graph["status"] in {"running", "waiting_approval", "cancelling"}:
+        if graph["status"] in {"running", "waiting_approval", "testing", "cancelling"}:
             raise ValueError("flow_already_active")
         node_map = {node["id"]: node for node in graph["nodes"]}
         target = node_map.get(node_id)
@@ -616,7 +745,7 @@ class EvaluationService:
 
     def cancel_flow(self, graph_id: str) -> dict[str, Any]:
         graph = self.studio.get_graph(graph_id)
-        if graph["status"] not in {"running", "waiting_approval"}:
+        if graph["status"] not in {"running", "waiting_approval", "testing"}:
             raise ValueError("flow_not_active")
         with self._state_lock:
             self._flow_cancel_events.setdefault(graph_id, threading.Event()).set()
@@ -743,6 +872,49 @@ class EvaluationService:
             applied.append(relative)
         return applied
 
+    @staticmethod
+    def _flow_output_value(output: Any, path: str) -> Any:
+        current = output
+        for part in [item for item in path.split(".") if item]:
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            elif isinstance(current, list) and part.isdigit() and int(part) < len(current):
+                current = current[int(part)]
+            else:
+                return None
+        return current
+
+    @staticmethod
+    def _set_flow_input(target: dict[str, Any], path: str, value: Any) -> None:
+        parts = [item for item in path.split(".") if item]
+        if not parts:
+            return
+        current = target
+        for part in parts[:-1]:
+            child = current.get(part)
+            if not isinstance(child, dict):
+                child = {}
+                current[part] = child
+            current = child
+        current[parts[-1]] = value
+
+    def _flow_bound_inputs(
+        self, node: dict[str, Any], predecessor_nodes: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        config = node.get("config") or {}
+        predecessor_map = {str(item["id"]): item for item in predecessor_nodes}
+        values: dict[str, Any] = {}
+        for binding in config.get("input_bindings") or []:
+            if not isinstance(binding, dict):
+                continue
+            source = predecessor_map.get(str(binding.get("source_node_id") or ""))
+            if not source:
+                continue
+            output = source.get("output") or {}
+            value = self._flow_output_value(output, str(binding.get("path") or ""))
+            self._set_flow_input(values, str(binding.get("target") or ""), value)
+        return values
+
     def _execute_flow_agent_node(
         self,
         graph: dict[str, Any],
@@ -751,17 +923,20 @@ class EvaluationService:
         *,
         isolated: bool,
     ) -> dict[str, Any]:
-        project = self.studio.get_project(str(graph["project_id"]))
         config = node.get("config") or {}
-        runner_id = str(config.get("runner_id") or project["default_runner_id"])
-        model_id = str(config.get("model_id") or project["default_model_id"])
+        graph_settings = graph.get("settings") or {}
+        profile_id = config.get("profile_id") or graph_settings.get("profile_id")
+        runner_id = str(config["runner_id"]) if config.get("runner_id") else None
+        model_id = str(config["model_id"]) if config.get("model_id") else None
         session = self.studio.create_session(
             SessionCreate(
                 project_id=str(graph["project_id"]),
+                profile_id=str(profile_id) if profile_id else None,
                 runner_id=runner_id,
                 model_id=model_id,
                 title=f"Flow · {graph['name']} · {node['name']}",
-                permission_profile=config.get("permission_profile") or project["permission_profile"],
+                permission_profile=config.get("permission_profile"),
+                reasoning_effort=config.get("reasoning_effort"),
             )
         )
         original_root = Path(session["workspace_path"]).resolve()
@@ -780,9 +955,15 @@ class EvaluationService:
             for item in predecessor_nodes
             if item.get("output")
         )
+        bound_inputs = self._flow_bound_inputs(node, predecessor_nodes)
         prompt = str(config.get("prompt") or node["name"])
         if predecessor_summary:
             prompt += f"\n\n可用的上游结果：\n{predecessor_summary}"
+        if bound_inputs:
+            prompt += (
+                "\n\n已绑定的结构化输入：\n"
+                + json.dumps(bound_inputs, ensure_ascii=False, indent=2)[:20_000]
+            )
         turn = self.studio.queue_turn(
             session["id"], SessionTurnCreate(message=prompt)
         )
@@ -813,7 +994,12 @@ class EvaluationService:
         isolated: bool,
     ) -> dict[str, Any]:
         settings = graph.get("settings") or {}
-        max_retries = max(0, min(int(settings.get("max_retries", 1)), 3))
+        config = node.get("config") or {}
+        max_retries = max(
+            0,
+            min(int(config.get("retry_count", settings.get("max_retries", 1))), 3),
+        )
+        error_strategy = str(config.get("error_strategy") or "fail_flow")
         last_error = ""
         for attempt in range(1, max_retries + 2):
             if cancel_event.is_set():
@@ -829,12 +1015,14 @@ class EvaluationService:
                         graph, node, predecessors, isolated=isolated
                     )
                 elif node["node_type"] == "tool":
-                    config = node.get("config") or {}
+                    arguments = copy.deepcopy(config.get("arguments") or {})
+                    for key, value in self._flow_bound_inputs(node, predecessors).items():
+                        self._set_flow_input(arguments, key, value)
                     output = self.execute_mcp_tool(
                         str(config.get("server_id") or ""),
                         McpToolCall(
                             tool_name=str(config.get("tool_name") or ""),
-                            arguments=config.get("arguments") or {},
+                            arguments=arguments,
                         ),
                     )
                 elif node["node_type"] == "approval":
@@ -843,21 +1031,23 @@ class EvaluationService:
                         None,
                     )
                     if not session_id:
-                        project = self.studio.get_project(str(graph["project_id"]))
                         session_id = self.studio.create_session(
                             SessionCreate(
                                 project_id=str(graph["project_id"]),
                                 title=f"Flow 审批 · {node['name']}",
-                                runner_id=project["default_runner_id"],
-                                model_id=project["default_model_id"],
+                                profile_id=(graph.get("settings") or {}).get("profile_id"),
                             )
                         )["id"]
                     approval = self.studio.create_approval(
                         session_id,
                         request_type="flow_node",
                         title=str(node["name"]),
-                        description=str((node.get("config") or {}).get("description") or "工作流等待人工确认后继续"),
-                        request={"graph_id": graph["id"], "node_id": node["id"]},
+                        description=str(config.get("description") or "工作流等待人工确认后继续"),
+                        request={
+                            "graph_id": graph["id"],
+                            "node_id": node["id"],
+                            "bound_inputs": self._flow_bound_inputs(node, predecessors),
+                        },
                         risk_level="medium",
                     )
                     self.database.execute(
@@ -878,10 +1068,15 @@ class EvaluationService:
                         (utc_now(), graph["id"]),
                     )
                 elif node["node_type"] == "condition":
-                    config = node.get("config") or {}
-                    source = "\n".join(
-                        json.dumps(item.get("output") or {}, ensure_ascii=False)
-                        for item in predecessors
+                    bound_inputs = self._flow_bound_inputs(node, predecessors)
+                    bound_source = bound_inputs.get("source")
+                    source = (
+                        json.dumps(bound_source, ensure_ascii=False)
+                        if bound_source is not None
+                        else "\n".join(
+                            json.dumps(item.get("output") or {}, ensure_ascii=False)
+                            for item in predecessors
+                        )
                     )[:40_000]
                     expected = str(config.get("value") or "")
                     operator = str(config.get("operator") or "contains")
@@ -917,11 +1112,127 @@ class EvaluationService:
                     )
                     continue
                 break
+        if error_strategy in {"continue", "skip_branch"}:
+            output = {
+                "ok": False,
+                "error": last_error or "节点执行失败",
+                "continued": error_strategy == "continue",
+                "skipped_branch": error_strategy == "skip_branch",
+                "summary": f"节点失败：{last_error or '未知错误'}",
+            }
+            self.database.execute(
+                "UPDATE task_nodes SET status=?,output_json=?,error_message=?,updated_at=? "
+                "WHERE id=?",
+                (
+                    "completed" if error_strategy == "continue" else "skipped",
+                    json.dumps(output, ensure_ascii=False),
+                    last_error or "节点执行失败",
+                    utc_now(),
+                    node["id"],
+                ),
+            )
+            return output
         self.database.execute(
             "UPDATE task_nodes SET status='failed',error_message=?,updated_at=? WHERE id=?",
             (last_error or "节点执行失败", utc_now(), node["id"]),
         )
         raise RuntimeError(last_error or "节点执行失败")
+
+    def _execute_flow_node_test(self, graph_id: str, node_id: str, run_id: str) -> None:
+        with self._state_lock:
+            cancel_event = self._flow_cancel_events[graph_id]
+        final_status = "failed"
+        error_message = ""
+        try:
+            graph = self.studio.get_graph(graph_id)
+            node = next(item for item in graph["nodes"] if item["id"] == node_id)
+            source_ids = {
+                edge["source_node_id"]
+                for edge in graph["edges"]
+                if edge["target_node_id"] == node_id
+            }
+            predecessors = [
+                copy.deepcopy(item) for item in graph["nodes"] if item["id"] in source_ids
+            ]
+            test_input = (node.get("config") or {}).get("test_input")
+            for predecessor in predecessors:
+                if predecessor.get("output"):
+                    continue
+                if isinstance(test_input, dict) and predecessor["id"] in test_input:
+                    sample = test_input[predecessor["id"]]
+                else:
+                    sample = test_input
+                if sample is not None:
+                    predecessor["output"] = (
+                        sample if isinstance(sample, dict) else {"summary": str(sample)}
+                    )
+            if not predecessors and test_input is not None:
+                predecessors = [
+                    {
+                        "id": "node-test-input",
+                        "name": "测试输入",
+                        "output": test_input
+                        if isinstance(test_input, dict)
+                        else {"summary": str(test_input)},
+                    }
+                ]
+            self._execute_flow_node(
+                graph,
+                node,
+                predecessors,
+                cancel_event,
+                isolated=False,
+            )
+            final_status = "completed"
+        except Exception as exc:
+            error_message = _redact_viewer_text(str(exc), 1800)
+            final_status = "cancelled" if cancel_event.is_set() else "failed"
+            if final_status == "cancelled":
+                self.database.execute(
+                    "UPDATE task_nodes SET status='cancelled',error_message=?,updated_at=? "
+                    "WHERE id=? AND status IN ('pending','running','retrying')",
+                    ("节点测试已取消", utc_now(), node_id),
+                )
+        finally:
+            now = utc_now()
+            self.database.execute(
+                "UPDATE task_graphs SET status='draft',updated_at=?,completed_at=? WHERE id=?",
+                (now, now, graph_id),
+            )
+            node = self.database.fetch_one(
+                "SELECT status,attempts,error_message,output_json,session_id "
+                "FROM task_nodes WHERE id=? AND graph_id=?",
+                (node_id, graph_id),
+            ) or {}
+            usage = self.database.fetch_one(
+                "SELECT COALESCE(s.cost_usd,0) cost_usd,"
+                "COALESCE(s.tokens_input,0) tokens_input,"
+                "COALESCE(s.tokens_output,0) tokens_output,"
+                "COALESCE(s.duration_ms,0) duration_ms "
+                "FROM task_nodes n LEFT JOIN agent_sessions s ON s.id=n.session_id "
+                "WHERE n.id=?",
+                (node_id,),
+            ) or {}
+            self.studio.finish_graph_run(
+                graph_id,
+                run_id,
+                status=final_status,
+                error_message=error_message,
+                result={
+                    "node_test": True,
+                    "node": {
+                        "id": node_id,
+                        "status": node.get("status"),
+                        "attempts": node.get("attempts", 0),
+                        "error_message": node.get("error_message"),
+                        "output": _json(node.get("output_json"), {}),
+                        "session_id": node.get("session_id"),
+                    },
+                },
+                usage=usage,
+            )
+            with self._state_lock:
+                self._flow_cancel_events.pop(graph_id, None)
 
     def _execute_flow(self, graph_id: str, run_id: str) -> None:
         with self._state_lock:
@@ -1187,7 +1498,8 @@ class EvaluationService:
         active_turn = self.database.fetch_one(
             "SELECT id,status FROM session_turns WHERE session_id=? "
             "AND status IN ('queued','preparing','running','waiting_approval') "
-            "ORDER BY turn_no DESC LIMIT 1",
+            "ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'preparing' THEN 1 "
+            "WHEN 'waiting_approval' THEN 2 ELSE 3 END,turn_no LIMIT 1",
             (session_id,),
         )
         if not active_turn:
@@ -1216,6 +1528,8 @@ class EvaluationService:
         )
         if event:
             event.set()
+        elif active_turn["status"] == "queued":
+            self._dispatch_next_session_turn(session_id)
         return self.studio.get_session(session_id)
 
     def start_terminal(self, session_id: str, value: TerminalCreate) -> dict[str, Any]:
@@ -1235,8 +1549,8 @@ class EvaluationService:
                 for owner, item in self._terminals.values()
                 if owner == session_id and item.read()["running"]
             ]
-            if active:
-                return active[0].read()
+            if len(active) >= 3:
+                raise ValueError("session_terminal_limit_reached")
             if len(self._terminals) >= 8:
                 raise ValueError("terminal_limit_reached")
             terminal_id = new_id()
@@ -1244,6 +1558,7 @@ class EvaluationService:
                 terminal_id,
                 Path(session["workspace_path"]),
                 shell=value.shell,
+                title=value.title or f"{value.shell.removesuffix('.exe')} {len(active) + 1}",
                 columns=value.columns,
                 rows=value.rows,
             )
@@ -1255,6 +1570,16 @@ class EvaluationService:
             visibility="recording_safe",
         )
         return terminal.read()
+
+    def list_terminals(self, session_id: str) -> list[dict[str, Any]]:
+        self.studio.get_session(session_id)
+        with self._state_lock:
+            values = [
+                item.read()
+                for owner, item in self._terminals.values()
+                if owner == session_id
+            ]
+        return sorted(values, key=lambda item: str(item.get("created_at") or ""))
 
     def _terminal(self, session_id: str, terminal_id: str) -> InteractiveTerminal:
         with self._state_lock:
@@ -1486,6 +1811,74 @@ class EvaluationService:
         requested = {str(tool) for tool in skill.get("tools") or []}
         return [tool for tool in available if tool in requested] if requested else available
 
+    def _studio_profile_mcp_catalog(
+        self, session: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, tuple[str, str]]]:
+        """Build safe, stable tool aliases for the MCP servers selected by a runtime profile."""
+        profile_id = str(session.get("profile_id") or "")
+        if not profile_id:
+            return [], [], {}
+        profile = self.studio.get_runtime_profile(profile_id)
+        model_tools: list[dict[str, Any]] = []
+        mcp_tools: list[dict[str, Any]] = []
+        mapping: dict[str, tuple[str, str]] = {}
+        for server_id in profile.get("mcp_server_ids") or []:
+            try:
+                server = self.studio.get_mcp_server(str(server_id))
+            except KeyError:
+                continue
+            if not server.get("enabled"):
+                continue
+            for tool in server.get("tools") or []:
+                if not isinstance(tool, dict):
+                    continue
+                tool_name = str(tool.get("name") or "").strip()
+                if not tool_name:
+                    continue
+                slug = re.sub(r"[^A-Za-z0-9_-]+", "_", tool_name).strip("_") or "tool"
+                alias = f"mcp__{str(server_id).replace('-', '')[:8]}__{slug}"[:64]
+                if alias in mapping:
+                    continue
+                schema = tool.get("inputSchema") or tool.get("input_schema")
+                if not isinstance(schema, dict):
+                    schema = {"type": "object", "properties": {}}
+                description = str(tool.get("description") or "").strip()
+                qualified_description = (
+                    f"MCP · {server['name']} · {tool_name}. {description}"
+                ).strip()[:1000]
+                model_tools.append(
+                    {
+                        "name": alias,
+                        "description": qualified_description,
+                        "parameters": copy.deepcopy(schema),
+                    }
+                )
+                mcp_tools.append(
+                    {
+                        "name": alias,
+                        "description": qualified_description,
+                        "inputSchema": copy.deepcopy(schema),
+                    }
+                )
+                mapping[alias] = (str(server_id), tool_name)
+        return model_tools, mcp_tools, mapping
+
+    def _studio_tool_executor(self, mcp_mapping: dict[str, tuple[str, str]]):
+        def execute(name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
+            browser_result = self._studio_browser_tool(name, arguments)
+            if browser_result is not None:
+                return browser_result
+            target = mcp_mapping.get(name)
+            if target is None:
+                return None
+            server_id, tool_name = target
+            return self.execute_mcp_tool(
+                server_id,
+                McpToolCall(tool_name=tool_name, arguments=arguments),
+            )
+
+        return execute
+
     def _materialize_studio_attachments(
         self,
         session: dict[str, Any],
@@ -1558,6 +1951,30 @@ class EvaluationService:
         prompt_index = args.index("{prompt}") if "{prompt}" in args else len(args)
         args[prompt_index:prompt_index] = [flag, value]
 
+    @staticmethod
+    def _remove_cli_flags(args: list[str], *flags: str) -> list[str]:
+        blocked = set(flags)
+        return [item for item in args if item not in blocked]
+
+    @classmethod
+    def _studio_native_resume_options(
+        cls, args: list[str], runner_type: str, native_session_id: str
+    ) -> list[str]:
+        configured = list(args)
+        if runner_type == "codex_cli":
+            configured = cls._remove_cli_flags(configured, "--ephemeral")
+            if native_session_id and configured and configured[0] == "exec":
+                configured[1:1] = ["resume", native_session_id]
+        elif runner_type in {"claude_code_cli", "qoder_cli"}:
+            configured = cls._remove_cli_flags(configured, "--no-session-persistence")
+            if native_session_id:
+                cls._replace_cli_option(configured, "--resume", native_session_id)
+        elif runner_type == "kimi_code_cli" and native_session_id:
+            cls._replace_cli_option(configured, "--session", native_session_id)
+        elif runner_type == "cursor_cli" and native_session_id:
+            cls._replace_cli_option(configured, "--resume", native_session_id)
+        return configured
+
     @classmethod
     def _studio_native_options(
         cls,
@@ -1629,6 +2046,61 @@ class EvaluationService:
             for attachment in attachments:
                 prompt_index = configured.index("{prompt}") if "{prompt}" in configured else len(configured)
                 configured[prompt_index:prompt_index] = ["--file", str(attachment["absolute_path"])]
+        elif runner_type == "qoder_cli":
+            configured = cls._remove_cli_flags(
+                configured, "--dangerously-skip-permissions"
+            )
+            permission_mode = {
+                "readonly": "dont_ask",
+                "workspace": "accept_edits",
+                "standard": "auto",
+                "full": "bypass_permissions",
+            }.get(permission_profile, "accept_edits")
+            cls._replace_cli_option(configured, "--permission-mode", permission_mode)
+            qoder_effort = {
+                "xhigh": "high",
+                "max": "high",
+            }.get(reasoning_effort, reasoning_effort)
+            cls._replace_cli_option(configured, "--reasoning-effort", qoder_effort)
+            if permission_profile == "full":
+                prompt_index = configured.index("{prompt}") if "{prompt}" in configured else len(configured)
+                configured.insert(prompt_index, "--dangerously-skip-permissions")
+            for attachment in attachments:
+                prompt_index = configured.index("{prompt}") if "{prompt}" in configured else len(configured)
+                configured[prompt_index:prompt_index] = [
+                    "--attachment",
+                    str(attachment["absolute_path"]),
+                ]
+        elif runner_type == "kimi_code_cli":
+            configured = cls._remove_cli_flags(
+                configured, "--yolo", "--plan", "--thinking", "--no-thinking"
+            )
+            prompt_index = configured.index("{prompt}") if "{prompt}" in configured else len(configured)
+            if permission_profile == "readonly":
+                configured.insert(prompt_index, "--plan")
+            elif permission_profile == "full":
+                configured.insert(prompt_index, "--yolo")
+            prompt_index = configured.index("{prompt}") if "{prompt}" in configured else len(configured)
+            if reasoning_effort in {"high", "xhigh", "max"}:
+                configured.insert(prompt_index, "--thinking")
+            elif reasoning_effort == "low":
+                configured.insert(prompt_index, "--no-thinking")
+        elif runner_type == "cursor_cli":
+            configured = cls._remove_cli_flags(configured, "--force", "--yolo")
+            cls._replace_cli_option(
+                configured,
+                "--sandbox",
+                "disabled" if permission_profile == "full" else "enabled",
+            )
+            if permission_profile == "full":
+                prompt_index = configured.index("{prompt}") if "{prompt}" in configured else len(configured)
+                configured.insert(prompt_index, "--force")
+            # Cursor exposes model selection but no stable reasoning-effort
+            # option. Keep the requested effort in AgentBench metadata only.
+            for attachment in attachments:
+                path = str(attachment.get("absolute_path") or "").strip()
+                if path:
+                    configured[-1] = f"{configured[-1]}\n\nAttached file: {path}"
         return configured
 
     @staticmethod
@@ -1637,6 +2109,8 @@ class EvaluationService:
         runner_type: str,
         browser_mcp: dict[str, Any] | None,
         current_env: dict[str, str],
+        *,
+        server_name: str = "agentbench_browser",
     ) -> tuple[list[str], dict[str, str]]:
         configured = list(args)
         environment = dict(current_env)
@@ -1649,19 +2123,24 @@ class EvaluationService:
         if runner_type == "codex_cli":
             configured[prompt_index:prompt_index] = [
                 "-c",
-                f"mcp_servers.agentbench_browser.command={json.dumps(command)}",
+                f"mcp_servers.{server_name}.command={json.dumps(command)}",
                 "-c",
-                f"mcp_servers.agentbench_browser.args={json.dumps(command_args)}",
+                f"mcp_servers.{server_name}.args={json.dumps(command_args)}",
             ]
-        elif runner_type in {"claude_code_cli", "kimi_code_cli"}:
+        elif runner_type in {"claude_code_cli", "kimi_code_cli", "qoder_cli"}:
             configured[prompt_index:prompt_index] = [
                 "--mcp-config",
                 json.dumps(
-                    {"mcpServers": {"agentbench_browser": stdio_definition}},
+                    {"mcpServers": {server_name: stdio_definition}},
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ),
             ]
+        elif runner_type == "cursor_cli":
+            # Cursor reads MCP configuration from .cursor/mcp.json. Injecting a
+            # temporary config would mutate the project, so Studio advertises
+            # the native Cursor adapter without claiming the AgentBench bridge.
+            pass
         elif runner_type == "opencode_cli":
             overlay: dict[str, Any] = {}
             raw_overlay = environment.get("OPENCODE_CONFIG_CONTENT")
@@ -1673,7 +2152,7 @@ class EvaluationService:
             servers = overlay.get("mcp") if isinstance(overlay.get("mcp"), dict) else {}
             overlay["mcp"] = {
                 **servers,
-                "agentbench_browser": {
+                server_name: {
                     "type": "local",
                     "command": [command, *command_args],
                     "enabled": True,
@@ -1827,7 +2306,8 @@ class EvaluationService:
         cancel_event: threading.Event,
     ):
         def authorize(name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
-            if name != "run_command" and not name.startswith("browser_"):
+            is_mcp = name.startswith("mcp__")
+            if name != "run_command" and not name.startswith("browser_") and not is_mcp:
                 return None
             current = self.database.fetch_one(
                 "SELECT permission_profile FROM agent_sessions WHERE id=?", (session["id"],)
@@ -1852,6 +2332,21 @@ class EvaluationService:
                     description="浏览器保持可见，你可以随时接管。网页交互可能产生外部状态变化。",
                     request={"tool": name, "arguments": arguments},
                     pattern="browser:*",
+                    risk_level="medium",
+                    cancel_event=cancel_event,
+                )
+            if is_mcp:
+                return self._wait_for_studio_approval(
+                    session,
+                    turn_id,
+                    request_type="mcp_tool",
+                    title="Agent 请求调用 MCP 工具",
+                    description=(
+                        "该工具由当前运行 Profile 显式启用，可能读取或修改外部系统。"
+                        "批准后本轮任务会自动继续。"
+                    ),
+                    request={"tool": name, "arguments": arguments},
+                    pattern=name,
                     risk_level="medium",
                     cancel_event=cancel_event,
                 )
@@ -2004,6 +2499,110 @@ class EvaluationService:
         )
         return result
 
+    def _register_studio_bridge(
+        self,
+        session: dict[str, Any],
+        turn_id: str,
+        cancel_event: threading.Event,
+        *,
+        include_browser: bool,
+        mcp_tools: list[dict[str, Any]],
+        mcp_mapping: dict[str, tuple[str, str]],
+    ) -> tuple[str, dict[str, Any]]:
+        token = f"{uuid.uuid4().hex}{uuid.uuid4().hex}"
+        tools = list(mcp_tools)
+        if include_browser:
+            for name in (
+                "browser_navigate",
+                "browser_snapshot",
+                "browser_click",
+                "browser_fill",
+                "browser_screenshot",
+            ):
+                definition = TOOL_DEFINITIONS[name]
+                tools.append(
+                    {
+                        "name": name,
+                        "description": definition["description"],
+                        "inputSchema": copy.deepcopy(definition["parameters"]),
+                    }
+                )
+        with self._state_lock:
+            self._studio_bridges[token] = {
+                "session": session,
+                "turn_id": turn_id,
+                "cancel_event": cancel_event,
+                "tools": tools,
+                "mcp_mapping": dict(mcp_mapping),
+            }
+        if getattr(sys, "frozen", False):
+            command = str(Path(sys.executable).resolve())
+            args = ["--studio-mcp"]
+        else:
+            command = str(Path(sys.executable).resolve())
+            args = [
+                str((Path(__file__).resolve().parent.parent / "agentbench_entry.py").resolve()),
+                "--studio-mcp",
+            ]
+        args.extend(
+            [
+                "--api-base",
+                f"http://{self.settings.host}:{self.settings.port}",
+                "--bridge-token",
+                token,
+            ]
+        )
+        return token, {"command": command, "args": args}
+
+    def _unregister_studio_bridge(self, token: str | None) -> None:
+        if not token:
+            return
+        with self._state_lock:
+            self._studio_bridges.pop(token, None)
+
+    def list_studio_bridge_tools(self, token: str) -> list[dict[str, Any]]:
+        with self._state_lock:
+            bridge = self._studio_bridges.get(token)
+        if bridge is None:
+            raise ValueError("studio_bridge_expired")
+        return copy.deepcopy(bridge["tools"])
+
+    def execute_studio_bridge_tool(
+        self, token: str, tool_name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        with self._state_lock:
+            bridge = self._studio_bridges.get(token)
+        if bridge is None:
+            raise ValueError("studio_bridge_expired")
+        exposed = {str(item.get("name") or "") for item in bridge["tools"]}
+        if tool_name not in exposed:
+            raise ValueError("studio_tool_not_allowed")
+        session = bridge["session"]
+        turn_id = str(bridge["turn_id"])
+        denied = self._studio_tool_authorizer(
+            session, turn_id, bridge["cancel_event"]
+        )(tool_name, arguments)
+        if denied is not None:
+            return denied
+        self.studio.append_event(
+            session["id"],
+            "live.tool",
+            {"tool": tool_name, "status": "running", "detail": "Agent 工具正在执行"},
+            turn_id=turn_id,
+            visibility="recording_safe",
+        )
+        result = self._studio_tool_executor(bridge["mcp_mapping"])(tool_name, arguments)
+        if result is None:
+            raise ValueError("studio_tool_not_found")
+        self.studio.append_event(
+            session["id"],
+            "live.tool",
+            {"tool": tool_name, "status": "completed", "detail": "Agent 工具执行完成"},
+            turn_id=turn_id,
+            visibility="recording_safe",
+        )
+        return result
+
     def _execute_session_turn(self, turn_id: str) -> None:
         turn = self.database.fetch_one("SELECT * FROM session_turns WHERE id=?", (turn_id,))
         if not turn or turn["status"] != "queued":
@@ -2044,7 +2643,7 @@ class EvaluationService:
         before = self._studio_workspace_state(root, before_snapshot_root)
         attachment_root: Path | None = None
         attachments: list[dict[str, Any]] = []
-        browser_bridge_token: str | None = None
+        studio_bridge_token: str | None = None
         workspace = Workspace(root)
         runner = self.database.fetch_one(
             "SELECT * FROM agent_runners WHERE id=?", (session["runner_id"],)
@@ -2087,6 +2686,9 @@ class EvaluationService:
                 session, turn_id, root
             )
             instruction = self._studio_turn_instruction(session, turn)
+            model_mcp_tools, native_mcp_tools, mcp_mapping = (
+                self._studio_profile_mcp_catalog(session)
+            )
             if runner["runner_type"] == "unified":
                 client = self._model_client(
                     model,
@@ -2113,7 +2715,8 @@ class EvaluationService:
                     tool_authorizer=self._studio_tool_authorizer(
                         session, turn_id, cancel_event
                     ),
-                    tool_executor=self._studio_browser_tool,
+                    tool_executor=self._studio_tool_executor(mcp_mapping),
+                    additional_tools=model_mcp_tools,
                 ).run(instruction)
             else:
                 native_denied = None
@@ -2153,10 +2756,17 @@ class EvaluationService:
                         (utc_now(), session["id"]),
                     )
                 native_tools = self._studio_session_tools(session)
-                browser_mcp = None
-                if native_denied is None and "browser" in native_tools:
-                    browser_bridge_token, browser_mcp = self._register_browser_bridge(
-                        session, turn_id, cancel_event
+                studio_mcp = None
+                if native_denied is None and (
+                    "browser" in native_tools or native_mcp_tools
+                ):
+                    studio_bridge_token, studio_mcp = self._register_studio_bridge(
+                        session,
+                        turn_id,
+                        cancel_event,
+                        include_browser="browser" in native_tools,
+                        mcp_tools=native_mcp_tools,
+                        mcp_mapping=mcp_mapping,
                     )
                 definition = {
                     "instruction": instruction,
@@ -2172,8 +2782,8 @@ class EvaluationService:
                         "permission_profile": session["permission_profile"],
                         "reasoning_effort": session.get("reasoning_effort") or "medium",
                         "attachments": attachments,
-                        "browser_mcp": browser_mcp,
-                        "browser_bridge_token": browser_bridge_token,
+                        "studio_mcp": studio_mcp,
+                        "studio_bridge_token": studio_bridge_token,
                     },
                 }
                 if native_denied is None:
@@ -2363,12 +2973,17 @@ class EvaluationService:
                 turn_id=turn_id,
             )
         finally:
-            self._unregister_browser_bridge(browser_bridge_token)
+            self._unregister_studio_bridge(studio_bridge_token)
             if attachment_root and attachment_root.exists():
                 with suppress(OSError):
                     shutil.rmtree(attachment_root)
             with self._state_lock:
                 self._session_cancel_events.pop(turn_id, None)
+            completed = self.database.fetch_one(
+                "SELECT session_id,status FROM session_turns WHERE id=?", (turn_id,)
+            )
+            if completed and completed["status"] == "completed":
+                self._dispatch_next_session_turn(str(completed["session_id"]))
 
     # Models
     def list_models(self, include_archived: bool = False) -> list[dict[str, Any]]:
@@ -2566,6 +3181,7 @@ class EvaluationService:
             "aider-cli": "aider_cli",
             "kimi-code": "kimi_code_cli",
             "qoder-cli": "qoder_cli",
+            "cursor-cli": "cursor_cli",
         }
         runner_type = cli_runners.get(model["provider"])
         if runner_type:
@@ -2832,9 +3448,20 @@ class EvaluationService:
     def get_math_paper_import(self, import_id: str) -> dict[str, Any]:
         return get_math_import(self.settings.data_dir, import_id)
 
-    def _math_experiment_score(self, experiment_id: str) -> dict[str, float] | None:
+    def _math_experiment_score(self, experiment_id: str) -> dict[str, Any] | None:
         rows = self.database.fetch_all(
-            "SELECT r.score,t.definition_json FROM runs r "
+            "SELECT r.score,t.definition_json,"
+            "(SELECT COUNT(*) FROM score_components sc WHERE sc.run_id=r.id) "
+            "AS component_count,"
+            "(SELECT sc.score FROM score_components sc WHERE sc.run_id=r.id "
+            "AND sc.dimension='objective_quality' LIMIT 1) AS objective_score,"
+            "(SELECT sc.weight FROM score_components sc WHERE sc.run_id=r.id "
+            "AND sc.dimension='objective_quality' LIMIT 1) AS objective_weight,"
+            "(SELECT sc.score FROM score_components sc WHERE sc.run_id=r.id "
+            "AND sc.dimension='judge_quality' LIMIT 1) AS judge_score,"
+            "(SELECT sc.weight FROM score_components sc WHERE sc.run_id=r.id "
+            "AND sc.dimension='judge_quality' LIMIT 1) AS judge_weight "
+            "FROM runs r "
             "JOIN test_cases t ON t.id=r.test_case_id WHERE r.experiment_id=?",
             (experiment_id,),
         )
@@ -2846,13 +3473,36 @@ class EvaluationService:
             if metadata.get("exam") != MATH_EXAM_ID:
                 continue
             found_math = True
-            if row.get("score") is None:
-                continue
             points = float(metadata.get("points") or 0)
             if points <= 0:
                 continue
-            weighted_sum += float(row["score"]) * points
+            # All scheduled questions contribute to the paper denominator. This
+            # keeps an in-progress paper at its actual awarded points instead of
+            # extrapolating the answered subset to 150.
             point_sum += points
+            quality_components = [
+                (float(score), float(weight))
+                for score, weight in (
+                    (row.get("objective_score"), row.get("objective_weight")),
+                    (row.get("judge_score"), row.get("judge_weight")),
+                )
+                if score is not None and weight is not None and float(weight) > 0
+            ]
+            # Historical runs created before score dimensions existed keep the
+            # legacy score as a compatibility fallback. New/rejudged runs always
+            # use pure mathematical answer quality; efficiency never affects the
+            # 150-point paper score.
+            quality_score = (
+                sum(score * weight for score, weight in quality_components)
+                / sum(weight for _, weight in quality_components)
+                if quality_components
+                else float(row["score"])
+                if row.get("score") is not None and int(row.get("component_count") or 0) == 0
+                else None
+            )
+            if quality_score is None:
+                continue
+            weighted_sum += quality_score * points
         if not found_math or point_sum <= 0:
             return None
         raw_percentage = weighted_sum / point_sum
@@ -2861,6 +3511,7 @@ class EvaluationService:
             "weighted_score": percentage,
             "exam_score": round(raw_percentage * 1.5, 2),
             "exam_total": 150.0,
+            "exam_scoring_basis": "answer_quality",
         }
 
     def update_math_paper_question(
@@ -3505,7 +4156,23 @@ class EvaluationService:
                 "{model_name}",
                 "{prompt}",
             ),
-            "qoder_cli": ("--print", "--output-format", "{prompt}"),
+            "qoder_cli": (
+                "--print",
+                "--output-format",
+                "--model",
+                "{model_name}",
+                "{prompt}",
+            ),
+            "cursor_cli": (
+                "--print",
+                "--output-format",
+                "stream-json",
+                "--workspace",
+                "{workspace}",
+                "--model",
+                "{model_name}",
+                "{prompt}",
+            ),
             "command": ("{prompt}",),
         }.get(runner_type, ())
 
@@ -4500,15 +5167,9 @@ class EvaluationService:
         model_settings = _json(model.get("settings_json"), {})
         native_session_id = str(metadata.get("native_session_id") or "").strip()
         if metadata.get("studio_session"):
-            if runner["runner_type"] == "codex_cli":
-                args = [item for item in args if item != "--ephemeral"]
-                if native_session_id and args and args[0] == "exec":
-                    args[1:1] = ["resume", native_session_id]
-            elif runner["runner_type"] == "claude_code_cli":
-                args = [item for item in args if item != "--no-session-persistence"]
-                if native_session_id:
-                    prompt_index = args.index("{prompt}") if "{prompt}" in args else len(args)
-                    args[prompt_index:prompt_index] = ["--resume", native_session_id]
+            args = self._studio_native_resume_options(
+                args, str(runner["runner_type"]), native_session_id
+            )
             args = self._studio_native_options(
                 args,
                 str(runner["runner_type"]),
@@ -4517,17 +5178,25 @@ class EvaluationService:
                 list(metadata.get("attachments") or []),
                 str(model.get("model_name") or ""),
             )
+            studio_mcp = metadata.get("studio_mcp")
             browser_mcp = metadata.get("browser_mcp")
+            active_mcp = studio_mcp if isinstance(studio_mcp, dict) else browser_mcp
+            server_name = "agentbench_studio" if isinstance(studio_mcp, dict) else "agentbench_browser"
             args, native_environment = self._studio_native_browser_options(
                 args,
                 str(runner["runner_type"]),
-                browser_mcp if isinstance(browser_mcp, dict) else None,
+                active_mcp if isinstance(active_mcp, dict) else None,
                 native_environment,
+                server_name=server_name,
             )
-            if runner["runner_type"] == "reasonix_cli" and isinstance(browser_mcp, dict):
+            if runner["runner_type"] == "reasonix_cli" and isinstance(active_mcp, dict):
                 bridge_environment, native_bridge_root = self._reasonix_browser_environment(
-                    str(metadata.get("browser_bridge_token") or uuid.uuid4().hex),
-                    browser_mcp,
+                    str(
+                        metadata.get("studio_bridge_token")
+                        or metadata.get("browser_bridge_token")
+                        or uuid.uuid4().hex
+                    ),
+                    active_mcp,
                     native_environment,
                 )
                 native_environment.update(bridge_environment)
@@ -4809,9 +5478,24 @@ class EvaluationService:
         nested = item.get("item") if isinstance(item.get("item"), dict) else {}
         part = item.get("part") if isinstance(item.get("part"), dict) else {}
         tool = item.get("tool") if isinstance(item.get("tool"), dict) else {}
+        tool_call = item.get("tool_call") if isinstance(item.get("tool_call"), dict) else {}
+        cursor_tool_name = next(iter(tool_call), "")
+        cursor_tool = (
+            tool_call.get(cursor_tool_name)
+            if cursor_tool_name and isinstance(tool_call.get(cursor_tool_name), dict)
+            else {}
+        )
         message = item.get("message") if isinstance(item.get("message"), dict) else {}
         blocks = message.get("content") if isinstance(message.get("content"), list) else []
-        sources = [item, nested, part, tool, *[block for block in blocks if isinstance(block, dict)]]
+        sources = [
+            item,
+            nested,
+            part,
+            tool,
+            tool_call,
+            cursor_tool,
+            *[block for block in blocks if isinstance(block, dict)],
+        ]
         kind = str(
             item.get("kind")
             or item.get("type")
@@ -4861,6 +5545,18 @@ class EvaluationService:
             if isinstance(delta, str) and delta:
                 return "live.text_delta", {**base, "delta": delta}
             return None
+        if runner_type == "cursor_cli" and kind.lower() == "assistant":
+            cursor_delta = "\n".join(
+                str(block.get("text") or "")
+                for block in blocks
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+            if (
+                cursor_delta
+                and item.get("timestamp_ms") is not None
+                and item.get("model_call_id") is None
+            ):
+                return "live.text_delta", {**base, "delta": cursor_delta}
         if semantic_kinds & {"message", "agent_message", "assistant_message", "assistant"}:
             public_text = first_value("text", "output_text")
             if not public_text and isinstance(blocks, list):
@@ -4872,7 +5568,7 @@ class EvaluationService:
             if isinstance(public_text, str) and public_text.strip():
                 return "live.message", {**base, "text": public_text.strip()}
 
-        tool_name = first_value("tool_name", "name")
+        tool_name = first_value("tool_name", "name") or cursor_tool_name
         tool_input = first_value("input", "arguments", "args")
         if isinstance(tool_input, str):
             with suppress(json.JSONDecodeError):
@@ -4900,6 +5596,7 @@ class EvaluationService:
             command_status = (
                 "completed"
                 if kind.lower() in {"tool_result", "tool.completed", "tool_result_end"}
+                or str(item.get("subtype") or "").lower() == "completed"
                 else first_value("status") or "running"
             )
             if any(marker in descriptor for marker in ("pytest", "vitest", "jest", "cargo test", "test")):
@@ -4934,6 +5631,7 @@ class EvaluationService:
                 "status": (
                     "completed"
                     if kind.lower() in {"tool_result", "tool.completed", "tool_result_end"}
+                    or str(item.get("subtype") or "").lower() == "completed"
                     else "preparing"
                     if bool(tool.get("partial")) and not tool_input
                     else first_value("status") or "running"
@@ -5012,6 +5710,7 @@ class EvaluationService:
         input_tokens = 0
         output_tokens = 0
         reported_cost: float | None = None
+        cursor_deltas = ""
         count = 0
         for raw_line in output.splitlines():
             if not raw_line.strip():
@@ -5046,7 +5745,18 @@ class EvaluationService:
                     block.get("text", "") for block in blocks if block.get("type") == "text"
                 ]
                 if text_blocks:
-                    final = "\n".join(text_blocks)
+                    message_text = "\n".join(text_blocks)
+                    if (
+                        runner_type == "cursor_cli"
+                        and item_kind == "assistant"
+                        and item.get("timestamp_ms") is not None
+                        and item.get("model_call_id") is None
+                    ):
+                        cursor_deltas += message_text
+                    else:
+                        final = message_text
+                        if runner_type == "cursor_cli" and item_kind == "assistant":
+                            cursor_deltas = ""
             usage = (
                 item.get("usage")
                 or (item.get("turn") or {}).get("usage")
@@ -5076,7 +5786,7 @@ class EvaluationService:
             if raw_cost is not None:
                 with suppress(TypeError, ValueError):
                     reported_cost = max(reported_cost or 0.0, float(raw_cost))
-        return final, input_tokens, output_tokens, reported_cost, count
+        return final or cursor_deltas, input_tokens, output_tokens, reported_cost, count
 
     def _model_client(self, model: dict[str, Any], metadata: dict[str, Any]) -> ModelClient:
         style = model["api_style"]

@@ -106,7 +106,7 @@ export default function ExperimentDetail() {
       <div className="ab-experiment-detail-scroll" ref={scrollRef}>
       {actionError && <div className="error-banner preflight-error"><strong>启动检查未通过</strong><span>{actionError}</span></div>}
       {actionMessage && <div className="ab-rejudge-success"><CheckCircle2 size={15} /><span>{actionMessage}</span></div>}
-      <div className="balanced-score-strip"><Gauge size={18} /><div><strong>平衡评分</strong><span>质量 94% · 完成时间 3% · Agent 步数 2% · Token 1%</span></div><small>新运行支持连续部分分，旧记录保持原始评分</small></div>
+      <div className="balanced-score-strip"><Gauge size={18} /><div><strong>{summary?.exam_total ? "卷面与效率分离" : "平衡评分"}</strong><span>{summary?.exam_total ? "考研卷面仅按答案质量计分 · 时间、步骤与 Token 独立展示" : "质量 94% · 完成时间 3% · Agent 步数 2% · Token 1%"}</span></div><small>{summary?.exam_total ? "满分 150 · 解答题按 10 + 12×5 计 70 分" : "新运行支持连续部分分，旧记录保持原始评分"}</small></div>
       <div className="run-overview">
         <Card><span>状态</span><StatusBadge status={item.status} /><div className="progress-line large"><i style={{ width: `${progress}%` }} /></div><small>{finished} / {summary?.total ?? 0} · {progress}%</small></Card>
         <Card><span>{summary?.exam_total ? "卷面得分" : "平均得分"}</span>{summary?.exam_total ? <strong>{summary.exam_score?.toFixed(1) ?? "—"}<small> / {summary.exam_total.toFixed(0)}</small></strong> : <Score value={summary?.avg_score} large />}<small>{summary?.exam_total ? `按每题官方分值加权 · 百分制 ${summary.avg_score?.toFixed(1) ?? "—"}` : summary?.avg_objective_score != null ? `客观质量 ${summary.avg_objective_score.toFixed(1)} · 时效 ${summary.avg_time_score?.toFixed(1) ?? "—"}` : "仅统计完成且成功评分的运行"}</small></Card>

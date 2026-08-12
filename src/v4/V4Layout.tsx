@@ -1,9 +1,13 @@
 import {
   Activity,
   ArrowRight,
+  Bell,
   Bot,
   Boxes,
+  CheckCheck,
   ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
   CircleGauge,
   Command,
   FolderKanban,
@@ -18,14 +22,16 @@ import {
   ShieldAlert,
   Sparkles,
   TerminalSquare,
+  Trash2,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import agentbenchMark from "../assets/agentbench-mark.png";
+import { useWorkspaceUx } from "../components/WorkspaceUx";
 import { useApi } from "../lib/useApi";
 import type { SystemStatus } from "../types";
-import type { StudioDashboardData, WorkspaceSearchResult } from "./types";
+import type { Project, StudioDashboardData, WorkspaceSearchResult } from "./types";
 
 const operationNavigation = [
   { to: "/", label: "控制中心", icon: CircleGauge, end: true },
@@ -40,6 +46,13 @@ const platformNavigation = [
   { to: "/tools", label: "工具与 MCP", icon: PlugZap },
   { to: "/benchmarks", label: "Benchmarks", icon: FlaskConical },
   { to: "/settings", label: "本地设置", icon: Settings },
+];
+
+const quickActions = [
+  { to: "/studio?new=1", label: "新建 Agent 会话", detail: "选择当前项目并开始一轮工作", icon: Sparkles },
+  { to: "/tasks?new=1", label: "新建任务", detail: "创建可追踪、可重试的工作项", icon: ListTodo },
+  { to: "/flows?new=1", label: "新建 Agent Flow", detail: "编排多 Agent 与工具节点", icon: GitFork },
+  { to: "/projects?new=1", label: "添加本地项目", detail: "授权一个新的工作目录", icon: FolderKanban },
 ];
 
 const pageNames: Array<[RegExp, string]> = [
@@ -81,9 +94,13 @@ function NavigationGroup({ label, items }: { label: string; items: typeof operat
 
 export default function V4Layout() {
   const location = useLocation();
+  const ux = useWorkspaceUx();
   const { data: dashboard } = useApi<StudioDashboardData>("/studio/dashboard", 4_000);
   const { data: status } = useApi<SystemStatus>("/system/status", 12_000);
+  const { data: projects } = useApi<Project[]>("/projects", 10_000);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.localStorage.getItem("agentbench.workspace.sidebar.v1") === "collapsed");
   const [onboardingOpen, setOnboardingOpen] = useState(() => window.localStorage.getItem("agentbench.v5.onboarding.done") !== "1");
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
@@ -105,6 +122,7 @@ export default function V4Layout() {
           ? { label: "等待配置", tone: "warning" }
           : { label: "运行正常", tone: "ready" };
   const showOnboarding = onboardingOpen && Boolean(status && dashboard) && (installed === 0 || (dashboard?.project_count ?? 0) === 0);
+  const selectedProject = projects?.find((project) => project.id === ux.selectedProjectId) ?? projects?.[0];
 
   function dismissOnboarding() {
     window.localStorage.setItem("agentbench.v5.onboarding.done", "1");
@@ -117,11 +135,23 @@ export default function V4Layout() {
         event.preventDefault();
         setPaletteOpen((value) => !value);
       }
-      if (event.key === "Escape") setPaletteOpen(false);
+      if (event.key === "Escape") {
+        setPaletteOpen(false);
+        setNotificationsOpen(false);
+      }
     }
     window.addEventListener("keydown", handleKeyboard);
     return () => window.removeEventListener("keydown", handleKeyboard);
   }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem("agentbench.workspace.sidebar.v1", sidebarCollapsed ? "collapsed" : "expanded");
+  }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    if (!projects?.length) return;
+    if (!projects.some((project) => project.id === ux.selectedProjectId)) ux.setSelectedProjectId(projects[0].id);
+  }, [projects, ux.selectedProjectId, ux.setSelectedProjectId]);
 
   useEffect(() => {
     const handle = window.setTimeout(() => setDebouncedQuery(query), 180);
@@ -141,6 +171,10 @@ export default function V4Layout() {
       !needle || item.label.toLowerCase().includes(needle)
     ));
   }, [query]);
+  const visibleActions = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return quickActions.filter((action) => !needle || `${action.label} ${action.detail}`.toLowerCase().includes(needle));
+  }, [query]);
 
   const groupedResults = useMemo(() => {
     const groups: Record<WorkspaceSearchResult["kind"], WorkspaceSearchResult[]> = {
@@ -158,9 +192,10 @@ export default function V4Layout() {
   };
 
   return (
-    <div className="v4-shell">
+    <div className={`v4-shell density-${ux.density} ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <aside className="v4-sidebar">
         <Brand />
+        <button className="v5-shell-collapse" type="button" aria-label={sidebarCollapsed ? "展开主导航" : "收起主导航"} title={sidebarCollapsed ? "展开主导航" : "收起主导航"} onClick={() => setSidebarCollapsed((value) => !value)}>{sidebarCollapsed ? <ChevronsRight size={16} /> : <ChevronsLeft size={16} />}<span>{sidebarCollapsed ? "展开" : "收起导航"}</span></button>
         <div className="v4-nav-scroll">
           <NavigationGroup label="OPERATIONS" items={operationNavigation} />
           <NavigationGroup label="PLATFORM" items={platformNavigation} />
@@ -174,12 +209,13 @@ export default function V4Layout() {
       </aside>
 
       <header className="v4-topbar">
-        <div className="v4-breadcrumb"><span>AGENTBENCH</span><ChevronRight size={13} /><strong>{title}</strong></div>
+        <div className="v4-breadcrumb"><span>AGENTBENCH</span><ChevronRight size={13} /><strong>{title}</strong>{projects?.length ? <label className="v5-project-switcher" title={selectedProject?.root_path}><FolderKanban size={14} /><select aria-label="当前工作项目" value={selectedProject?.id ?? ""} onChange={(event) => ux.setSelectedProjectId(event.target.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label> : null}</div>
         <div className="v4-top-actions">
           <button className="v4-command-trigger" type="button" onClick={() => setPaletteOpen(true)}><Search size={15} /><span>搜索项目、会话或运行命令</span><kbd>Ctrl K</kbd></button>
           {(dashboard?.pending_approvals ?? 0) > 0 && <Link className="v5-approval-chip" to="/"><ShieldAlert size={15} /><span>{dashboard?.pending_approvals} 个操作等待审批</span></Link>}
           <Link className="v4-live-chip" to="/studio"><Activity size={15} /><span>{dashboard?.active_sessions ?? 0} 个会话运行中</span></Link>
-          <span className="v4-avatar">OB</span>
+          <button className="v5-density-toggle" type="button" title={`切换为${ux.density === "comfortable" ? "紧凑" : "舒适"}密度`} onClick={() => ux.setDensity(ux.density === "comfortable" ? "compact" : "comfortable")}><Boxes size={16} /><span>{ux.density === "comfortable" ? "舒适" : "紧凑"}</span></button>
+          <button className={`v5-notification-trigger ${ux.unreadCount ? "unread" : ""}`} type="button" aria-label={`通知中心，${ux.unreadCount} 条未读`} onClick={() => { const opening = !notificationsOpen; setNotificationsOpen(opening); if (opening) ux.markNotificationsRead(); }}><Bell size={17} />{ux.unreadCount > 0 && <b>{Math.min(99, ux.unreadCount)}</b>}</button>
         </div>
       </header>
 
@@ -189,6 +225,8 @@ export default function V4Layout() {
         <div className="v4-palette-backdrop" onMouseDown={() => setPaletteOpen(false)}>
           <section className="v4-palette" onMouseDown={(event) => event.stopPropagation()}>
             <header><Search size={18} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="输入页面、项目或命令…" /><button type="button" onClick={() => setPaletteOpen(false)}><X size={16} /></button></header>
+            {!!visibleActions.length && <label>立即执行</label>}
+            {!!visibleActions.length && <div className="v5-command-actions">{visibleActions.map(({ to, label, detail, icon: Icon }) => <Link key={to} to={to} onClick={() => setPaletteOpen(false)}><span><Icon size={16} /></span><div><strong>{label}</strong><small>{detail}</small></div><ArrowRight size={14} /></Link>)}</div>}
             <label>{query.trim() ? "页面与命令" : "快速前往"}</label>
             <div className="v5-palette-list">
               {commandItems.map(({ to, label, icon: Icon }) => (
@@ -217,6 +255,11 @@ export default function V4Layout() {
           </section>
         </div>
       )}
+
+      {notificationsOpen && <aside className="v5-notification-center" aria-label="通知中心">
+        <header><div><strong>通知中心</strong><small>{ux.notifications.length} 条本地事件</small></div><button type="button" title="全部标记已读" onClick={ux.markNotificationsRead}><CheckCheck size={15} /></button><button type="button" title="清空通知" onClick={ux.clearNotifications}><Trash2 size={15} /></button><button type="button" title="关闭" onClick={() => setNotificationsOpen(false)}><X size={15} /></button></header>
+        <div>{[...ux.notifications].reverse().map((notification) => <article className={`${notification.kind} ${notification.read ? "read" : "unread"}`} key={notification.id}><i /><div><strong>{notification.title}</strong>{notification.message && <p>{notification.message}</p>}<time>{new Date(notification.created_at).toLocaleString("zh-CN")}</time></div></article>)}{!ux.notifications.length && <section><Bell size={24} /><strong>还没有通知</strong><p>任务完成、审批、失败和配置结果会保存在这里。</p></section>}</div>
+      </aside>}
 
       {showOnboarding && (
         <div className="v4-modal-backdrop v5-onboarding-backdrop" onMouseDown={dismissOnboarding}>

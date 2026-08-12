@@ -16,6 +16,7 @@ from agentbench.api import create_app
 from agentbench.browser_mcp import BrowserMcpBridge
 from agentbench.browser_runtime import BrowserRuntime, BrowserRuntimeError
 from agentbench.catalog import MOCK_MODEL_ID, UNIFIED_RUNNER_ID
+from agentbench.db import SCHEMA_VERSION
 from agentbench.execution import CommandResult
 from agentbench.model_clients import ModelDecision, ModelUsage
 from agentbench.schemas import (
@@ -25,6 +26,7 @@ from agentbench.schemas import (
     McpServerUpdate,
     McpToolCall,
     ProjectCreate,
+    RuntimeProfileCreate,
     SessionAttachmentImport,
     SessionCreate,
     SessionTurnCreate,
@@ -36,7 +38,7 @@ from agentbench.schemas import (
     TerminalCreate,
     TerminalInput,
 )
-from agentbench.service import EvaluationService
+from agentbench.service import EvaluationService, runner_adapter_capabilities
 
 
 class StudioWriteClient:
@@ -100,6 +102,27 @@ class BlockingStudioClient:
             kind="final",
             content="This response should be cancelled.",
             usage=ModelUsage(input_tokens=20, output_tokens=5),
+            raw={"test": True},
+        )
+
+
+class QueuedStudioClient:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+
+    def complete(self, history, tools) -> ModelDecision:
+        del history, tools
+        self.calls += 1
+        if self.calls == 1:
+            self.started.set()
+            if not self.release.wait(5):
+                raise AssertionError("Queued turn test did not release the first model call")
+        return ModelDecision(
+            kind="final",
+            content=f"Completed queued instruction {self.calls}.",
+            usage=ModelUsage(input_tokens=12, output_tokens=6),
             raw={"test": True},
         )
 
@@ -192,6 +215,60 @@ def test_control_center_only_lists_active_sessions_and_surfaces_failures(
         payload = response.json()
         assert [item["id"] for item in payload["active_sessions_list"]] == [running["id"]]
         assert payload["recent_failures"][0]["id"] == failed["id"]
+
+
+def test_control_center_unifies_session_task_and_flow_activity(settings, tmp_path) -> None:
+    service = EvaluationService(settings)
+    try:
+        project = create_project(service, tmp_path / "activity-project")
+        session = service.studio.create_session(
+            SessionCreate(project_id=project["id"], title="Activity session")
+        )
+        service.studio.append_event(session["id"], "turn.started", {"turn_no": 1})
+        task = service.studio.create_task(
+            TaskItemCreate(
+                project_id=project["id"],
+                title="Activity task",
+                priority="high",
+            )
+        )
+        service.database.execute(
+            "UPDATE task_items SET status='running' WHERE id=?", (task["id"],)
+        )
+        service.studio.append_task_event(task["id"], "task.running", {})
+        graph = service.studio.create_graph(
+            TaskGraphCreate(
+                project_id=project["id"],
+                name="Activity Flow",
+                nodes=[
+                    {
+                        "id": "gate",
+                        "type": "condition",
+                        "name": "Gate",
+                        "config": {"operator": "contains", "value": "ready"},
+                    }
+                ],
+            )
+        )
+        service.database.execute(
+            "UPDATE task_graphs SET status='running' WHERE id=?", (graph["id"],)
+        )
+        service.studio.create_graph_run(graph["id"], status="running")
+
+        payload = service.studio.dashboard()
+
+        assert {item["source_type"] for item in payload["activity"]} >= {
+            "session",
+            "task",
+            "flow",
+        }
+        assert payload["active_tasks_list"][0]["id"] == task["id"]
+        assert payload["active_flows_list"][0]["id"] == graph["id"]
+        assert next(
+            item for item in payload["activity"] if item["source_type"] == "session"
+        )["href"] == f"/studio/{session['id']}"
+    finally:
+        service.close()
         assert payload["runtime_health"]["models_enabled"] >= 1
         assert payload["runtime_health"]["runners_enabled"] >= 1
 
@@ -215,7 +292,7 @@ def test_diagnostics_export_is_downloadable_and_excludes_private_content(
 
         assert response.status_code == 200
         assert response.headers["content-disposition"].startswith("attachment;")
-        assert response.json()["database"] == {"schema_version": 10, "quick_check": "ok"}
+        assert response.json()["database"] == {"schema_version": SCHEMA_VERSION, "quick_check": "ok"}
         assert "TOP SECRET PROMPT" not in response.text
         assert "prompts" in response.json()["privacy"]
 
@@ -313,7 +390,7 @@ def test_v4_schema_keeps_benchmarks_separate_from_studio(settings) -> None:
             "mcp_servers",
         } <= tables
         assert {"experiments", "runs", "run_events", "test_cases"} <= tables
-        assert service.database.fetch_one("SELECT version FROM schema_meta") == {"version": 10}
+        assert service.database.fetch_one("SELECT version FROM schema_meta") == {"version": SCHEMA_VERSION}
     finally:
         service.close()
 
@@ -565,6 +642,128 @@ def test_native_studio_options_map_permission_effort_and_images() -> None:
     assert 'model_reasoning_effort="xhigh"' in codex
     assert codex[codex.index("--image") + 1] == attachment["absolute_path"]
 
+    qoder = EvaluationService._studio_native_options(
+        [
+            "--print",
+            "--output-format",
+            "json",
+            "--dangerously-skip-permissions",
+            "{prompt}",
+        ],
+        "qoder_cli",
+        "readonly",
+        "max",
+        [attachment],
+    )
+    assert "--dangerously-skip-permissions" not in qoder
+    assert qoder[qoder.index("--permission-mode") + 1] == "dont_ask"
+    assert qoder[qoder.index("--reasoning-effort") + 1] == "high"
+    assert qoder[qoder.index("--attachment") + 1] == attachment["absolute_path"]
+
+    kimi = EvaluationService._studio_native_options(
+        ["--print", "--yolo", "--prompt", "{prompt}"],
+        "kimi_code_cli",
+        "readonly",
+        "high",
+        [attachment],
+    )
+    assert "--yolo" not in kimi
+    assert "--plan" in kimi
+    assert "--thinking" in kimi
+
+    cursor = EvaluationService._studio_native_options(
+        ["--print", "--sandbox", "enabled", "{prompt}"],
+        "cursor_cli",
+        "full",
+        "high",
+        [attachment],
+    )
+    assert cursor[cursor.index("--sandbox") + 1] == "disabled"
+    assert "--force" in cursor
+    assert attachment["absolute_path"] in cursor[-1]
+
+
+def test_native_studio_resume_options_cover_supported_session_clis() -> None:
+    codex = EvaluationService._studio_native_resume_options(
+        ["exec", "--ephemeral", "{prompt}"], "codex_cli", "codex-session"
+    )
+    assert codex[:3] == ["exec", "resume", "codex-session"]
+    assert "--ephemeral" not in codex
+
+    claude = EvaluationService._studio_native_resume_options(
+        ["--print", "--no-session-persistence", "{prompt}"],
+        "claude_code_cli",
+        "claude-session",
+    )
+    assert "--no-session-persistence" not in claude
+    assert claude[claude.index("--resume") + 1] == "claude-session"
+
+    qoder = EvaluationService._studio_native_resume_options(
+        ["--print", "{prompt}"], "qoder_cli", "qoder-session"
+    )
+    assert qoder[qoder.index("--resume") + 1] == "qoder-session"
+
+    kimi = EvaluationService._studio_native_resume_options(
+        ["--print", "--prompt", "{prompt}"], "kimi_code_cli", "kimi-session"
+    )
+    assert kimi[kimi.index("--session") + 1] == "kimi-session"
+
+    cursor = EvaluationService._studio_native_resume_options(
+        ["--print", "{prompt}"], "cursor_cli", "cursor-session"
+    )
+    assert cursor[cursor.index("--resume") + 1] == "cursor-session"
+
+    for runner_type in ("codex_cli", "claude_code_cli", "kimi_code_cli", "qoder_cli", "cursor_cli"):
+        capabilities = runner_adapter_capabilities(runner_type, [])
+        assert capabilities["native_resume"] is True
+        assert capabilities["conversation_mode"] == "native_resume"
+        assert capabilities["visible_browser"] is (runner_type != "cursor_cli")
+
+
+def test_cursor_stream_event_exposes_tool_progress_without_raw_payload() -> None:
+    event = EvaluationService._normalize_native_live_event(
+        "cursor_cli",
+        "stdout",
+        json.dumps(
+            {
+                "type": "tool_call",
+                "subtype": "started",
+                "tool_call": {"readToolCall": {"args": {"path": "src/app.ts"}}},
+            }
+        ),
+        1,
+    )
+
+    assert event is not None
+    event_type, payload = event
+    assert event_type == "live.tool"
+    assert payload["tool"] == "readToolCall"
+    assert "src/app.ts" in payload["detail"]
+
+    delta = EvaluationService._normalize_native_live_event(
+        "cursor_cli",
+        "stdout",
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp_ms": 2,
+                "message": {"content": [{"type": "text", "text": "正在检查"}]},
+            },
+            ensure_ascii=False,
+        ),
+        2,
+    )
+    assert delta == (
+        "live.text_delta",
+        {
+            "runner_type": "cursor_cli",
+            "stream": "stdout",
+            "line_no": 2,
+            "source_type": "assistant",
+            "delta": "正在检查",
+        },
+    )
+
 
 def test_reasonix_stream_events_expose_public_progress_without_private_reasoning() -> None:
     assert EvaluationService._normalize_native_live_event(
@@ -778,6 +977,89 @@ def test_tasks_graphs_and_mcp_definitions_are_real_local_records(settings, tmp_p
         service.close()
 
 
+def test_task_detail_persists_acceptance_criteria_and_activity_timeline(
+    settings, tmp_path
+) -> None:
+    with TestClient(create_app(settings)) as client:
+        service = client.app.state.service
+        project = create_project(service, tmp_path / "task-detail-project")
+
+        created_response = client.post(
+            "/api/v1/tasks",
+            json={
+                "project_id": project["id"],
+                "title": "Ship the task detail experience",
+                "description": "Implement and verify the task detail page.",
+                "priority": "high",
+                "acceptance_criteria": [
+                    {"text": "The detail route opens directly"},
+                    {"text": "The activity timeline is chronological"},
+                ],
+            },
+        )
+        assert created_response.status_code == 201
+        task = created_response.json()
+
+        detail_response = client.get(f"/api/v1/tasks/{task['id']}")
+        assert detail_response.status_code == 200
+        detail = detail_response.json()
+        assert detail["acceptance_criteria"] == [
+            {"text": "The detail route opens directly", "completed": False},
+            {"text": "The activity timeline is chronological", "completed": False},
+        ]
+        assert [event["event_type"] for event in detail["events"]] == ["task.created"]
+
+        updated = client.patch(
+            f"/api/v1/tasks/{task['id']}",
+            json={
+                "acceptance_criteria": [
+                    {"text": "The detail route opens directly", "completed": True},
+                    {"text": "The activity timeline is chronological"},
+                ]
+            },
+        )
+        assert updated.status_code == 200
+        assert updated.json()["acceptance_criteria"][0]["completed"] is True
+        events = client.get(f"/api/v1/tasks/{task['id']}/events").json()
+        assert [event["event_type"] for event in events] == [
+            "task.created",
+            "task.updated",
+        ]
+
+
+def test_task_bulk_actions_report_partial_failures(settings, tmp_path) -> None:
+    with TestClient(create_app(settings)) as client:
+        service = client.app.state.service
+        project = create_project(service, tmp_path / "task-bulk-project")
+        ready = service.studio.create_task(
+            TaskItemCreate(project_id=project["id"], title="Ready to archive")
+        )
+        active = service.studio.create_task(
+            TaskItemCreate(project_id=project["id"], title="Currently running")
+        )
+        service.database.execute(
+            "UPDATE task_items SET status='running' WHERE id=?", (active["id"],)
+        )
+
+        response = client.post(
+            "/api/v1/tasks/bulk",
+            json={
+                "task_ids": [ready["id"], active["id"], "missing-task"],
+                "action": "archive",
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["requested"] == 3
+        assert [item["id"] for item in payload["updated"]] == [ready["id"]]
+        assert {item["task_id"] for item in payload["errors"]} == {
+            active["id"],
+            "missing-task",
+        }
+        assert service.studio.get_task(ready["id"])["archived"] is True
+        assert service.studio.get_task(active["id"])["archived"] is False
+
+
 def test_flow_mcp_skill_and_browser_management_apis_are_mutable(settings, tmp_path) -> None:
     with TestClient(create_app(settings)) as client:
         root = tmp_path / "management-api"
@@ -876,6 +1158,171 @@ def test_flow_mcp_skill_and_browser_management_apis_are_mutable(settings, tmp_pa
         assert client.delete(f"/api/v1/skill-packs/{skill['id']}").status_code == 204
 
 
+def test_flow_templates_preserve_data_bindings_and_validate(settings, tmp_path) -> None:
+    service = EvaluationService(settings)
+    try:
+        project = create_project(service, tmp_path / "flow-template-project")
+        templates = service.studio.list_graph_templates()
+        assert {item["id"] for item in templates} == {
+            "single-delivery",
+            "parallel-review",
+            "conditional-recovery",
+        }
+        template = next(item for item in templates if item["id"] == "parallel-review")
+        graph = service.studio.create_graph(
+            TaskGraphCreate(
+                project_id=project["id"],
+                name="Template binding graph",
+                description=template["description"],
+                settings=template["settings"],
+                nodes=template["nodes"],
+                edges=template["edges"],
+            )
+        )
+
+        validation = service.studio.validate_graph(graph["id"])
+        synthesis = next(item for item in graph["nodes"] if item["name"] == "汇总结论")
+        incoming_ids = {
+            edge["source_node_id"]
+            for edge in graph["edges"]
+            if edge["target_node_id"] == synthesis["id"]
+        }
+        binding_ids = {
+            item["source_node_id"] for item in synthesis["config"]["input_bindings"]
+        }
+        assert validation["valid"] is True
+        assert binding_ids == incoming_ids
+    finally:
+        service.close()
+
+
+def test_flow_binding_drives_condition_and_continue_strategy_contains_failure(
+    settings, tmp_path
+) -> None:
+    service = EvaluationService(settings)
+    try:
+        project = create_project(service, tmp_path / "flow-binding-project")
+        graph = service.studio.create_graph(
+            TaskGraphCreate(
+                project_id=project["id"],
+                name="Binding runtime",
+                nodes=[
+                    {
+                        "id": "source",
+                        "type": "condition",
+                        "name": "Source",
+                        "config": {"operator": "contains", "value": "READY"},
+                    },
+                    {
+                        "id": "target",
+                        "type": "condition",
+                        "name": "Target",
+                        "config": {
+                            "operator": "contains",
+                            "value": "READY",
+                            "input_bindings": [
+                                {
+                                    "source_node_id": "source",
+                                    "path": "summary",
+                                    "target": "source",
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "id": "recoverable-tool",
+                        "type": "tool",
+                        "name": "Recoverable tool",
+                        "config": {
+                            "server_id": "missing-server",
+                            "tool_name": "missing-tool",
+                            "error_strategy": "continue",
+                            "retry_count": 0,
+                        },
+                    },
+                ],
+                edges=[{"source": "source", "target": "target"}],
+            )
+        )
+        source = next(item for item in graph["nodes"] if item["name"] == "Source")
+        target = next(item for item in graph["nodes"] if item["name"] == "Target")
+        recoverable = next(
+            item for item in graph["nodes"] if item["name"] == "Recoverable tool"
+        )
+        source["output"] = {"summary": "PROJECT READY"}
+
+        matched = service._execute_flow_node(
+            graph, target, [source], threading.Event(), isolated=False
+        )
+        continued = service._execute_flow_node(
+            graph, recoverable, [], threading.Event(), isolated=False
+        )
+
+        assert matched["matched"] is True
+        assert continued["continued"] is True
+        persisted = service.database.fetch_one(
+            "SELECT status,error_message FROM task_nodes WHERE id=?", (recoverable["id"],)
+        )
+        assert persisted is not None
+        assert persisted["status"] == "completed"
+        assert persisted["error_message"]
+    finally:
+        service.close()
+
+
+def test_single_flow_node_test_runs_without_executing_the_full_graph(settings, tmp_path) -> None:
+    service = EvaluationService(settings)
+    try:
+        project = create_project(service, tmp_path / "single-node-test-project")
+        graph = service.studio.create_graph(
+            TaskGraphCreate(
+                project_id=project["id"],
+                name="Single node test",
+                nodes=[
+                    {
+                        "id": "condition",
+                        "type": "condition",
+                        "name": "Test condition",
+                        "config": {
+                            "operator": "contains",
+                            "value": "READY",
+                            "test_input": {"summary": "READY"},
+                            "retry_count": 0,
+                        },
+                    },
+                    {
+                        "id": "untouched",
+                        "type": "agent",
+                        "name": "Must not run",
+                        "config": {"prompt": "Do not execute in a node test"},
+                    },
+                ],
+                edges=[{"source": "condition", "target": "untouched"}],
+            )
+        )
+        condition = next(item for item in graph["nodes"] if item["name"] == "Test condition")
+
+        started = service.start_flow_node_test(graph["id"], condition["id"])
+        deadline = time.monotonic() + 5
+        run = started["run"]
+        while time.monotonic() < deadline:
+            run = service.studio.get_graph_run(graph["id"], run["id"])
+            if run["status"] in {"completed", "failed", "cancelled"}:
+                break
+            time.sleep(0.03)
+
+        refreshed = service.studio.get_graph(graph["id"])
+        tested = next(item for item in refreshed["nodes"] if item["id"] == condition["id"])
+        untouched = next(item for item in refreshed["nodes"] if item["name"] == "Must not run")
+        assert run["status"] == "completed"
+        assert run["result"]["node_test"] is True
+        assert tested["output"]["matched"] is True
+        assert untouched["status"] == "pending"
+        assert refreshed["status"] == "draft"
+    finally:
+        service.close()
+
+
 def test_skill_packs_are_persisted_and_applied_to_studio_sessions(settings, tmp_path) -> None:
     service = EvaluationService(settings)
     try:
@@ -911,6 +1358,212 @@ def test_skill_packs_are_persisted_and_applied_to_studio_sessions(settings, tmp_
         assert updated["description"] == "更新后的说明"
         service.studio.delete_skill_pack(skill["id"])
         assert service.studio.get_session(session["id"])["skill_pack_id"] is None
+    finally:
+        service.close()
+
+
+def test_runtime_profiles_inherit_configuration_and_expose_selected_mcp_tools(
+    settings, tmp_path
+) -> None:
+    service = EvaluationService(settings)
+    try:
+        project = create_project(service, tmp_path / "profile-project")
+        mcp = service.studio.create_mcp_server(
+            McpServerCreate(
+                name="Issue tracker",
+                transport="stdio",
+                command=sys.executable,
+                args=["fake-mcp.py"],
+            )
+        )
+        service.studio.update_mcp_health(
+            mcp["id"],
+            status="online",
+            tools=[
+                {
+                    "name": "create_issue",
+                    "description": "Create one issue",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"title": {"type": "string"}},
+                        "required": ["title"],
+                    },
+                }
+            ],
+            error=None,
+        )
+        profile = service.studio.create_runtime_profile(
+            RuntimeProfileCreate(
+                name="Release operator",
+                description="Full release runtime",
+                runner_id=UNIFIED_RUNNER_ID,
+                model_id=MOCK_MODEL_ID,
+                permission_profile="full",
+                reasoning_effort="high",
+                mcp_server_ids=[mcp["id"]],
+            )
+        )
+
+        session = service.studio.create_session(
+            SessionCreate(
+                project_id=project["id"],
+                profile_id=profile["id"],
+                title="Profile inheritance",
+            )
+        )
+        assert session["runner_id"] == UNIFIED_RUNNER_ID
+        assert session["model_id"] == MOCK_MODEL_ID
+        assert session["permission_profile"] == "full"
+        assert session["reasoning_effort"] == "high"
+        assert session["profile_name"] == "Release operator"
+
+        model_tools, native_tools, mapping = service._studio_profile_mcp_catalog(session)
+        assert len(model_tools) == len(native_tools) == len(mapping) == 1
+        alias = model_tools[0]["name"]
+        assert alias.startswith("mcp__")
+        assert model_tools[0]["parameters"]["required"] == ["title"]
+        assert native_tools[0]["inputSchema"]["properties"]["title"]["type"] == "string"
+        assert mapping[alias] == (mcp["id"], "create_issue")
+
+        updated = service.studio.update_runtime_profile(
+            profile["id"], {"description": "Updated", "reasoning_effort": "xhigh"}
+        )
+        assert updated["description"] == "Updated"
+        assert updated["reasoning_effort"] == "xhigh"
+        service.studio.delete_runtime_profile(profile["id"])
+        assert service.studio.get_session(session["id"])["profile_id"] is None
+        builtin = next(item for item in service.studio.list_runtime_profiles() if item["builtin"])
+        with pytest.raises(ValueError, match="builtin_runtime_profile_cannot_be_deleted"):
+            service.studio.delete_runtime_profile(builtin["id"])
+    finally:
+        service.close()
+
+
+def test_runtime_profile_crud_api_and_ephemeral_studio_mcp_bridge(settings, tmp_path) -> None:
+    with TestClient(create_app(settings)) as client:
+        service = client.app.state.service
+        project = create_project(service, tmp_path / "profile-api-project")
+        mcp = service.studio.create_mcp_server(
+            McpServerCreate(
+                name="Read service",
+                transport="stdio",
+                command=sys.executable,
+                args=["fake-mcp.py"],
+            )
+        )
+        service.studio.update_mcp_health(
+            mcp["id"],
+            status="online",
+            tools=[
+                {
+                    "name": "lookup",
+                    "description": "Look up a record",
+                    "inputSchema": {"type": "object", "properties": {}},
+                }
+            ],
+            error=None,
+        )
+        created = client.post(
+            "/api/v1/runtime-profiles",
+            json={
+                "name": "API profile",
+                "runner_id": UNIFIED_RUNNER_ID,
+                "model_id": MOCK_MODEL_ID,
+                "permission_profile": "full",
+                "reasoning_effort": "medium",
+                "mcp_server_ids": [mcp["id"]],
+            },
+        )
+        assert created.status_code == 201
+        profile = created.json()
+        assert client.patch(
+            f"/api/v1/runtime-profiles/{profile['id']}",
+            json={"description": "Edited through API"},
+        ).json()["description"] == "Edited through API"
+
+        session = service.studio.create_session(
+            SessionCreate(
+                project_id=project["id"],
+                profile_id=profile["id"],
+                title="Bridge session",
+            )
+        )
+        turn = service.studio.queue_turn(
+            session["id"], SessionTurnCreate(message="Use the configured MCP tool")
+        )
+        _model_tools, native_tools, mapping = service._studio_profile_mcp_catalog(session)
+        calls: list[tuple[str, str, dict]] = []
+        service.execute_mcp_tool = lambda server_id, value: (
+            calls.append((server_id, value.tool_name, value.arguments))
+            or {"ok": True, "result": "found"}
+        )
+        token, definition = service._register_studio_bridge(
+            session,
+            turn["id"],
+            threading.Event(),
+            include_browser=False,
+            mcp_tools=native_tools,
+            mcp_mapping=mapping,
+        )
+        try:
+            advertised = client.get(f"/api/v1/studio/bridge/{token}/tools")
+            assert advertised.status_code == 200
+            alias = advertised.json()["tools"][0]["name"]
+            called = client.post(
+                f"/api/v1/studio/bridge/{token}",
+                json={"tool_name": alias, "arguments": {"id": 7}},
+            )
+            assert called.status_code == 200, called.text
+            assert called.json()["result"] == "found"
+            assert calls == [(mcp["id"], "lookup", {"id": 7})]
+            assert "--studio-mcp" in definition["args"]
+        finally:
+            service._unregister_studio_bridge(token)
+        assert client.get(f"/api/v1/studio/bridge/{token}/tools").status_code == 400
+        assert client.delete(f"/api/v1/runtime-profiles/{profile['id']}").status_code == 204
+
+
+def test_flow_agent_node_uses_its_runtime_profile(settings, tmp_path) -> None:
+    service = EvaluationService(settings)
+    try:
+        project = create_project(service, tmp_path / "flow-profile-project")
+        profile = service.studio.create_runtime_profile(
+            RuntimeProfileCreate(
+                name="Flow profile",
+                runner_id=UNIFIED_RUNNER_ID,
+                model_id=MOCK_MODEL_ID,
+                permission_profile="full",
+                reasoning_effort="high",
+            )
+        )
+        graph = service.studio.create_graph(
+            TaskGraphCreate(
+                project_id=project["id"],
+                name="Profile flow",
+                settings={"max_retries": 0},
+                nodes=[
+                    {
+                        "id": "agent",
+                        "type": "agent",
+                        "name": "Profile agent",
+                        "config": {
+                            "prompt": "Create generated.txt",
+                            "profile_id": profile["id"],
+                        },
+                    }
+                ],
+            )
+        )
+        service._model_client = lambda _model, _metadata: StudioWriteClient()
+
+        service.start_flow(graph["id"])
+        completed = wait_for_record(service, "task_graphs", graph["id"])
+        assert completed["status"] == "completed"
+        node = service.studio.get_graph(graph["id"])["nodes"][0]
+        session = service.studio.get_session(node["session_id"])
+        assert session["profile_id"] == profile["id"]
+        assert session["permission_profile"] == "full"
+        assert session["reasoning_effort"] == "high"
     finally:
         service.close()
 
@@ -999,7 +1652,9 @@ def test_native_cli_adapters_receive_non_persistent_browser_mcp_configuration() 
         "codex_cli": ["exec", "--json", "{prompt}"],
         "claude_code_cli": ["--print", "{prompt}"],
         "kimi_code_cli": ["--print", "--prompt", "{prompt}"],
+        "qoder_cli": ["--print", "{prompt}"],
         "opencode_cli": ["run", "{prompt}"],
+        "cursor_cli": ["--print", "{prompt}"],
     }
     for runner_type, original in cases.items():
         args, environment = EvaluationService._studio_native_browser_options(
@@ -1007,10 +1662,13 @@ def test_native_cli_adapters_receive_non_persistent_browser_mcp_configuration() 
         )
         if runner_type == "codex_cli":
             assert any("mcp_servers.agentbench_browser.command" in item for item in args)
-        elif runner_type in {"claude_code_cli", "kimi_code_cli"}:
+        elif runner_type in {"claude_code_cli", "kimi_code_cli", "qoder_cli"}:
             assert "--mcp-config" in args
             config = json.loads(args[args.index("--mcp-config") + 1])
             assert config["mcpServers"]["agentbench_browser"]["command"] == bridge["command"]
+        elif runner_type == "cursor_cli":
+            assert args == original
+            assert environment == {}
         else:
             config = json.loads(environment["OPENCODE_CONFIG_CONTENT"])
             assert config["mcp"]["agentbench_browser"]["command"][0] == bridge["command"]
@@ -1175,6 +1833,81 @@ def test_running_unified_session_honors_cancellation(settings, tmp_path) -> None
         service.close()
 
 
+def test_running_session_queues_and_dispatches_follow_up_turns(settings, tmp_path) -> None:
+    service = EvaluationService(settings)
+    model_client = QueuedStudioClient()
+    try:
+        project = create_project(service, tmp_path / "queued-follow-up-project")
+        session = service.studio.create_session(
+            SessionCreate(project_id=project["id"], title="Queued follow-ups")
+        )
+        service._model_client = lambda _model, _metadata: model_client
+        first = service.queue_session_turn(
+            session["id"], SessionTurnCreate(message="Run the first instruction")
+        )
+        assert model_client.started.wait(3)
+
+        second = service.queue_session_turn(
+            session["id"], SessionTurnCreate(message="Run this after the first")
+        )
+        assert second["status"] == "queued"
+        assert second["queued_behind_active"] is True
+        assert service.database.fetch_one(
+            "SELECT status FROM session_turns WHERE id=?", (second["id"],)
+        ) == {"status": "queued"}
+
+        model_client.release.set()
+        assert wait_for_turn(service, first["id"])["status"] == "completed"
+        assert wait_for_turn(service, second["id"])["status"] == "completed"
+        detail = service.studio.get_session(session["id"])
+        assert detail["status"] == "idle"
+        assert [turn["status"] for turn in detail["turns"]] == ["completed", "completed"]
+        assert model_client.calls == 2
+        assert {event["event_type"] for event in detail["events"]} >= {
+            "turn.enqueued",
+            "turn.dequeued",
+        }
+    finally:
+        model_client.release.set()
+        service.close()
+
+
+def test_queued_follow_up_can_be_removed_without_cancelling_active_turn(
+    settings, tmp_path
+) -> None:
+    service = EvaluationService(settings)
+    model_client = BlockingStudioClient()
+    try:
+        project = create_project(service, tmp_path / "remove-queued-project")
+        session = service.studio.create_session(
+            SessionCreate(project_id=project["id"], title="Remove queued turn")
+        )
+        service._model_client = lambda _model, _metadata: model_client
+        active = service.queue_session_turn(
+            session["id"], SessionTurnCreate(message="Keep running")
+        )
+        assert model_client.started.wait(3)
+        queued = service.queue_session_turn(
+            session["id"], SessionTurnCreate(message="Remove this queued item")
+        )
+
+        removed = service.studio.cancel_queued_turn(session["id"], queued["id"])
+
+        assert removed["status"] == "running"
+        assert removed["removed_turn_id"] == queued["id"]
+        assert service.database.fetch_one(
+            "SELECT status,error_code FROM session_turns WHERE id=?", (queued["id"],)
+        ) == {"status": "cancelled", "error_code": "queue_removed"}
+        assert service.database.fetch_one(
+            "SELECT status FROM session_turns WHERE id=?", (active["id"],)
+        ) == {"status": "running"}
+    finally:
+        service.cancel_session(session["id"])
+        model_client.release.set()
+        wait_for_turn(service, active["id"])
+        service.close()
+
+
 def test_shell_approval_really_pauses_and_resumes_the_running_turn(settings, tmp_path) -> None:
     service = EvaluationService(settings)
     try:
@@ -1258,6 +1991,9 @@ def test_task_start_runs_a_real_agent_session(settings, tmp_path) -> None:
                 description="Create generated.txt",
                 runner_id=UNIFIED_RUNNER_ID,
                 model_id=MOCK_MODEL_ID,
+                acceptance_criteria=[
+                    {"text": "generated.txt exists and contains studio runtime"}
+                ],
             )
         )
         service._model_client = lambda _model, _metadata: StudioWriteClient()
@@ -1268,6 +2004,20 @@ def test_task_start_runs_a_real_agent_session(settings, tmp_path) -> None:
         assert completed["status"] == "completed"
         assert completed["session_id"]
         assert service.studio.get_session(completed["session_id"])["status"] == "idle"
+        detail = service.studio.get_task_detail(task["id"])
+        assert [event["event_type"] for event in detail["events"]] == [
+            "task.created",
+            "task.queued",
+            "task.running",
+            "task.completed",
+        ]
+        user_message = service.database.fetch_one(
+            "SELECT content FROM session_messages WHERE session_id=? AND role='user'",
+            (completed["session_id"],),
+        )
+        assert user_message is not None
+        assert "验收标准" in user_message["content"]
+        assert "不要在未验证时宣称已满足" in user_message["content"]
     finally:
         service.close()
 

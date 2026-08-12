@@ -277,6 +277,76 @@ def test_qoder_discovery_falls_back_to_current_login(monkeypatch):
     assert result["warnings"]
 
 
+def test_cursor_discovery_uses_account_model_catalog(monkeypatch):
+    monkeypatch.setattr("agentbench.model_discovery.native_cli_status", _installed_cli)
+    monkeypatch.setattr(
+        "agentbench.model_discovery.subprocess.run",
+        lambda args, **_kwargs: CompletedProcess(
+            args,
+            0,
+            json.dumps({"models": [{"id": "auto", "label": "Auto"}, {"id": "composer-1", "label": "Composer 1"}]}),
+            "",
+        ),
+    )
+
+    result = discover_models(source="cursor-cli")
+
+    assert result["source_label"] == "Cursor Agent"
+    assert [model["id"] for model in result["models"]] == ["auto", "composer-1"]
+    assert result["models"][0]["configured"] is True
+
+
+def test_cursor_discovery_parses_human_readable_model_catalog(monkeypatch):
+    monkeypatch.setattr("agentbench.model_discovery.native_cli_status", _installed_cli)
+    monkeypatch.setattr(
+        "agentbench.model_discovery.subprocess.run",
+        lambda args, **_kwargs: CompletedProcess(
+            args,
+            0,
+            "Available models:\n* auto  Auto (recommended)\n  composer-1  Composer 1\n  claude-4.5-sonnet - Claude 4.5 Sonnet\n",
+            "",
+        ),
+    )
+
+    result = discover_models(source="cursor-cli")
+
+    assert [model["id"] for model in result["models"]] == [
+        "auto",
+        "claude-4.5-sonnet",
+        "composer-1",
+    ]
+    assert result["models"][0]["label"] == "Auto (recommended)"
+
+
+def test_cursor_stream_parser_accumulates_partial_assistant_output():
+    output = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp_ms": 1,
+                    "message": {"content": [{"type": "text", "text": "答"}]},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp_ms": 2,
+                    "message": {"content": [{"type": "text", "text": "案"}]},
+                }
+            ),
+            json.dumps({"type": "result", "duration_ms": 10}),
+        ]
+    )
+
+    final, _input, _output, _cost, count = EvaluationService._parse_native_output(
+        "cursor_cli", output
+    )
+
+    assert final == "答案"
+    assert count == 3
+
+
 def test_discovery_rejects_link_local_metadata_address(monkeypatch):
     def should_not_call(*_args, **_kwargs):
         raise AssertionError("HTTP client must not access link-local metadata")

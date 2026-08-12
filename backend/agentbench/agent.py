@@ -148,6 +148,7 @@ class AgentHarness:
         cancellation_check: Callable[[], bool] | None = None,
         tool_authorizer: ToolAuthorizer | None = None,
         tool_executor: ToolExecutor | None = None,
+        additional_tools: list[dict[str, Any]] | None = None,
     ):
         self.client = client
         self.workspace = workspace
@@ -159,6 +160,7 @@ class AgentHarness:
         self.cancellation_check = cancellation_check or (lambda: False)
         self.tool_authorizer = tool_authorizer
         self.tool_executor = tool_executor
+        self.additional_tools = list(additional_tools or [])
 
     def _tools(self) -> list[dict[str, Any]]:
         names: list[str] = []
@@ -183,7 +185,14 @@ class AgentHarness:
                     "browser_screenshot",
                 ]
             )
-        return [TOOL_DEFINITIONS[name] for name in dict.fromkeys(names)]
+        builtin = [TOOL_DEFINITIONS[name] for name in dict.fromkeys(names)]
+        builtin_names = {str(item.get("name") or "") for item in builtin}
+        external = [
+            item
+            for item in self.additional_tools
+            if str(item.get("name") or "") not in builtin_names
+        ]
+        return [*builtin, *external]
 
     def run(self, instruction: str) -> AgentResult:
         started = time.perf_counter()

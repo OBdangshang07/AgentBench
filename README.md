@@ -1,5 +1,20 @@
 # AgentBench Desktop
 
+## V5.1.0：把全 Agent 工作台真正连成一体
+
+- 新增可复用 Runtime Profile，将 Agent、模型、权限、思考强度、能力包与 MCP Server 作为一套运行配置复用于 Studio 和 Flow。
+- Studio 支持后续指令队列与草稿恢复、最多三个独立终端、多个真实可见浏览器标签、附件上下文和可恢复的原生 Agent 会话。
+- 任务中心新增验收标准、证据状态、生命周期时间线、详情页和批量处理；控制中心统一展示 Session、Task 与 Flow 活动。
+- Flow 新增模板、结构化端口绑定、节点级失败策略、独立重试、单节点测试和更完整的运行历史。
+- MCP 工具采用 JSON Schema 表单，并通过一次性本地桥接安全提供给受支持的原生 CLI；桥接令牌在单轮任务结束后销毁。
+- Kimi Code 与 Qoder 补齐权限、思考模式、MCP 和原生会话续接；Qoder 的模型下拉选择会真实传入 CLI。
+- 新增 Cursor Agent：支持官方 Windows 快捷安装、可靠 CLI 检测、模型目录与下拉、附件、权限映射、流式进度和原生会话续接。
+- 2025 考研数学（一）按官方 150 分结构计分；卷面分只由答案质量决定，时间、Token 与费用作为独立效率指标，未完成试卷不再外推。
+- 非测评区域继续使用深色、克制、酸绿色点缀的界面语言，通过渐进披露适配 1280×720 到 4K，不缩小正文换取空间。
+- Benchmarks、Ultra 和 NCRE Office 保持兼容；NCRE Office 题库与评分逻辑未作改动。
+
+完整变更见 [`docs/releases/V5.1.0.md`](docs/releases/V5.1.0.md)，工作台使用方法见 [`docs/V5-GUIDE.md`](docs/V5-GUIDE.md)。
+
 AgentBench Desktop 是一个 Windows 优先、本地运行的全 Agent 可视化工作台，同时保留完整的 AI 模型能力评测系统。它既能在图形界面中管理项目、长期会话、任务、Flow、MCP、终端与浏览器，也能将不同模型放入统一 Agent Harness，通过确定性验证器、匿名 AI 裁判和成本指标生成可追溯评分。
 
 ## V5.0.0：从“能用”到“好用”

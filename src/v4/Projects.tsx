@@ -17,7 +17,7 @@ import {
 import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { useApi } from "../lib/useApi";
 import { useWorkspaceUx } from "../components/WorkspaceUx";
@@ -44,6 +44,7 @@ const initialForm: ProjectForm = {
 
 export default function Projects() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const ux = useWorkspaceUx();
   const { data: projects, loading, error, refresh } = useApi<Project[]>("/projects?include_archived=true");
   const { data: runners } = useApi<Runner[]>("/runners");
@@ -63,6 +64,14 @@ export default function Projects() {
       default_model_id: current.default_model_id || models?.find((model) => model.enabled)?.id || "",
     }));
   }, [modalOpen, runners, models]);
+
+  useEffect(() => {
+    if (searchParams.get("new") !== "1") return;
+    openCreate();
+    const next = new URLSearchParams(searchParams);
+    next.delete("new");
+    setSearchParams(next, { replace: true });
+  }, [searchParams]);
 
   const visible = useMemo(() => (projects ?? []).filter((project) => {
     const matches = `${project.name} ${project.description} ${project.root_path}`.toLowerCase().includes(query.trim().toLowerCase());
@@ -132,6 +141,7 @@ export default function Projects() {
   }
 
   async function startSession(project: Project) {
+    ux.setSelectedProjectId(project.id);
     const session = await api<{ id: string }>("/sessions", {
       method: "POST",
       body: JSON.stringify({ project_id: project.id, title: `${project.name} Agent 会话` }),

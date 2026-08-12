@@ -25,6 +25,7 @@ SOURCE_META: dict[str, tuple[str, str | None]] = {
     "aider-cli": ("Aider", "aider"),
     "kimi-code": ("Kimi Code", "kimi"),
     "qoder-cli": ("Qoder", "qoderclicn"),
+    "cursor-cli": ("Cursor Agent", "agent"),
 }
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -636,6 +637,105 @@ def _discover_headless_agent(
     ], [f"{label} 未返回稳定模型目录；选择“当前登录配置”时由 Agent 自身决定模型"]
 
 
+def _cursor_text_models(text: str) -> list[tuple[str, str]]:
+    """Parse Cursor's human-readable ``agent models`` output defensively."""
+    ignored = {
+        "available",
+        "available model",
+        "available models",
+        "current",
+        "default",
+        "id",
+        "model",
+        "models",
+        "name",
+    }
+    parsed: list[tuple[str, str]] = []
+    for raw_line in _ANSI_ESCAPE.sub("", text).splitlines():
+        line = raw_line.strip().strip("│|")
+        line = re.sub(r"^[*+>✓✔•●○\-]+\s*", "", line).strip()
+        if not line or line.lower().rstrip(":") in ignored:
+            continue
+        match = re.match(
+            r"^(?P<id>[A-Za-z0-9][A-Za-z0-9._:/+-]*)"
+            r"(?:\s*(?:\||\t|\s+-\s+|\s{2,})\s*(?P<label>.+))?$",
+            line,
+        )
+        if not match:
+            continue
+        model_id = match.group("id").strip()
+        label = (match.group("label") or model_id).strip().strip("│|")
+        if model_id.lower() in ignored or label.lower().rstrip(":") in ignored:
+            continue
+        parsed.append((model_id, label))
+    return parsed
+
+
+def _discover_cursor(executable: str | None) -> tuple[list[dict[str, Any]], list[str]]:
+    models: list[dict[str, Any]] = []
+    if executable:
+        try:
+            result = subprocess.run(
+                [executable, "models"],
+                capture_output=True,
+                text=True,
+                timeout=12,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            result = None
+        if result is not None and result.returncode == 0:
+            text = _ANSI_ESCAPE.sub("", result.stdout or "").strip()
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                payload = None
+            items = (
+                payload.get("models") or payload.get("data") or []
+                if isinstance(payload, dict)
+                else payload
+                if isinstance(payload, list)
+                else []
+            )
+            parsed: list[tuple[str, str]] = []
+            for item in items:
+                if isinstance(item, dict):
+                    model_id = str(item.get("id") or item.get("name") or "").strip()
+                    label = str(item.get("label") or item.get("name") or model_id).strip()
+                else:
+                    model_id = str(item).strip()
+                    label = model_id
+                if model_id:
+                    parsed.append((model_id, label))
+            if not parsed:
+                parsed = _cursor_text_models(text)
+            for model_id, model_label in parsed:
+                models.append(
+                    _model_option(
+                        model_id,
+                        label=model_label,
+                        provider_id="default",
+                        provider_label="Cursor Agent",
+                        source="Cursor Agent CLI · 账号模型目录",
+                        configured=True,
+                        is_default=model_id.lower() == "auto" or not models,
+                    )
+                )
+    if models:
+        return models, []
+    return [
+        _model_option(
+            "auto",
+            label="Cursor 当前账号自动模型",
+            provider_id="default",
+            provider_label="Cursor Agent",
+            source="Cursor Agent CLI · 自动选择",
+            configured=bool(executable),
+            is_default=True,
+        )
+    ], ["Cursor Agent 未返回账号模型目录；选择“自动模型”时由 Cursor 自行决定模型"]
+
+
 def discover_models(
     *,
     source: str,
@@ -689,6 +789,8 @@ def discover_models(
         models, warnings = _discover_headless_agent(
             capability.get("executable"), label="Qoder", source="Qoder CLI"
         )
+    elif source == "cursor-cli":
+        models, warnings = _discover_cursor(capability.get("executable"))
     else:
         models = []
         warnings = [f"{source_label} 当前未提供稳定的模型目录命令，请手动输入模型 ID"]

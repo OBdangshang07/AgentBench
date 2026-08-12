@@ -10,6 +10,21 @@ export interface SessionAttachment {
   created_at: string;
 }
 
+export interface UnifiedActivity {
+  id: string;
+  source_type: "session" | "task" | "flow";
+  source_id: string;
+  source_title: string;
+  project_id: string | null;
+  project_name: string | null;
+  event_type: string;
+  summary: string;
+  status: "info" | "running" | "attention" | "completed" | "failed";
+  payload: Record<string, unknown>;
+  href: string;
+  created_at: string;
+}
+
 export interface StudioDashboardData {
   project_count: number;
   session_count: number;
@@ -20,6 +35,27 @@ export interface StudioDashboardData {
   total_tokens: number;
   total_cost: number;
   active_sessions_list: AgentSession[];
+  active_tasks_list: Array<{
+    id: string;
+    title: string;
+    status: string;
+    priority: string;
+    session_id: string | null;
+    updated_at: string;
+    project_id: string | null;
+    project_name: string | null;
+  }>;
+  active_flows_list: Array<{
+    id: string;
+    name: string;
+    status: string;
+    updated_at: string;
+    project_id: string | null;
+    project_name: string | null;
+    node_count: number;
+    completed_nodes: number;
+  }>;
+  activity: UnifiedActivity[];
   pending_approvals_list: ApprovalRequest[];
   recent_projects: Project[];
   recent_failures: Array<{
@@ -142,6 +178,17 @@ export interface StudioTurn {
   completed_at: string | null;
 }
 
+export interface StudioArtifact {
+  id: string;
+  turn_id: string | null;
+  kind: string;
+  name: string;
+  path: string;
+  size: number;
+  sha256: string | null;
+  created_at: string;
+}
+
 export interface FileChange {
   id: string;
   turn_id: string | null;
@@ -182,6 +229,8 @@ export interface AgentSession {
   status: string;
   permission_profile: PermissionProfile;
   reasoning_effort: ReasoningEffort;
+  profile_id?: string | null;
+  profile_name?: string | null;
   skill_pack_id: string | null;
   skill_pack_name: string | null;
   native_session_id: string | null;
@@ -200,6 +249,24 @@ export interface AgentSession {
   completed_at: string | null;
 }
 
+export interface RuntimeProfile {
+  id: string;
+  name: string;
+  description: string;
+  runner_id: string | null;
+  runner_name: string | null;
+  model_id: string | null;
+  model_name: string | null;
+  permission_profile: PermissionProfile;
+  reasoning_effort: ReasoningEffort;
+  skill_pack_id: string | null;
+  skill_pack_name: string | null;
+  mcp_server_ids: string[];
+  builtin: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface AgentSessionDetail extends AgentSession {
   messages: StudioMessage[];
   message_count: number;
@@ -208,7 +275,7 @@ export interface AgentSessionDetail extends AgentSession {
   approvals: ApprovalRequest[];
   turns: StudioTurn[];
   file_changes: FileChange[];
-  artifacts: Array<Record<string, unknown>>;
+  artifacts: StudioArtifact[];
 }
 
 export interface StudioTask {
@@ -227,12 +294,27 @@ export interface StudioTask {
   due_at: string | null;
   tags: string[];
   depends_on: string[];
+  acceptance_criteria: Array<{ text: string; completed: boolean }>;
   result_summary: string;
   retry_of: string | null;
   archived: boolean;
   cancelled_at: string | null;
   created_at: string;
   updated_at: string;
+  completed_at: string | null;
+}
+
+export interface TaskEvent {
+  id: number;
+  task_id: string;
+  event_type: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface StudioTaskDetail extends StudioTask {
+  events: TaskEvent[];
+  dependencies: StudioTask[];
 }
 
 export interface AgentFlowSummary {

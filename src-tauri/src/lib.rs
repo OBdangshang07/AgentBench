@@ -143,12 +143,13 @@ fn endpoint_state() -> EndpointState {
     }
 }
 
-fn terminate_confirmed_old_backend() -> Result<(), String> {
+fn terminate_confirmed_backend(expect_current_version: bool) -> Result<(), String> {
+    let rejected_version_operator = if expect_current_version { "-ne" } else { "-eq" };
     let script = format!(
         concat!(
             "$ErrorActionPreference='Stop'; ",
             "$health=Invoke-RestMethod -Uri 'http://127.0.0.1:43765/api/v1/health' -TimeoutSec 2; ",
-            "if ($health.name -ne 'AgentBench Desktop' -or $health.version -eq '{}') ",
+            "if ($health.name -ne 'AgentBench Desktop' -or $health.version {} '{}') ",
             "{{ throw 'Backend identity/version no longer matches' }}; ",
             "$owners=Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort 43765 -State Listen ",
             "| Select-Object -ExpandProperty OwningProcess -Unique; ",
@@ -156,6 +157,7 @@ fn terminate_confirmed_old_backend() -> Result<(), String> {
             "if ($process.Path -notlike '*agentbench-backend*.exe') {{ throw 'Listener is not an AgentBench sidecar' }}; ",
             "Stop-Process -Id $owner -Force }}"
         ),
+        rejected_version_operator,
         env!("CARGO_PKG_VERSION")
     );
     let status = Command::new("powershell.exe")
@@ -177,7 +179,15 @@ fn terminate_confirmed_old_backend() -> Result<(), String> {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    Err("The old AgentBench sidecar is still listening on port 43765".into())
+    Err("The confirmed AgentBench sidecar is still listening on port 43765".into())
+}
+
+fn terminate_confirmed_old_backend() -> Result<(), String> {
+    terminate_confirmed_backend(false)
+}
+
+fn terminate_confirmed_current_backend() -> Result<(), String> {
+    terminate_confirmed_backend(true)
 }
 
 fn backend_command(app: &tauri::App) -> Result<Command, String> {
@@ -245,6 +255,10 @@ fn stop_backend(app_handle: &tauri::AppHandle) {
     let state = app_handle.state::<BackendProcess>();
     if let Ok(mut guard) = state.0.lock() {
         if let Some(mut child) = guard.take() {
+            // PyInstaller one-file executables can hand the listening server to an
+            // extracted child process. Close the verified listener as well as the
+            // original process handle so the port cannot outlive the desktop app.
+            let _ = terminate_confirmed_current_backend();
             let _ = child.kill();
             let _ = child.wait();
         }

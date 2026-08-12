@@ -24,7 +24,8 @@ export type ModelSource =
   | "gemini-cli"
   | "aider-cli"
   | "kimi-code"
-  | "qoder-cli";
+  | "qoder-cli"
+  | "cursor-cli";
 
 export interface DiscoveredModel {
   id: string;
@@ -78,6 +79,7 @@ export interface Runner {
     | "aider_cli"
     | "kimi_code_cli"
     | "qoder_cli"
+    | "cursor_cli"
     | "command";
   executable?: string;
   args: string[];
@@ -113,6 +115,7 @@ export interface Runner {
     native_resume: boolean;
     structured_events: "full" | "stream" | "filtered_text";
     mcp: boolean;
+    visible_browser?: boolean;
     model_override: boolean;
     approval_gate: boolean;
     process_tree_cancel: boolean;
@@ -260,6 +263,7 @@ export interface Experiment {
   weighted_score?: number | null;
   exam_score?: number | null;
   exam_total?: number | null;
+  exam_scoring_basis?: "answer_quality" | string;
   created_at: string;
   started_at?: string;
   completed_at?: string;
@@ -272,6 +276,7 @@ export interface Experiment {
     weighted_score?: number | null;
     exam_score?: number | null;
     exam_total?: number | null;
+    exam_scoring_basis?: "answer_quality" | string;
     avg_objective_score?: number | null;
     avg_judge_score?: number | null;
     avg_time_score?: number | null;

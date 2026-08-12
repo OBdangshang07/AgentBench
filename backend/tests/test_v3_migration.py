@@ -10,7 +10,7 @@ from agentbench.catalog import (
     UNIFIED_RUNNER_ID,
     build_catalog,
 )
-from agentbench.db import Database
+from agentbench.db import SCHEMA_VERSION, Database
 from agentbench.execution import DockerExecutor, Workspace
 from agentbench.schemas import ExperimentCreate, Participant
 from agentbench.scoring import ScoringEngine, ValidationResult
@@ -63,7 +63,7 @@ def test_v3_runs_keep_immutable_test_definition_revisions(settings) -> None:
         preserved_definition, preserved_revision = service._definition_for_run(refreshed)
         assert preserved_revision["id"] == original_revision["id"]
         assert preserved_definition["instruction"] == original_definition["instruction"]
-        assert service.database.fetch_one("SELECT version FROM schema_meta") == {"version": 10}
+        assert service.database.fetch_one("SELECT version FROM schema_meta") == {"version": SCHEMA_VERSION}
     finally:
         service.close()
 
@@ -77,11 +77,15 @@ def test_schema_upgrade_creates_recoverable_database_backup(tmp_path) -> None:
     database = Database(database_path)
     database.initialize()
 
-    backups = list((tmp_path / "migration-backups").glob("agentbench-pre-schema-v10-*.db"))
+    backups = list(
+        (tmp_path / "migration-backups").glob(
+            f"agentbench-pre-schema-v{SCHEMA_VERSION}-*.db"
+        )
+    )
     assert len(backups) == 1
     with sqlite3.connect(backups[0]) as backup:
         assert backup.execute("SELECT version FROM schema_meta").fetchone() == (3,)
-    assert database.fetch_one("SELECT version FROM schema_meta") == {"version": 10}
+    assert database.fetch_one("SELECT version FROM schema_meta") == {"version": SCHEMA_VERSION}
     tables = {
         row["name"]
         for row in database.fetch_all(
@@ -124,11 +128,63 @@ def test_v4_task_schema_adds_columns_before_building_v5_indexes(tmp_path) -> Non
     columns = {
         row["name"] for row in database.fetch_all("PRAGMA table_info(task_items)")
     }
-    assert {"tags_json", "depends_on_json", "result_summary", "archived"} <= columns
-    assert database.fetch_one("SELECT version FROM schema_meta") == {"version": 10}
+    assert {
+        "tags_json",
+        "depends_on_json",
+        "acceptance_json",
+        "result_summary",
+        "archived",
+    } <= columns
+    assert database.fetch_one("SELECT version FROM schema_meta") == {"version": SCHEMA_VERSION}
     assert database.fetch_one(
         "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_task_items_project'"
     ) == {"name": "idx_task_items_project"}
+    assert database.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='task_events'"
+    ) == {"name": "task_events"}
+
+
+def test_schema_10_upgrade_adds_task_acceptance_and_event_timeline(tmp_path) -> None:
+    database_path = tmp_path / "agentbench.db"
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_meta(version INTEGER NOT NULL);
+            INSERT INTO schema_meta(version) VALUES (10);
+            CREATE TABLE task_items (
+                id TEXT PRIMARY KEY,
+                project_id TEXT,
+                graph_id TEXT,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'backlog',
+                priority TEXT NOT NULL DEFAULT 'normal',
+                runner_id TEXT,
+                model_id TEXT,
+                session_id TEXT,
+                due_at TEXT,
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                depends_on_json TEXT NOT NULL DEFAULT '[]',
+                result_summary TEXT NOT NULL DEFAULT '',
+                retry_of TEXT,
+                archived INTEGER NOT NULL DEFAULT 0,
+                cancelled_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT
+            );
+            """
+        )
+
+    database = Database(database_path)
+    database.initialize()
+
+    columns = {row["name"] for row in database.fetch_all("PRAGMA table_info(task_items)")}
+    assert "acceptance_json" in columns
+    assert database.fetch_one("SELECT version FROM schema_meta") == {"version": SCHEMA_VERSION}
+    assert database.fetch_one(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='task_events'"
+    ) == {"name": "task_events"}
 
 
 def test_test_library_health_uses_objective_scores_not_legacy_passed(settings) -> None:

@@ -25,6 +25,8 @@ import { api, downloadUrl } from "../lib/api";
 import { useApi } from "../lib/useApi";
 import type { Runner } from "../types";
 import type { BrowserSnapshot, BrowserStatus, McpServer, SkillPack, ToolGatewayStatus } from "./types";
+import RuntimeProfilesPanel from "./RuntimeProfilesPanel";
+import JsonSchemaForm from "./JsonSchemaForm";
 
 const builtinIcons = {
   filesystem: HardDrive,
@@ -112,6 +114,7 @@ export default function ToolsMcp() {
   const [toolTestServer, setToolTestServer] = useState<McpServer | null>(null);
   const [toolTestName, setToolTestName] = useState("");
   const [toolTestArgs, setToolTestArgs] = useState("{}");
+  const [toolTestValues, setToolTestValues] = useState<Record<string, unknown>>({});
   const [toolTestResult, setToolTestResult] = useState<string | null>(null);
   const [skillOpen, setSkillOpen] = useState(false);
   const [editingSkill, setEditingSkill] = useState<SkillPack | null>(null);
@@ -238,6 +241,7 @@ export default function ToolsMcp() {
     setToolTestServer(server);
     setToolTestName(server.tools[0]?.name ?? "");
     setToolTestArgs("{}");
+    setToolTestValues({});
     setToolTestResult(null);
   }
 
@@ -445,6 +449,7 @@ export default function ToolsMcp() {
   return <div className="v4-page">
     <header className="v4-page-head"><div><span>TOOL GATEWAY</span><h1>工具与 MCP</h1><p>管理真实平台运行时、MCP Server、能力包与不同 Agent 的兼容情况。</p></div><div><button className="v4-button secondary" type="button" onClick={() => setMcpImportOpen(true)}><Braces size={15} />导入 JSON</button><button className="v4-button secondary" type="button" onClick={() => void checkHealth()} disabled={checking}><Check size={16} />{checking ? "检查中…" : "运行健康检查"}</button><button className="v4-button primary" type="button" onClick={() => openCreateServer()}><Plus size={16} />添加 MCP Server</button></div></header>
     {error && <div className="v4-error">{error}</div>}
+    <RuntimeProfilesPanel />
     <section className="v5-mcp-quickstart"><header><div><strong>快速配置</strong><small>从常用模板开始，所有命令和目录都可在保存前检查</small></div><KeyRound size={17} /></header>{mcpTemplates.map((template) => <button type="button" key={template.name} onClick={() => openCreateServer(template)}><span><ServerCog size={15} /></span><div><strong>{template.name}</strong><small>{template.description}</small></div><Plus size={14} /></button>)}</section>
     <section className="v4-tools-grid">
       <article className="v4-panel v4-tool-gateway"><header className="v4-panel-head"><div><strong>平台工具网关</strong><small>状态来自本地后端探测，不再硬编码</small></div><span className="v4-status green"><i />{connected} CONNECTED</span></header><div className="v4-tool-cards">
@@ -463,7 +468,7 @@ export default function ToolsMcp() {
 
     {mcpImportOpen && <div className="v4-modal-backdrop" onMouseDown={() => setMcpImportOpen(false)}><form className="v4-modal small" onSubmit={importMcpJson} onMouseDown={(event) => event.stopPropagation()}><header><div><strong>导入标准 MCP JSON</strong><small>支持 mcpServers、servers 或单层 Server 映射</small></div><button type="button" onClick={() => setMcpImportOpen(false)}><X size={18} /></button></header><div className="v5-mcp-import"><p>导入前请检查其中是否包含明文密钥。导入后的环境变量会转存到系统凭据存储。</p><textarea aria-label="MCP JSON" required value={mcpImportText} onChange={(event) => setMcpImportText(event.target.value)} spellCheck={false} placeholder={'{\n  "mcpServers": {\n    "filesystem": { "command": "npx", "args": ["-y", "..."] }\n  }\n}'} /></div><footer><button className="v4-button secondary" type="button" onClick={() => setMcpImportOpen(false)}>取消</button><button className="v4-button primary" type="submit" disabled={busy === "mcp-import"}><Braces size={15} />验证并导入</button></footer></form></div>}
 
-    {toolTestServer && <div className="v4-modal-backdrop" onMouseDown={() => setToolTestServer(null)}><form className="v4-modal small" onSubmit={testMcpTool} onMouseDown={(event) => event.stopPropagation()}><header><div><strong>工具调用测试台</strong><small>{toolTestServer.name} · 测试会真实调用所选工具</small></div><button type="button" onClick={() => setToolTestServer(null)}><X size={18} /></button></header><div className="v4-form-grid"><label className="full"><span>工具</span><select required value={toolTestName} onChange={(event) => setToolTestName(event.target.value)}>{toolTestServer.tools.map((tool) => <option key={tool.name} value={tool.name}>{tool.name}</option>)}</select></label><label className="full"><span>参数 JSON</span><textarea className="v5-code-input" value={toolTestArgs} onChange={(event) => setToolTestArgs(event.target.value)} spellCheck={false} /></label>{toolTestResult && <pre className="full v5-mcp-tool-result">{toolTestResult}</pre>}</div><footer><button className="v4-button secondary" type="button" onClick={() => setToolTestServer(null)}>关闭</button><button className="v4-button primary" type="submit" disabled={busy === "mcp-tool-test" || !toolTestName}><Play size={15} />调用工具</button></footer></form></div>}
+    {toolTestServer && <div className="v4-modal-backdrop" onMouseDown={() => setToolTestServer(null)}><form className="v4-modal" onSubmit={testMcpTool} onMouseDown={(event) => event.stopPropagation()}><header><div><strong>工具调用测试台</strong><small>{toolTestServer.name} · 测试会真实调用所选工具</small></div><button type="button" onClick={() => setToolTestServer(null)}><X size={18} /></button></header><div className="v4-form-grid"><label className="full"><span>工具</span><select required value={toolTestName} onChange={(event) => { setToolTestName(event.target.value); setToolTestArgs("{}"); setToolTestValues({}); }}>{toolTestServer.tools.map((tool) => <option key={tool.name} value={tool.name}>{tool.name}</option>)}</select></label><div className="full"><JsonSchemaForm schema={toolTestServer.tools.find((tool) => tool.name === toolTestName)?.inputSchema} value={toolTestValues} onChange={(value) => { setToolTestValues(value); setToolTestArgs(JSON.stringify(value, null, 2)); }} /></div><details className="full v5-schema-advanced"><summary><Braces size={13} />高级 JSON</summary><textarea className="v5-code-input" value={toolTestArgs} onChange={(event) => { setToolTestArgs(event.target.value); try { setToolTestValues(JSON.parse(event.target.value)); } catch { /* Validated on submit. */ } }} spellCheck={false} /></details>{toolTestResult && <pre className="full v5-mcp-tool-result">{toolTestResult}</pre>}</div><footer><button className="v4-button secondary" type="button" onClick={() => setToolTestServer(null)}>关闭</button><button className="v4-button primary" type="submit" disabled={busy === "mcp-tool-test" || !toolTestName}><Play size={15} />调用工具</button></footer></form></div>}
 
     {skillOpen && <div className="v4-modal-backdrop" onMouseDown={() => setSkillOpen(false)}><form className="v4-modal small" onSubmit={submitSkill} onMouseDown={(event) => event.stopPropagation()}><header><div><strong>{editingSkill ? "编辑能力包" : "创建能力包"}</strong><small>能力包可在 Agent Studio 会话中随时选择</small></div><button type="button" onClick={() => setSkillOpen(false)}><X size={18} /></button></header><div className="v4-form-grid"><label className="full"><span>名称</span><input required value={skillForm.name} onChange={(event) => setSkillForm({ ...skillForm, name: event.target.value })} /></label><label className="full"><span>说明</span><input value={skillForm.description} onChange={(event) => setSkillForm({ ...skillForm, description: event.target.value })} /></label><label className="full"><span>工作指令</span><textarea required value={skillForm.content} onChange={(event) => setSkillForm({ ...skillForm, content: event.target.value })} /></label><label className="full"><span>允许工具（逗号分隔）</span><input value={skillForm.tools} onChange={(event) => setSkillForm({ ...skillForm, tools: event.target.value })} /></label><label className="full"><span>默认权限</span><select value={skillForm.permission_profile} onChange={(event) => setSkillForm({ ...skillForm, permission_profile: event.target.value })}><option value="readonly">只读</option><option value="workspace">工作区</option><option value="standard">标准开发</option><option value="full">完全访问</option></select></label></div><footer><button className="v4-button secondary" type="button" onClick={() => setSkillOpen(false)}>取消</button><button className="v4-button primary" type="submit" disabled={busy === "skill-form"}><Wrench size={16} />保存能力包</button></footer></form></div>}
   </div>;

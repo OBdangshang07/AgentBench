@@ -18,6 +18,7 @@ class InteractiveTerminal:
         terminal_id: str,
         workspace: Path,
         shell: str = "powershell.exe",
+        title: str | None = None,
         columns: int = 120,
         rows: int = 30,
     ):
@@ -38,6 +39,7 @@ class InteractiveTerminal:
         self.id = terminal_id
         self.workspace = workspace.resolve()
         self.shell = Path(executable).name
+        self.title = title or self.shell.removesuffix(".exe")
         self.created_at = utc_now()
         self.process = PtyProcess.spawn(
             argv,
@@ -88,6 +90,7 @@ class InteractiveTerminal:
         return {
             "id": self.id,
             "shell": self.shell,
+            "title": self.title,
             "workspace": str(self.workspace),
             "running": not self._closed.is_set() and self.process.isalive(),
             "exit_code": None if self.process.isalive() else self.process.exitstatus,

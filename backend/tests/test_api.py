@@ -10,6 +10,7 @@ from test_ncre_office import judge_answers
 
 from agentbench.api import create_app
 from agentbench.catalog import (
+    CURSOR_RUNNER_ID,
     GAUNTLET_SUITE_ID,
     MOCK_MODEL_ID,
     NCRE_OFFICE_SUITE_ID,
@@ -39,7 +40,7 @@ def test_health_and_catalog_api(settings):
     with TestClient(create_app(settings)) as client:
         health = client.get("/api/v1/health")
         assert health.status_code == 200
-        assert health.json()["version"] == "5.0.0"
+        assert health.json()["version"] == "5.1.0"
         cases = client.get("/api/v1/test-cases").json()
         # 214 existing cases plus the two built-in 2025 Math I tracks
         # (22 questions each). The API must expose the bundled paper without
@@ -77,9 +78,29 @@ def test_qoder_runner_supports_verified_quick_install(settings):
         assert qoder["executable"] == "qoderclicn"
         assert "--print" in qoder["args"]
         assert "--dangerously-skip-permissions" in qoder["args"]
+        assert qoder["args"][qoder["args"].index("--model") + 1] == "{model_name}"
         assert "{prompt}" in qoder["args"]
+        assert qoder["model_override_supported"] is True
+        assert qoder["adapter"]["model_override"] is True
+        assert qoder["adapter"]["native_resume"] is True
+        assert qoder["adapter"]["visible_browser"] is True
         assert qoder["install"]["supported"] is True
         assert qoder["install"]["command"] == "npm install -g @qodercn-ai/qoderclicn"
+
+
+def test_cursor_runner_supports_official_cli_and_model_override(settings):
+    with TestClient(create_app(settings)) as client:
+        runners = client.get("/api/v1/runners").json()
+        cursor = next(item for item in runners if item["id"] == CURSOR_RUNNER_ID)
+        assert cursor["runner_type"] == "cursor_cli"
+        assert cursor["executable"] == "agent"
+        assert cursor["args"][cursor["args"].index("--output-format") + 1] == "stream-json"
+        assert cursor["args"][cursor["args"].index("--model") + 1] == "{model_name}"
+        assert cursor["adapter"]["native_resume"] is True
+        assert cursor["adapter"]["structured_events"] == "stream"
+        assert cursor["adapter"]["visible_browser"] is False
+        assert cursor["install"]["supported"] is True
+        assert "cursor.com/install" in cursor["install"]["command"]
 
 
 def test_windows_tauri_origin_is_allowed(settings):

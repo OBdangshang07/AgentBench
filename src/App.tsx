@@ -16,6 +16,7 @@ const ControlCenter = lazy(() => import("./v4/ControlCenter"));
 const Projects = lazy(() => import("./v4/Projects"));
 const ProjectDetail = lazy(() => import("./v4/ProjectDetail"));
 const Tasks = lazy(() => import("./v4/Tasks"));
+const TaskDetail = lazy(() => import("./v4/TaskDetail"));
 const ToolsMcp = lazy(() => import("./v4/ToolsMcp"));
 const V4Layout = lazy(() => import("./v4/V4Layout"));
 
@@ -39,6 +40,7 @@ export default function App() {
           <Route path="studio/:sessionId" element={deferred(<AgentStudio />)} />
           <Route path="flows" element={deferred(<AgentFlow />)} />
           <Route path="tasks" element={deferred(<Tasks />)} />
+          <Route path="tasks/:taskId" element={deferred(<TaskDetail />)} />
           <Route path="tools" element={deferred(<ToolsMcp />)} />
           <Route path="benchmarks" element={deferred(<BenchmarksHub />)} />
           <Route path="models" element={deferred(<ModelsAndAgents />)} />

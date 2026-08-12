@@ -12,6 +12,13 @@ from .config import Settings
 
 def main() -> None:
     multiprocessing.freeze_support()
+    if "--studio-mcp" in sys.argv[1:]:
+        from .studio_mcp import parse_studio_mcp_args, run_studio_mcp
+
+        bridge_args = [item for item in sys.argv[1:] if item != "--studio-mcp"]
+        parsed = parse_studio_mcp_args(bridge_args)
+        run_studio_mcp(parsed.api_base, parsed.bridge_token)
+        return
     if "--browser-mcp" in sys.argv[1:]:
         from .browser_mcp import parse_browser_mcp_args, run_browser_mcp
 

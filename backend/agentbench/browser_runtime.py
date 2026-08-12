@@ -176,6 +176,15 @@ class BrowserRuntime:
             raise BrowserRuntimeError("browser_page_create_failed") from exc
         return {"id": str(page["id"]), "title": str(page.get("title") or "Untitled"), "url": str(page.get("url") or url)}
 
+    def close_page(self, page_id: str) -> dict[str, Any]:
+        self._page_target(page_id)
+        try:
+            response = httpx.get(f"{self._base_url()}/json/close/{quote(page_id, safe='')}", timeout=5)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise BrowserRuntimeError("browser_page_close_failed") from exc
+        return {"closed": page_id, "pages": self.pages()}
+
     def _page_target(self, page_id: str | None = None) -> dict[str, Any]:
         try:
             response = httpx.get(f"{self._base_url()}/json/list", timeout=3)

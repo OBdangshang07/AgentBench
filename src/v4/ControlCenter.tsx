@@ -1,4 +1,5 @@
 import {
+  Activity,
   ArrowRight,
   Bot,
   Check,
@@ -8,6 +9,7 @@ import {
   Cpu,
   FolderKanban,
   GitFork,
+  ListTodo,
   Play,
   ShieldAlert,
   Sparkles,
@@ -114,6 +116,37 @@ export default function ControlCenter() {
               </button>
             ))}
             {!data?.recent_projects?.length && <div className="v4-empty compact"><FolderKanban size={22} /><strong>还没有项目</strong><span>添加本地目录后即可交给 Agent 操作</span></div>}
+          </div>
+        </article>
+      </section>
+
+      <section className="v5-control-activity">
+        <article className="v4-panel v5-unified-activity">
+          <header className="v4-panel-head"><div><strong>统一活动流</strong><small>会话、任务与 Flow 的可验证进度</small></div><span className="v4-status green"><i />LIVE</span></header>
+          <div>
+            {data?.activity?.length ? data.activity.slice(0, 12).map((item) => {
+              const Icon = item.source_type === "session" ? Bot : item.source_type === "task" ? ListTodo : GitFork;
+              return <button key={item.id} type="button" onClick={() => navigate(item.href)}>
+                <span className={`v5-activity-icon ${item.status}`}><Icon size={15} /></span>
+                <span><strong>{item.summary}</strong><small>{item.source_title} · {item.project_name || "本地工作区"}</small></span>
+                <b>{item.source_type === "session" ? "SESSION" : item.source_type === "task" ? "TASK" : "FLOW"}</b>
+                <time>{relativeTime(item.created_at)}</time>
+                <ArrowRight size={13} />
+              </button>;
+            }) : <div className="v4-empty compact"><Activity size={22} /><strong>还没有运行活动</strong><span>Agent、任务和 Flow 的进度会汇总到这里</span></div>}
+          </div>
+        </article>
+
+        <article className="v4-panel v5-active-work">
+          <header className="v4-panel-head"><div><strong>当前工作队列</strong><small>离开页面也能掌握执行状态</small></div><Link to="/tasks">任务中心 <ArrowRight size={14} /></Link></header>
+          <div>
+            {data?.active_tasks_list?.map((task) => <button key={`task-${task.id}`} type="button" onClick={() => navigate(`/tasks/${task.id}`)}>
+              <span><ListTodo size={15} /></span><div><strong>{task.title}</strong><small>{task.project_name || "未绑定项目"} · {task.priority.toUpperCase()}</small></div><b className={task.status === "approval" ? "attention" : "running"}>{task.status}</b>
+            </button>)}
+            {data?.active_flows_list?.map((flow) => <button key={`flow-${flow.id}`} type="button" onClick={() => navigate(`/flows?flow=${flow.id}`)}>
+              <span><GitFork size={15} /></span><div><strong>{flow.name}</strong><small>{flow.project_name || "未绑定项目"} · {flow.completed_nodes}/{flow.node_count} 节点</small></div><b className="running">{flow.status}</b>
+            </button>)}
+            {!data?.active_tasks_list?.length && !data?.active_flows_list?.length && <div className="v4-empty compact"><Check size={22} /><strong>工作队列为空</strong><span>后台任务和 Flow 运行时会显示在这里</span></div>}
           </div>
         </article>
       </section>

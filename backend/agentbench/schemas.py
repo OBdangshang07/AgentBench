@@ -32,6 +32,7 @@ class ModelDiscoveryRequest(BaseModel):
         "aider-cli",
         "kimi-code",
         "qoder-cli",
+        "cursor-cli",
     ] = "api"
     provider: str = Field(default="openai-compatible", min_length=1, max_length=100)
     base_url: HttpUrl | None = None
@@ -62,6 +63,7 @@ class RunnerCreate(BaseModel):
         "aider_cli",
         "kimi_code_cli",
         "qoder_cli",
+        "cursor_cli",
         "command",
     ]
     executable: str | None = None
@@ -180,11 +182,12 @@ class SessionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     project_id: str
+    profile_id: str | None = None
     runner_id: str | None = None
     model_id: str | None = None
     title: str = Field(default="新 Agent 会话", min_length=1, max_length=180)
     permission_profile: PermissionProfile | None = None
-    reasoning_effort: ReasoningEffort = "medium"
+    reasoning_effort: ReasoningEffort | None = None
     skill_pack_id: str | None = None
 
 
@@ -192,12 +195,39 @@ class SessionUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: str | None = Field(default=None, min_length=1, max_length=180)
+    profile_id: str | None = None
     runner_id: str | None = None
     model_id: str | None = None
     permission_profile: PermissionProfile | None = None
     reasoning_effort: ReasoningEffort | None = None
     skill_pack_id: str | None = None
     archived: bool | None = None
+
+
+class RuntimeProfileCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=1000)
+    runner_id: str | None = None
+    model_id: str | None = None
+    permission_profile: PermissionProfile = "workspace"
+    reasoning_effort: ReasoningEffort = "medium"
+    skill_pack_id: str | None = None
+    mcp_server_ids: list[str] = Field(default_factory=list, max_length=50)
+
+
+class RuntimeProfileUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=1000)
+    runner_id: str | None = None
+    model_id: str | None = None
+    permission_profile: PermissionProfile | None = None
+    reasoning_effort: ReasoningEffort | None = None
+    skill_pack_id: str | None = None
+    mcp_server_ids: list[str] | None = Field(default=None, max_length=50)
 
 
 class SessionForkCreate(BaseModel):
@@ -224,6 +254,7 @@ class TerminalCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     shell: Literal["powershell.exe", "pwsh.exe", "cmd.exe"] = "powershell.exe"
+    title: str | None = Field(default=None, min_length=1, max_length=80)
     columns: int = Field(default=120, ge=40, le=300)
     rows: int = Field(default=30, ge=10, le=100)
 
@@ -278,6 +309,15 @@ class BrowserToolCall(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
 
 
+class StudioToolCall(BaseModel):
+    """One tool advertised by an ephemeral, turn-scoped Studio MCP bridge."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
 class ApprovalDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -292,6 +332,13 @@ class FileChangeReview(BaseModel):
     content: str | None = Field(default=None, max_length=2_000_000)
 
 
+class TaskAcceptanceCriterion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=500)
+    completed: bool = False
+
+
 class TaskItemCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -304,6 +351,9 @@ class TaskItemCreate(BaseModel):
     due_at: str | None = Field(default=None, max_length=80)
     tags: list[str] = Field(default_factory=list, max_length=20)
     depends_on: list[str] = Field(default_factory=list, max_length=50)
+    acceptance_criteria: list[TaskAcceptanceCriterion] = Field(
+        default_factory=list, max_length=50
+    )
 
 
 class TaskItemUpdate(BaseModel):
@@ -319,7 +369,18 @@ class TaskItemUpdate(BaseModel):
     due_at: str | None = Field(default=None, max_length=80)
     tags: list[str] | None = Field(default=None, max_length=20)
     depends_on: list[str] | None = Field(default=None, max_length=50)
+    acceptance_criteria: list[TaskAcceptanceCriterion] | None = Field(
+        default=None, max_length=50
+    )
     archived: bool | None = None
+
+
+class TaskBulkAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    task_ids: list[str] = Field(min_length=1, max_length=200)
+    action: Literal["archive", "duplicate", "set_priority", "set_status"]
+    value: str | None = Field(default=None, max_length=40)
 
 
 class McpServerCreate(BaseModel):

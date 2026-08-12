@@ -136,25 +136,72 @@ function installApiMock(
   currentDetail: AgentSessionDetail = detail,
   currentSession: AgentSession = session,
 ) {
+  let terminalSequence = 0;
+  const liveTerminals: Array<{ id: string; title: string; shell: string; running: boolean; cursor: number; chunks: Array<{ data: string }> }> = [];
+  let browserSequence = 1;
+  let browserPages = [{ id: "page-1", title: "Example", url: "https://example.com", type: "page" }];
+  const browserStatus = () => ({
+    installed: true,
+    running: true,
+    executable: "msedge.exe",
+    engine: "chromium",
+    profile_path: "D:/AgentBench/browser",
+    page_count: browserPages.length,
+    pages: browserPages,
+    manual_takeover: true,
+  });
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = String(input);
-    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.0.0" });
+    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.1.0" });
     if (url.endsWith("/sessions")) return json([currentSession]);
     if (url.endsWith("/sessions/session-1") && init?.method === "PATCH") return json({ ...currentDetail, ...JSON.parse(String(init.body)) });
     if (url.includes("/sessions/session-1?message_limit=")) return json(currentDetail);
+    if (url.endsWith("/sessions/session-1/turns") && init?.method === "POST") return json({ id: "queued-turn-new", status: "queued", queued_behind_active: true }, 202);
+    if (url.includes("/sessions/session-1/turns/") && init?.method === "DELETE") return json({ ...currentDetail, removed_turn_id: "turn-2" });
     if (url.endsWith("/sessions/session-1/terminals") && init?.method === "POST") {
-      return json({ id: "terminal-1", running: true, cursor: 0, chunks: [] }, 201);
+      terminalSequence += 1;
+      const terminal = { id: `terminal-${terminalSequence}`, title: `PowerShell ${terminalSequence}`, shell: "powershell.exe", running: true, cursor: 0, chunks: [] };
+      liveTerminals.push(terminal);
+      return json(terminal, 201);
     }
-    if (url.includes("/sessions/session-1/terminals/terminal-1/input")) {
-      return json({ id: "terminal-1", running: true, cursor: 0, chunks: [] });
+    if (url.endsWith("/sessions/session-1/terminals") && !init?.method) return json(liveTerminals);
+    if (url.includes("/sessions/session-1/terminals/") && url.endsWith("/input")) {
+      const id = url.split("/terminals/")[1].split("/")[0];
+      return json({ id, running: true, cursor: 0, chunks: [] });
     }
-    if (url.includes("/sessions/session-1/terminals/terminal-1?")) {
-      return json({ id: "terminal-1", running: true, cursor: 0, chunks: [] });
+    if (url.includes("/sessions/session-1/terminals/") && url.includes("?after=")) {
+      const id = url.split("/terminals/")[1].split("?")[0];
+      return json({ id, running: true, cursor: 0, chunks: [] });
+    }
+    if (url.includes("/sessions/session-1/terminals/") && init?.method === "DELETE") {
+      const id = url.split("/terminals/")[1].split("?")[0];
+      const index = liveTerminals.findIndex((item) => item.id === id);
+      if (index >= 0) liveTerminals.splice(index, 1);
+      return json({ id, running: false });
     }
     if (url.includes("/approvals/") && url.endsWith("/decision")) return json({ status: "approved" });
     if (url.endsWith("/projects")) return json([project]);
     if (url.endsWith("/runners")) return json(runners);
     if (url.endsWith("/models")) return json(models);
+    if (url.endsWith("/browser/status")) return json(browserStatus());
+    if (url.endsWith("/browser/launch")) return json(browserStatus());
+    if (url.endsWith("/browser/pages") && init?.method === "POST") {
+      browserSequence += 1;
+      const page = { id: `page-${browserSequence}`, title: `New tab ${browserSequence}`, url: "about:blank", type: "page" };
+      browserPages = [...browserPages, page];
+      return json(page);
+    }
+    if (url.includes("/browser/pages/") && init?.method === "DELETE") {
+      const id = url.split("/browser/pages/")[1];
+      browserPages = browserPages.filter((item) => item.id !== id);
+      return json({ pages: browserPages });
+    }
+    if (url.includes("/browser/snapshot?")) {
+      const pageId = new URL(url, "http://localhost").searchParams.get("page_id");
+      const page = browserPages.find((item) => item.id === pageId) ?? browserPages[0];
+      return json({ title: page?.title ?? "", url: page?.url ?? "about:blank", text: "Example", links: [], controls: [] });
+    }
+    if (url.includes("/browser/screenshots?")) return json({ id: "screenshot-1" });
     if (url.includes("/projects/project-1/files/search?")) return json({
       project_id: "project-1",
       root_path: project.root_path,
@@ -211,17 +258,23 @@ describe("Agent Studio visual workspace controls", () => {
     expect(screen.getByText(/已扫描 86 项/)).toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes("files/search?query=read"))).toBe(true);
 
+    fireEvent.keyDown(screen.getByRole("separator", { name: "调整项目侧栏宽度" }), { key: "ArrowRight" });
+    expect(container.querySelector(".v4-studio-workbench")).toHaveStyle({ "--studio-left": "266px" });
+
     fireEvent.click(screen.getByRole("button", { name: "收起项目侧栏" }));
     fireEvent.click(screen.getByRole("button", { name: "收起会话侧栏" }));
     fireEvent.click(screen.getByRole("button", { name: "隐藏底部面板" }));
 
     const workbench = container.querySelector(".v4-studio-workbench");
     expect(workbench).toHaveClass("left-collapsed", "right-collapsed", "dock-collapsed");
-    await waitFor(() => expect(JSON.parse(window.localStorage.getItem("agentbench.studio.layout.v1") ?? "{}")).toEqual({
+    await waitFor(() => expect(JSON.parse(window.localStorage.getItem("agentbench.studio.layout.v1") ?? "{}")).toMatchObject({
       left: false,
       right: false,
       dock: false,
       dockExpanded: false,
+      leftWidth: 266,
+      rightWidth: 310,
+      dockHeight: 246,
     }));
   });
 
@@ -378,5 +431,103 @@ describe("Agent Studio visual workspace controls", () => {
         data: "Write-Output 'DIRECT_INPUT_OK'\r",
       });
     });
+  });
+
+  it("keeps three independent terminal tabs and closes only the selected process", async () => {
+    const standardSession: AgentSession = { ...session, permission_profile: "standard" };
+    const fetchMock = installApiMock(
+      { ...detail, ...standardSession, permission_profile: "standard" },
+      standardSession,
+    );
+    renderStudio();
+
+    fireEvent.click(await screen.findByRole("button", { name: /交互终端/ }));
+    expect(await screen.findByText("PowerShell 1")).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle("新建终端"));
+    expect(await screen.findByText("PowerShell 2")).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle("新建终端"));
+    expect(await screen.findByText("PowerShell 3")).toBeInTheDocument();
+    expect(screen.getByTitle("新建终端")).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭终端 PowerShell 2" }));
+    await waitFor(() => expect(screen.queryByText("PowerShell 2")).not.toBeInTheDocument());
+    expect(screen.getByText("PowerShell 1")).toBeInTheDocument();
+    expect(screen.getByText("PowerShell 3")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([input, init]) =>
+      String(input).endsWith("/terminals/terminal-2") && init?.method === "DELETE"
+    )).toBe(true);
+  });
+
+  it("creates, switches and closes real visible-browser tabs", async () => {
+    const fetchMock = installApiMock();
+    renderStudio();
+
+    fireEvent.click(await screen.findByRole("button", { name: /浏览器/ }));
+    expect(await screen.findByText("Example")).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle("新建浏览器标签"));
+    expect((await screen.findAllByText("New tab 2")).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByText("Example"));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+      String(input).includes("/browser/snapshot?page_id=page-1")
+    )).toBe(true));
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭浏览器标签 Example" }));
+    await waitFor(() => expect(screen.queryByText("Example")).not.toBeInTheDocument());
+    expect(screen.getAllByText("New tab 2").length).toBeGreaterThan(0);
+    expect(fetchMock.mock.calls.some(([input, init]) =>
+      String(input).endsWith("/browser/pages/page-1") && init?.method === "DELETE"
+    )).toBe(true);
+  });
+
+  it("restores session drafts, adds @file context and manages follow-up instructions", async () => {
+    const runningSession: AgentSession = { ...session, status: "running" };
+    const queuedTurn = {
+      id: "turn-2",
+      session_id: session.id,
+      turn_no: 2,
+      status: "queued",
+      user_message: "稍后检查发布说明",
+      final_answer: null,
+      tokens_input: 0,
+      tokens_output: 0,
+      cost_usd: 0,
+      duration_ms: 0,
+      steps: 0,
+      error_code: null,
+      error_message: null,
+      created_at: now,
+      started_at: null,
+      completed_at: null,
+    };
+    const runningDetail: AgentSessionDetail = {
+      ...detail,
+      ...runningSession,
+      turns: [queuedTurn],
+      messages: [{ id: "queued-message", turn_id: queuedTurn.id, role: "user", content: queuedTurn.user_message, metadata: {}, created_at: now }],
+      message_count: 1,
+    };
+    window.localStorage.setItem("agentbench.studio.draft.v1.session-1", JSON.stringify({
+      message: "继续审查 @read",
+      context_files: ["src/main.ts"],
+    }));
+    const fetchMock = installApiMock(runningDetail, runningSession);
+    renderStudio();
+
+    const composer = await screen.findByPlaceholderText(/输入后续要求/);
+    expect(composer).toHaveValue("继续审查 @read");
+    expect(screen.getByText("src/main.ts")).toBeInTheDocument();
+    expect(await screen.findByText("README.md")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /README\.md/ }));
+    expect(screen.getByText("docs/README.md")).toBeInTheDocument();
+    expect(screen.getByText("后续指令队列")).toBeInTheDocument();
+    expect(screen.getByText("稍后检查发布说明")).toBeInTheDocument();
+
+    fireEvent.change(composer, { target: { value: "排队执行最终检查" } });
+    fireEvent.click(screen.getByRole("button", { name: "加入后续指令队列" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith("/sessions/session-1/turns") && init?.method === "POST")).toBe(true));
+    await waitFor(() => expect(window.localStorage.getItem("agentbench.studio.draft.v1.session-1")).toBeNull());
+
+    fireEvent.click(screen.getByRole("button", { name: /移除排队指令/ }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => String(input).includes("/sessions/session-1/turns/turn-2") && init?.method === "DELETE")).toBe(true));
   });
 });

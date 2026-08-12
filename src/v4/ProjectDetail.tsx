@@ -54,6 +54,7 @@ export default function ProjectDetail() {
 
   useEffect(() => {
     if (!project) return;
+    ux.setSelectedProjectId(project.id);
     setForm({
       name: project.name,
       description: project.description,

@@ -25,7 +25,9 @@ def _question_type(number: int) -> str:
 def _question_points(number: int) -> int:
     if number <= 16:
         return 5
-    return 20 if number == 22 else 10
+    # 2025 Math I paper structure: question 17 is 10 points and questions
+    # 18-22 are 12 points each (70 points for the solution section).
+    return 10 if number == 17 else 12
 
 
 def _rubric_template(number: int) -> dict[str, Any]:

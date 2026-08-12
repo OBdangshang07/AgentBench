@@ -591,6 +591,7 @@ def test_seeded_suites_have_expected_sizes(settings):
             "aider_cli",
             "kimi_code_cli",
             "qoder_cli",
+            "cursor_cli",
         } <= runner_types
     finally:
         service.close()
