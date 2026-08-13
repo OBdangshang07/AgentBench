@@ -3414,7 +3414,7 @@ def seed_builtin_data(database: Database) -> None:
             FRONTEND_FULL_SUITE_ID,
             "Xnmk Library 前端工程全套",
             "固定版本的 24 项真实前端工程测试；每题独立作品目录，完成后全部进入纯人工评分。",
-            "5.2.0-r1",
+            "5.2.2-r2",
             frontend_ids,
         ),
         *[
@@ -3422,7 +3422,7 @@ def seed_builtin_data(database: Database) -> None:
                 suite_id,
                 FRONTEND_GROUPS[group]["name"],
                 FRONTEND_GROUPS[group]["description"] + " 全部采用纯人工评分。",
-                "5.2.0-r1",
+                "5.2.2-r2",
                 [frontend_by_key[key] for key in project_keys(group)],
             )
             for group, suite_id in (

@@ -151,6 +151,7 @@ function eventTitle(event: StudioEvent) {
     case "turn.started": return "Agent 开始执行本轮任务";
     case "native_cli.started": return "已启动原生 Agent 运行时";
     case "live.phase": return String(payload.summary ?? "Agent 正在推进任务");
+    case "live.heartbeat": return String(payload.summary ?? "Agent 正在持续运行");
     case "live.message": return payload.status === "streaming" ? "Agent 正在说明进度" : "Agent 进度说明";
     case "live.tool": return `${payload.status === "completed" ? "工具完成" : payload.status === "preparing" ? "准备调用工具" : "正在调用工具"} · ${String(payload.tool ?? "tool")}`;
     case "live.command": return "正在执行命令";
@@ -177,6 +178,7 @@ function eventDetail(event: StudioEvent) {
   if (event.event_type === "live.command") return [payload.command, payload.detail].filter(Boolean).join("\n");
   if (event.event_type === "live.test") return [payload.command, payload.detail].filter(Boolean).join("\n");
   if (event.event_type === "live.phase") return String(payload.detail ?? "");
+  if (event.event_type === "live.heartbeat" && payload.phase) return `阶段：${String(payload.phase)}`;
   if (event.event_type === "live.file_change" && payload.size_delta !== undefined) return `${Number(payload.size_delta) >= 0 ? "+" : ""}${String(payload.size_delta)} B`;
   if (event.event_type === "tool.requested") return JSON.stringify(payload.arguments ?? {}, null, 2);
   if (event.event_type === "tool.completed") return JSON.stringify(payload.result ?? {}, null, 2);
@@ -192,6 +194,7 @@ function eventCategory(event: StudioEvent) {
   if (event.event_type.includes("test")) return "验证";
   if (event.event_type.includes("file")) return "文件";
   if (event.event_type.includes("approval")) return "审批";
+  if (event.event_type === "live.heartbeat") return "状态";
   return "进度";
 }
 
@@ -811,7 +814,8 @@ export default function AgentStudio() {
     const keyed = new Map<string, StudioEvent>();
     const standalone: StudioEvent[] = [];
     for (const event of events) {
-      if (["usage.updated", "assistant.message", "native_cli.event", "live.usage", "live.heartbeat"].includes(event.event_type)) continue;
+      if (["usage.updated", "assistant.message", "native_cli.event", "live.usage"].includes(event.event_type)) continue;
+      if (event.event_type === "live.heartbeat" && !event.payload.summary) continue;
       if (
         event.event_type === "live.activity"
         && !event.payload.detail
@@ -822,6 +826,7 @@ export default function AgentStudio() {
       if (event.event_type === "live.tool" && event.payload.tool_id) key = `tool:${String(event.payload.tool_id)}`;
       if (["live.command", "live.test"].includes(event.event_type) && event.payload.tool_id) key = `action:${String(event.payload.tool_id)}`;
       if (event.event_type === "live.file_change" && event.payload.path) key = `file:${String(event.payload.path)}`;
+      if (event.event_type === "live.heartbeat" && event.payload.phase) key = "runtime:heartbeat";
       if (key) keyed.set(key, event);
       else standalone.push(event);
     }
@@ -886,6 +891,17 @@ export default function AgentStudio() {
       label: model.name,
       description: `${model.provider} · ${model.model_name}`,
     })), [models]);
+  const activeRunner = useMemo(
+    () => runners?.find((item) => item.id === detail?.runner_id),
+    [detail?.runner_id, runners],
+  );
+  const harnessEffort = activeRunner?.runner_type === "deepseek_harness"
+    ? (detail?.reasoning_effort === "low"
+      ? { label: "快速", actual: "OFF", note: "最短响应，适合简单任务" }
+      : detail?.reasoning_effort === "max"
+        ? { label: "极限", actual: "MAX", note: "最高推理资源，复杂任务会明显更慢" }
+        : { label: "标准", actual: "HIGH", note: "Harness 推荐的速度与能力平衡档" })
+    : null;
   const skillOptions = useMemo<ComposerMenuOption[]>(() => [
     { value: "", label: "无", description: "使用 Agent 默认工作方式" },
     ...(skillPacks ?? []).map((pack) => ({
@@ -1655,7 +1671,7 @@ export default function AgentStudio() {
           {!isChat && <button className={`v4-pane-toggle with-label ${studioLayout.right ? "active" : ""}`} type="button" aria-label={studioLayout.right ? "关闭工具工作台" : "打开工具工作台"} title={`${studioLayout.right ? "关闭" : "打开"}工具工作台`} onClick={() => setStudioLayout((current) => ({ ...current, right: !current.right, dock: !current.right }))}>{studioLayout.right ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}<span>工具</span></button>}
         </header>
 
-        {runtimeConfigOpen && <section className="v5-runtime-config-popover"><header><div><strong>运行配置</strong><small>{isChat ? "纯对话固定隔离权限；可切换 Agent、模型与思考强度" : "当前会话立即生效；运行中限制切换 Agent 与模型"}</small></div><button type="button" aria-label="关闭运行配置" onClick={() => setRuntimeConfigOpen(false)}><X size={14} /></button></header><div className="v5-runtime-primary"><StudioPicker ariaLabel="选择 Agent" caption="AGENT" icon={<Bot size={15} />} disabled={activeStatuses.has(detail?.status ?? "")} value={detail?.runner_id ?? ""} options={runnerOptions} onChange={(runnerId) => void updateSession({ runner_id: runnerId })} /><StudioPicker ariaLabel="选择模型" caption="MODEL" icon={<Cpu size={15} />} disabled={activeStatuses.has(detail?.status ?? "")} value={detail?.model_id ?? ""} options={modelOptions} onChange={(modelId) => void updateSession({ model_id: modelId })} /></div><div className="v5-runtime-secondary"><ComposerMenu ariaLabel="会话访问权限" label="权限" icon={<ShieldCheck size={14} />} value={detail?.permission_profile ?? "workspace"} options={permissionOptions} disabled={configBusy || isChat} onChange={(value) => void updateRuntimeSetting({ permission_profile: value as PermissionProfile })} /><ComposerMenu ariaLabel="思考强度" label="思考" icon={<Brain size={14} />} value={detail?.reasoning_effort ?? "medium"} options={effortOptions} disabled={configBusy} onChange={(value) => void updateRuntimeSetting({ reasoning_effort: value as ReasoningEffort })} />{!isChat && <><ComposerMenu ariaLabel="会话能力包" label="能力" icon={<Sparkles size={14} />} value={detail?.skill_pack_id ?? ""} options={skillOptions} disabled={configBusy || activeStatuses.has(detail?.status ?? "")} onChange={(value) => void updateRuntimeSetting({ skill_pack_id: value || null })} /><ComposerMenu ariaLabel="运行 Profile" label="Profile" icon={<Gauge size={14} />} value={detail?.profile_id ?? ""} options={profileOptions} disabled={configBusy || activeStatuses.has(detail?.status ?? "")} onChange={(value) => void updateRuntimeSetting({ profile_id: value || null })} /></>}</div><footer><span><Gauge size={13} />{quotaTokens.toLocaleString()} Tokens · ${quotaCost.toFixed(3)}</span><span><Clock3 size={13} />{duration(detail?.duration_ms ?? 0)}</span>{!isChat && <span><FileDiff size={13} />{detail?.file_changes.length ?? 0} 个变更</span>}</footer></section>}
+        {runtimeConfigOpen && <section className="v5-runtime-config-popover"><header><div><strong>运行配置</strong><small>{isChat ? "纯对话固定隔离权限；可切换 Agent、模型与思考强度" : "当前会话立即生效；运行中限制切换 Agent 与模型"}</small></div><button type="button" aria-label="关闭运行配置" onClick={() => setRuntimeConfigOpen(false)}><X size={14} /></button></header><div className="v5-runtime-primary"><StudioPicker ariaLabel="选择 Agent" caption="AGENT" icon={<Bot size={15} />} disabled={activeStatuses.has(detail?.status ?? "")} value={detail?.runner_id ?? ""} options={runnerOptions} onChange={(runnerId) => void updateSession({ runner_id: runnerId })} /><StudioPicker ariaLabel="选择模型" caption="MODEL" icon={<Cpu size={15} />} disabled={activeStatuses.has(detail?.status ?? "")} value={detail?.model_id ?? ""} options={modelOptions} onChange={(modelId) => void updateSession({ model_id: modelId })} /></div><div className="v5-runtime-secondary"><ComposerMenu ariaLabel="会话访问权限" label="权限" icon={<ShieldCheck size={14} />} value={detail?.permission_profile ?? "workspace"} options={permissionOptions} disabled={configBusy || isChat} onChange={(value) => void updateRuntimeSetting({ permission_profile: value as PermissionProfile })} /><ComposerMenu ariaLabel="思考强度" label="思考" icon={<Brain size={14} />} value={detail?.reasoning_effort ?? "medium"} options={effortOptions} disabled={configBusy} onChange={(value) => void updateRuntimeSetting({ reasoning_effort: value as ReasoningEffort })} />{!isChat && <><ComposerMenu ariaLabel="会话能力包" label="能力" icon={<Sparkles size={14} />} value={detail?.skill_pack_id ?? ""} options={skillOptions} disabled={configBusy || activeStatuses.has(detail?.status ?? "")} onChange={(value) => void updateRuntimeSetting({ skill_pack_id: value || null })} /><ComposerMenu ariaLabel="运行 Profile" label="Profile" icon={<Gauge size={14} />} value={detail?.profile_id ?? ""} options={profileOptions} disabled={configBusy || activeStatuses.has(detail?.status ?? "")} onChange={(value) => void updateRuntimeSetting({ profile_id: value || null })} /></>}</div>{harnessEffort && <div className="v5-harness-effort-note"><Brain size={14} /><span><strong>Harness 实际生效：{harnessEffort.actual} · {harnessEffort.label}</strong><small>{harnessEffort.note}；本次使用隔离配置，不修改 dsh 全局设置</small></span></div>}<footer><span><Gauge size={13} />{quotaTokens.toLocaleString()} Tokens · ${quotaCost.toFixed(3)}</span><span><Clock3 size={13} />{duration(detail?.duration_ms ?? 0)}</span>{!isChat && <span><FileDiff size={13} />{detail?.file_changes.length ?? 0} 个变更</span>}</footer></section>}
 
         <div className="v4-conversation-scroll" ref={scrollRef} onScroll={handleConversationScroll}>
           {loading && <div className="v4-empty compact"><RefreshCw className="spin" size={22} /><strong>正在恢复会话上下文</strong></div>}
@@ -1669,7 +1685,7 @@ export default function AgentStudio() {
                 {latestHeartbeat && (
                   <div className="v4-process-telemetry">
                     <span><Clock3 size={12} />{duration(Number(latestHeartbeat.payload.elapsed_ms ?? 0))}</span>
-                    <span>{Number(latestHeartbeat.payload.line_count ?? 0).toLocaleString()} 流事件</span>
+                    <span>{latestHeartbeat.payload.summary ? String(latestHeartbeat.payload.summary) : `${Number(latestHeartbeat.payload.line_count ?? 0).toLocaleString()} 流事件`}</span>
                   </div>
                 )}
                 <b className={connected ? "live" : ""}><i />{connected ? "实时" : "已保存"}</b>

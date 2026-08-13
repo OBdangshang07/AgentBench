@@ -1,7 +1,8 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import RunDetailPage from "../pages/RunDetail";
+import { WorkspaceUxProvider } from "../components/WorkspaceUx";
 import type { RunDetail } from "../types";
 
 function makeRun(overrides: Partial<RunDetail> = {}): RunDetail {
@@ -47,7 +48,7 @@ function renderRunPage(run: RunDetail) {
     const url = String(input);
     let value: unknown = {};
     if (url.endsWith("/health")) {
-        value = { name: "AgentBench Desktop", version: "5.2.1" };
+        value = { name: "AgentBench Desktop", version: "5.2.2" };
     } else if (url.includes("/runs?experiment_id=")) {
       value = [run];
     } else if (url.includes("/runs/run-1")) {
@@ -64,6 +65,22 @@ function renderRunPage(run: RunDetail) {
     </MemoryRouter>,
   );
   return fetchMock;
+}
+
+function renderRunPageWithNotifications(run: RunDetail) {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    const value = url.includes("/runs?experiment_id=") ? [run] : url.includes("/runs/run-1") ? run : { name: "AgentBench Desktop", version: "5.2.2" };
+    return { ok: true, status: 200, json: async () => value } as Response;
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  render(
+    <WorkspaceUxProvider>
+      <MemoryRouter initialEntries={["/runs/run-1"]}>
+        <Routes><Route path="/runs/:runId" element={<RunDetailPage />} /></Routes>
+      </MemoryRouter>
+    </WorkspaceUxProvider>,
+  );
 }
 
 describe("RunDetail exam question card", () => {
@@ -101,6 +118,13 @@ describe("RunDetail exam question card", () => {
     await screen.findByText("NCRE 表格题");
     expect(screen.queryByText("EXAM QUESTION")).not.toBeInTheDocument();
     expect(screen.queryByText("题目")).not.toBeInTheDocument();
+  });
+
+  it("shows a clear message when a workspace cannot be opened", async () => {
+    renderRunPageWithNotifications(makeRun());
+    fireEvent.click(await screen.findByRole("button", { name: /打开工作区/ }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法打开工作区");
+    expect(screen.getByRole("alert")).toHaveTextContent("只能在 AgentBench 桌面客户端中打开本地工作区");
   });
 
   it("always exposes a return-to-experiment link", async () => {

@@ -6,7 +6,7 @@ from typing import Any
 
 SOURCE_REPOSITORY = "https://github.com/Xnmk029/Xnmk_Library"
 SOURCE_COMMIT = "2b03bc0f39f4a1e912816d5a8f752f6d1fd985eb"
-SUITE_REVISION = "2026.08-r1"
+SUITE_REVISION = "2026.08-r2"
 RUBRIC_VERSION = "1.0"
 ASSET_ROOT = Path(__file__).resolve().parent / "frontend_suite_assets"
 PROMPT_ROOT = ASSET_ROOT / "prompts"
@@ -106,6 +106,8 @@ def _delivery_contract(project: dict[str, Any]) -> str:
         f"- 首选可识别入口为 `{entry}`；若技术栈必须构建，允许使用 `dist/index.html` 或 `build/index.html`。\n"
         "- 额外提供 `README_AGENTBENCH.md`，写明入口、启动方式、已完成功能、已知限制和第三方资源许可。\n"
         "- 不得读取任何历史参测作品；不得以截图或参考位图冒充题目要求的交互实现。\n"
+        "- 不要克隆仓库或下载大型代码库来获取参考素材；仅可下载完成任务必要的单个公开参考资源，优先直接实现交付物。\n"
+        "- 避免创建与最终作品无关的调试、抓取、缓存和临时预览文件；确有需要时在交付前整理工作区，只保留作品、源码、必要资源与说明。\n"
         "- 完成后自行检查入口和主要交互，并在最终回复中给出简短交付摘要。\n"
     )
 

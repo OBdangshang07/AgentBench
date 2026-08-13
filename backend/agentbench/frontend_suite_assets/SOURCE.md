@@ -2,7 +2,7 @@
 
 - Repository: https://github.com/Xnmk029/Xnmk_Library
 - Fixed commit: `2b03bc0f39f4a1e912816d5a8f752f6d1fd985eb`
-- AgentBench suite revision: `2026.08-r1`
+- AgentBench suite revision: `2026.08-r2`
 - License: MIT; the upstream license is preserved in this directory.
 
 AgentBench distributes only selected task prompts, provenance metadata and the

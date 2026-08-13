@@ -40,7 +40,7 @@ def test_health_and_catalog_api(settings):
     with TestClient(create_app(settings)) as client:
         health = client.get("/api/v1/health")
         assert health.status_code == 200
-        assert health.json()["version"] == "5.2.1"
+        assert health.json()["version"] == "5.2.2"
         cases = client.get("/api/v1/test-cases").json()
         # 214 existing cases plus the two built-in 2025 Math I tracks
         # (22 questions each). The API must expose the bundled paper without

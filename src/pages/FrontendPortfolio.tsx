@@ -4,7 +4,7 @@ import { Link, useParams } from "react-router-dom";
 import { Button, ErrorBlock, LoadingBlock, Score, StatusBadge } from "../components/ui";
 import { api } from "../lib/api";
 import { formatDuration, formatNumber } from "../lib/format";
-import { openFolder } from "../lib/openPath";
+import { useOpenFolder } from "../lib/useOpenFolder";
 import { useApi } from "../lib/useApi";
 import type { FrontendPortfolio as FrontendPortfolioData, FrontendPortfolioRun } from "../types";
 
@@ -15,6 +15,7 @@ function difficulty(value: number) {
 export default function FrontendPortfolio() {
   const { experimentId = "" } = useParams();
   const state = useApi<FrontendPortfolioData>(`/experiments/${experimentId}/frontend-portfolio`, 3_000);
+  const openWorkspace = useOpenFolder();
   const [message, setMessage] = useState("");
 
   async function openPreview(run: FrontendPortfolioRun) {
@@ -37,7 +38,7 @@ export default function FrontendPortfolio() {
   return <div className="ab-view ab-frontend-portfolio">
     <header className="ab-view-header">
       <div className="ab-view-title"><span className="ab-view-index">05 / PORTFOLIO</span><div><h1>前端作品集</h1><p>一个模型 × Agent 的所有交付集中展示；作品仍保存在独立本地工作区。</p></div></div>
-      <div className="ab-header-meta"><Link className="ab-ghost-button" to={`/experiments/${experimentId}`}><ArrowLeft size={13} />返回实验</Link><button className="ab-run-button" type="button" onClick={() => void openFolder(portfolio.root_path)}><FolderOpen size={14} />打开全部作品</button></div>
+      <div className="ab-header-meta"><Link className="ab-ghost-button" to={`/experiments/${experimentId}`}><ArrowLeft size={13} />返回实验</Link><button className="ab-run-button" type="button" onClick={() => void openWorkspace(portfolio.root_path, "作品目录")}><FolderOpen size={14} />打开全部作品</button></div>
     </header>
     <section className="frontend-portfolio-hero">
       <div><span>XNmk LIBRARY / {portfolio.metadata.suite_revision}</span><h2>{portfolio.runs.length} 个真实前端项目</h2><p>来源固定在 <code>{portfolio.metadata.source_commit?.slice(0, 12)}</code>，不在运行时访问远程仓库。</p></div>
@@ -49,7 +50,7 @@ export default function FrontendPortfolio() {
       <header><span>{String(index + 1).padStart(2, "0")}</span><i>{difficulty(run.difficulty)}</i><StatusBadge status={run.status} /></header>
       <div className="frontend-work-cover"><Gauge size={28} /><span>{run.preview.available ? run.preview.entry : run.preview.kind === "project" ? "BUILD REQUIRED" : "WAITING FOR ENTRY"}</span></div>
       <div className="frontend-work-copy"><h3>{run.title}</h3><p>{run.model_name} × {run.runner_name}</p><div><span>{formatDuration(run.duration_ms)}</span><span>{formatNumber(run.tokens_input + run.tokens_output)} Token</span><span>{run.review?.status === "submitted" ? `${run.score?.toFixed(1)} 分` : run.review?.status === "draft" ? "评分草稿" : "待评审"}</span></div></div>
-      <footer>{run.workspace_path && <button type="button" onClick={() => void openFolder(run.workspace_path!)}><FolderOpen size={12} />工作区</button>}{run.preview.available && <button type="button" onClick={() => void openPreview(run)}><Play size={12} />预览</button>}<Link to={`/runs/${run.id}`} state={{ from: `/experiments/${experimentId}/portfolio` }}><ExternalLink size={12} />详情与评分</Link></footer>
+      <footer>{run.workspace_path && <button type="button" onClick={() => void openWorkspace(run.workspace_path!, "工作区")}><FolderOpen size={12} />工作区</button>}{run.preview.available && <button type="button" onClick={() => void openPreview(run)}><Play size={12} />预览</button>}<Link to={`/runs/${run.id}`} state={{ from: `/experiments/${experimentId}/portfolio` }}><ExternalLink size={12} />详情与评分</Link></footer>
     </article>)}</section>
   </div>;
 }

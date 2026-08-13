@@ -1,12 +1,33 @@
-/** 在 Tauri 桌面环境下打开本地文件夹；浏览器/vitest 环境优雅降级返回 false。 */
-export async function openFolder(path: string): Promise<boolean> {
+export interface OpenFolderResult {
+  ok: boolean;
+  error?: string;
+}
+
+/**
+ * Open an existing local directory in Windows Explorer.
+ *
+ * The Rust command validates the path before launching Explorer, so callers get
+ * an actionable error instead of a silent no-op. Browser and test environments
+ * return an explicit unsupported result without attempting a system launch.
+ */
+export async function openFolder(path: string): Promise<OpenFolderResult> {
+  const normalized = path.trim();
+  if (!normalized) return { ok: false, error: "工作区路径为空" };
+  if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
+    return { ok: false, error: "只能在 AgentBench 桌面客户端中打开本地工作区" };
+  }
   try {
-    if (!path) return false;
-    if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return false;
-    const { openPath } = await import("@tauri-apps/plugin-opener");
-    await openPath(path);
-    return true;
-  } catch {
-    return false;
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("open_workspace_folder", { path: normalized });
+    return { ok: true };
+  } catch (value) {
+    return {
+      ok: false,
+      error: typeof value === "string"
+        ? value
+        : value instanceof Error
+          ? value.message
+          : "Windows 无法打开这个工作区",
+    };
   }
 }

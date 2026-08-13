@@ -1867,6 +1867,11 @@
 .v5-runtime-secondary .v4-composer-menu-trigger { width: 100%; min-width: 0; }
 .v5-runtime-config-popover > footer { min-height: 42px; padding: 7px 11px; border-top: 1px solid #2d353a; display: flex; align-items: center; gap: 16px; color: #7e888e; font: 10px var(--v4-mono); }
 .v5-runtime-config-popover > footer span { display: flex; align-items: center; gap: 5px; }
+.v5-harness-effort-note { margin: 0 12px 12px; padding: 10px 12px; display: flex; align-items: flex-start; gap: 9px; border: 1px solid rgba(91, 217, 184, .24); border-radius: 8px; background: rgba(53, 151, 126, .08); color: #75dcc2; }
+.v5-harness-effort-note > svg { flex: 0 0 auto; margin-top: 2px; }
+.v5-harness-effort-note > span { min-width: 0; display: grid; gap: 4px; }
+.v5-harness-effort-note strong { color: #d4f6ec; font-size: 11px; }
+.v5-harness-effort-note small { color: #7e888e; font-size: 10px; line-height: 1.45; }
 
 .v4-composer { position: relative; z-index: 10; left: auto; right: auto; bottom: auto; width: min(920px, calc(100% - 36px)); margin: 0 auto 16px; flex: 0 0 auto; border-color: #414a50; border-radius: 14px; background: #11161bf8; box-shadow: 0 18px 46px #0007; }
 .v4-composer textarea { min-height: 78px; height: 78px; padding: 16px 17px; font-size: 13px; resize: none; }

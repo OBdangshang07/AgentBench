@@ -7,7 +7,7 @@ import { Button, ErrorBlock, Field, LoadingBlock, Modal } from "../components/ui
 import { api, apiUpload, downloadUrl } from "../lib/api";
 import { copyText } from "../lib/clipboard";
 import { formatDuration, formatNumber } from "../lib/format";
-import { openFolder } from "../lib/openPath";
+import { useOpenFolder } from "../lib/useOpenFolder";
 import { useApi } from "../lib/useApi";
 import { useRunEvents } from "../lib/useRunEvents";
 import type { ManualRubric, ManualReview, RunDetail, RunSummary, ScoreDimension } from "../types";
@@ -52,6 +52,7 @@ export default function RunDetailPage() {
   const siblings = useApi<RunSummary[]>(state.data ? `/runs?experiment_id=${state.data.experiment_id}&limit=1000` : null, state.data && !TERMINAL_RUN_STATUSES.has(state.data.status) ? 2_000 : 0);
   const active = Boolean(state.data && !TERMINAL_RUN_STATUSES.has(state.data.status));
   const live = useRunEvents(runId, state.data?.events ?? [], active);
+  const openWorkspace = useOpenFolder();
   const [reviewing, setReviewing] = useState(false);
   const [previewError, setPreviewError] = useState("");
   const [workspaceHint, setWorkspaceHint] = useState("");
@@ -94,7 +95,7 @@ export default function RunDetailPage() {
     <div className="ab-view ab-evidence-view">
       <header className="ab-view-header">
         <div className="ab-view-title"><span className="ab-view-index">04 / EVIDENCE</span><div><h1>{run.frontend ? "作品评审台" : "证据账本"}</h1><p>{run.frontend ? "预览 AI 的实际交付，逐项完成人工量表并保留评审证据。" : "从最终分数追溯到轮次、验证义务、裁判理由和工作区产物。"}</p></div></div>
-        <div className="ab-header-meta"><Link className="ab-ghost-button" to={backTo}><ArrowLeft size={13} />返回实验</Link><Link className={`ab-ghost-button${!previousTo ? " disabled" : ""}`} to={previousTo ?? backTo} state={{ from: backTo }} aria-disabled={!previousTo}><ChevronLeft size={13} />上一题</Link><Link className={`ab-ghost-button${!nextTo ? " disabled" : ""}`} to={nextTo ?? backTo} state={{ from: backTo }} aria-disabled={!nextTo}>下一题<ChevronRight size={13} /></Link><span className="ab-meta-pill">RUN / {run.id.slice(0, 8)}</span>{run.frontend && <button className="ab-ghost-button" type="button" onClick={() => void previewFrontend()}><Play size={13} />预览作品</button>}{run.workspace_path && <button className="ab-ghost-button" type="button" onClick={() => void openFolder(run.workspace_path!)}><FolderOpen size={13} />打开工作区</button>}<a className="ab-ghost-button" href={downloadUrl(`/experiments/${run.experiment_id}/export?format=html`)}><FileDown size={13} />导出报告</a></div>
+        <div className="ab-header-meta"><Link className="ab-ghost-button" to={backTo}><ArrowLeft size={13} />返回实验</Link><Link className={`ab-ghost-button${!previousTo ? " disabled" : ""}`} to={previousTo ?? backTo} state={{ from: backTo }} aria-disabled={!previousTo}><ChevronLeft size={13} />上一题</Link><Link className={`ab-ghost-button${!nextTo ? " disabled" : ""}`} to={nextTo ?? backTo} state={{ from: backTo }} aria-disabled={!nextTo}>下一题<ChevronRight size={13} /></Link><span className="ab-meta-pill">RUN / {run.id.slice(0, 8)}</span>{run.frontend && <button className="ab-ghost-button" type="button" onClick={() => void previewFrontend()}><Play size={13} />预览作品</button>}{run.workspace_path && <button className="ab-ghost-button" type="button" onClick={() => void openWorkspace(run.workspace_path!, "工作区")}><FolderOpen size={13} />打开工作区</button>}<a className="ab-ghost-button" href={downloadUrl(`/experiments/${run.experiment_id}/export?format=html`)}><FileDown size={13} />导出报告</a></div>
       </header>
 
       <div className="ab-run-layout">

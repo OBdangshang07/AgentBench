@@ -9,7 +9,7 @@ import type { Experiment, RunDetail, RunSummary } from "../types";
 import { Button, Card, ErrorBlock, LoadingBlock, Score, StatusBadge } from "../components/ui";
 import { ExperimentLiveFocus } from "../components/LiveRunView";
 import { BroadcastFrame } from "../components/BroadcastFrame";
-import { openFolder } from "../lib/openPath";
+import { useOpenFolder } from "../lib/useOpenFolder";
 
 const ACTIVE_RUN_STATUSES = new Set(["queued", "preparing", "running", "validating", "judging"]);
 const RUN_STATUS_PRIORITY: Record<string, number> = { running: 0, validating: 1, judging: 2, preparing: 3, queued: 4 };
@@ -31,6 +31,7 @@ export default function ExperimentDetail() {
   const { experimentId = "" } = useParams();
   const experiment = useApi<Experiment>(`/experiments/${experimentId}`, 2_000);
   const runs = useApi<RunSummary[]>(`/runs?experiment_id=${experimentId}&limit=1000`, 2_000);
+  const openWorkspace = useOpenFolder();
   const [actionError, setActionError] = useState("");
   const [rejudgeBusy, setRejudgeBusy] = useState(false);
   const [actionMessage, setActionMessage] = useState("");
@@ -64,6 +65,15 @@ export default function ExperimentDetail() {
     } catch (value) {
       setActionError(value instanceof Error ? value.message : "批量复判失败");
     } finally { setRejudgeBusy(false); }
+  }
+  async function openPortfolioFolder() {
+    setActionError("");
+    try {
+      const portfolio = await api<{ root_path: string }>(`/experiments/${experimentId}/frontend-portfolio`);
+      await openWorkspace(portfolio.root_path, "作品目录");
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "无法读取作品目录");
+    }
   }
   if (experiment.loading) return <LoadingBlock />;
   if (experiment.error || !experiment.data) return <ErrorBlock message={experiment.error ?? "实验不存在"} retry={() => void experiment.refresh()} />;
@@ -102,7 +112,7 @@ export default function ExperimentDetail() {
     <div className="ab-view ab-experiment-detail-view">
       <header className="ab-view-header">
         <div className="ab-view-title"><span className="ab-view-index">03 / COMPOSITION</span><div><h1>{item.name}</h1><p>{item.suite_name} · {formatDate(item.created_at)} · {item.participants.length} 个参测组合 · 重复 {item.repetitions} 次</p></div></div>
-        <div className="ab-header-meta"><Link to="/experiments?history=1" className="ab-ghost-button"><ArrowLeft size={13} />实验账本</Link>{item.suite_metadata?.kind === "frontend" && <><Link className="ab-ghost-button" to={`/experiments/${item.id}/portfolio`}><FolderOpen size={13} />作品集</Link><button className="ab-ghost-button" type="button" onClick={async () => { const portfolio = await api<{ root_path: string }>(`/experiments/${item.id}/frontend-portfolio`); await openFolder(portfolio.root_path); }}><FolderOpen size={13} />打开全部作品</button></>}<a className="ab-ghost-button" href={downloadUrl(`/experiments/${item.id}/export?format=html`)}><Download size={13} />导出报告</a>{item.status === "completed" && item.suite_metadata?.kind !== "frontend" && <Button variant="ghost" busy={rejudgeBusy} onClick={() => void rejudge()}><RefreshCw size={13} />复判结构化答案</Button>}{["draft", "interrupted"].includes(item.status) && <button className="ab-run-button" type="button" onClick={() => void action("start")}><Play size={13} />{item.status === "interrupted" ? "继续套件" : "启动评测"}</button>}{item.status === "running" && <Button variant="danger" onClick={() => void action("cancel")}><Square size={15} /> 停止</Button>}</div>
+        <div className="ab-header-meta"><Link to="/experiments?history=1" className="ab-ghost-button"><ArrowLeft size={13} />实验账本</Link>{item.suite_metadata?.kind === "frontend" && <><Link className="ab-ghost-button" to={`/experiments/${item.id}/portfolio`}><FolderOpen size={13} />作品集</Link><button className="ab-ghost-button" type="button" onClick={() => void openPortfolioFolder()}><FolderOpen size={13} />打开全部作品</button></>}<a className="ab-ghost-button" href={downloadUrl(`/experiments/${item.id}/export?format=html`)}><Download size={13} />导出报告</a>{item.status === "completed" && item.suite_metadata?.kind !== "frontend" && <Button variant="ghost" busy={rejudgeBusy} onClick={() => void rejudge()}><RefreshCw size={13} />复判结构化答案</Button>}{["draft", "interrupted"].includes(item.status) && <button className="ab-run-button" type="button" onClick={() => void action("start")}><Play size={13} />{item.status === "interrupted" ? "继续套件" : "启动评测"}</button>}{item.status === "running" && <Button variant="danger" onClick={() => void action("cancel")}><Square size={15} /> 停止</Button>}</div>
       </header>
       <div className="ab-experiment-detail-scroll" ref={scrollRef}>
       {actionError && <div className="error-banner preflight-error"><strong>启动检查未通过</strong><span>{actionError}</span></div>}

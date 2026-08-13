@@ -57,7 +57,7 @@ const run: RunDetail = {
     source_repository: "https://github.com/Xnmk029/Xnmk_Library",
     source_commit: "2b03bc0f39f4a1e912816d5a8f752f6d1fd985eb",
     source_path: "L2_Intermediate/2048/PROJECT_PROMPT.md",
-    suite_revision: "2026.08-r1",
+    suite_revision: "2026.08-r2",
     preview_entry: "index.html",
     review,
     rubric: {
@@ -81,7 +81,7 @@ describe("Xnmk frontend suite UI", () => {
     const portfolio: Portfolio = {
       experiment_id: "exp-front",
       root_path: "C:/AgentBench/data/frontend-portfolios/exp-front",
-      metadata: { kind: "frontend", suite_revision: "2026.08-r1", source_commit: "2b03bc0f39f4a1e912816d5a8f752f6d1fd985eb" },
+      metadata: { kind: "frontend", suite_revision: "2026.08-r2", source_commit: "2b03bc0f39f4a1e912816d5a8f752f6d1fd985eb" },
       score: { reviewed_runs: 0, unreviewed_runs: 1, review_progress: 0, reviewed_weighted_score: null, frontend_weighted_score: null },
       runs: [{
         id: run.id, model_id: run.model_id, runner_id: run.runner_id, repetition: 1,
@@ -94,7 +94,7 @@ describe("Xnmk frontend suite UI", () => {
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.1" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.2" });
       return json(portfolio);
     }));
     render(<MemoryRouter initialEntries={["/experiments/exp-front/portfolio"]}><Routes><Route path="/experiments/:experimentId/portfolio" element={<FrontendPortfolio />} /></Routes></MemoryRouter>);
@@ -108,7 +108,7 @@ describe("Xnmk frontend suite UI", () => {
   it("uploads screenshot evidence from the manual rubric workbench", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.1" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.2" });
       if (url.includes("manual-review/evidence?")) return json({ ...review, evidence: [{ name: "proof.png", path: "evidence.png", size: 8 }] });
       if (url.includes("/runs?experiment_id=")) return json([run]);
       return json(run);

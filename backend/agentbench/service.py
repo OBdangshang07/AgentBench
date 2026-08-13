@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import yaml
 
 from . import __version__
 from .agent import TOOL_DEFINITIONS, AgentHarness, AgentResult
@@ -55,7 +56,7 @@ from .model_clients import (
     ModelClientError,
     OpenAICompatibleClient,
 )
-from .model_discovery import deepseek_harness_default_model, discover_models
+from .model_discovery import deepseek_harness_default_selection, discover_models
 from .reports import create_backup, export_experiment, restore_backup
 from .schemas import (
     ExperimentCreate,
@@ -320,6 +321,124 @@ def _material_size_bytes(value: str) -> int:
         encoded = value[len("base64:"):]
         return len(encoded) // 4 * 3 - encoded.count("=")
     return len(str(value).encode("utf-8"))
+
+
+_LIVE_WORKSPACE_IGNORED_PARTS = {
+    ".git",
+    ".idea",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "target",
+}
+_LIVE_WORKSPACE_IGNORED_PREFIXES = (".agentbench", ".pytest", ".tmp")
+
+
+def _is_live_workspace_path(path: str) -> bool:
+    """Keep generated deliverables visible while excluding dependency/runtime churn."""
+    parts = Path(path.replace("\\", "/")).parts
+    return not any(
+        part.lower() in _LIVE_WORKSPACE_IGNORED_PARTS
+        or part.lower().startswith(_LIVE_WORKSPACE_IGNORED_PREFIXES)
+        for part in parts
+    )
+
+
+def _live_workspace_state(root: Path, max_items: int = 500) -> dict[str, tuple[int, int]]:
+    """Snapshot user-facing files without descending into runtime/dependency trees."""
+    state: dict[str, tuple[int, int]] = {}
+    try:
+        for current_root, directories, files in os.walk(root):
+            current = Path(current_root)
+            relative_root = current.relative_to(root)
+            directories[:] = sorted(
+                directory
+                for directory in directories
+                if _is_live_workspace_path(str(relative_root / directory))
+            )
+            for filename in sorted(files):
+                relative = str(relative_root / filename).replace("\\", "/")
+                if relative.startswith("./"):
+                    relative = relative[2:]
+                if not _is_live_workspace_path(relative):
+                    continue
+                target = current / filename
+                with suppress(OSError):
+                    stat = target.stat()
+                    state[relative] = (int(stat.st_size), int(stat.st_mtime_ns))
+                if len(state) >= max_items:
+                    return state
+    except OSError:
+        return state
+    return state
+
+
+def _harness_reasoning_effort(value: str | None) -> tuple[str, str]:
+    """Map AgentBench's shared five-level scale to Harness' three real levels."""
+    requested = str(value or "high").strip().lower()
+    if requested == "low":
+        return "off", "快速"
+    if requested == "max":
+        return "max", "极限"
+    return "high", "标准"
+
+
+def _harness_activity_phase(
+    changes: list[dict[str, Any]], elapsed_ms: int
+) -> tuple[str, str]:
+    paths = [str(item.get("path") or "").replace("\\", "/").lower() for item in changes]
+    names = [Path(path).name for path in paths]
+    if any(
+        name in {"package.json", "pnpm-lock.yaml", "package-lock.json", "yarn.lock"}
+        for name in names
+    ):
+        return "dependencies", "正在整理项目结构与依赖"
+    if any(
+        path.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
+        or "preview" in name
+        for path, name in zip(paths, names, strict=False)
+    ):
+        return "rendering", "正在渲染与检查视觉结果"
+    if any(
+        path.endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx"))
+        or name.startswith("test_")
+        or name in {"readme.md", "readme_agentbench.md"}
+        for path, name in zip(paths, names, strict=False)
+    ):
+        return "verification", "正在验证交付物并整理说明"
+    if changes:
+        return "building", "正在生成和迭代任务交付物"
+    if elapsed_ms < 30_000:
+        return "planning", "正在分析任务并准备执行方案"
+    return "working", "Agent 仍在运行，等待下一项可验证变化"
+
+
+def _harness_safe_settings(value: Any, key: str = "") -> Any:
+    """Copy Harness routing metadata while refusing credential-shaped fields."""
+    normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+    credential_shaped = any(
+        marker in normalized for marker in ("apikey", "accesstoken", "authtoken", "password", "secret")
+    )
+    indirect_reference = normalized.endswith(("env", "ref", "name", "id"))
+    if credential_shaped and not indirect_reference:
+        return None
+    if isinstance(value, dict):
+        return {
+            str(child_key): sanitized
+            for child_key, child_value in value.items()
+            if (sanitized := _harness_safe_settings(child_value, str(child_key))) is not None
+        }
+    if isinstance(value, list):
+        return [
+            sanitized
+            for child in value
+            if (sanitized := _harness_safe_settings(child, key)) is not None
+        ]
+    return value
 
 
 def public_definition(definition: dict[str, Any]) -> dict[str, Any]:
@@ -2127,6 +2246,63 @@ class EvaluationService:
                 if path:
                     configured[-1] = f"{configured[-1]}\n\nAttached file: {path}"
         return configured
+
+    def _prepare_harness_run_config(
+        self,
+        args: list[str],
+        provider: str,
+        model: str,
+        requested_effort: str | None,
+    ) -> tuple[list[str], Path, str, str]:
+        """Create a per-run Harness settings overlay without mutating ~/.dsh."""
+        effort, profile_label = _harness_reasoning_effort(requested_effort)
+        configured_home = os.getenv("DSH_HOME", "").strip()
+        harness_home = Path(configured_home).expanduser() if configured_home else Path.home() / ".dsh"
+        source_settings = harness_home / "settings.yaml"
+        settings: dict[str, Any] = {}
+        try:
+            if source_settings.is_file() and source_settings.stat().st_size <= 5_000_000:
+                loaded = yaml.safe_load(source_settings.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    settings = loaded
+        except (OSError, UnicodeError, yaml.YAMLError):
+            settings = {}
+        settings = _harness_safe_settings(settings)
+        settings = settings if isinstance(settings, dict) else {}
+        settings["agent-default-model"] = {
+            "provider": provider,
+            "model": model,
+            "reasoningEffort": effort,
+        }
+
+        runtime_base = (self.settings.data_dir / "native-runtime" / "deepseek-harness").resolve()
+        runtime_root = (runtime_base / uuid.uuid4().hex).resolve()
+        if not runtime_root.is_relative_to(runtime_base):
+            raise RuntimeError("Invalid Harness runtime path")
+        runtime_root.mkdir(parents=True, exist_ok=False)
+        try:
+            runtime_settings = runtime_root / "settings.yaml"
+            runtime_patch = runtime_root / "cordis.patch.yml"
+            runtime_settings.write_text(
+                yaml.safe_dump(settings, allow_unicode=True, sort_keys=False), encoding="utf-8"
+            )
+            settings_path = str(runtime_settings).replace("\\", "/").replace("'", "''")
+            runtime_patch.write_text(
+                "- id: settings\n"
+                "  config:\n"
+                f"    path: '{settings_path}'\n"
+                "    watch: false\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            shutil.rmtree(runtime_root, ignore_errors=True)
+            raise
+        configured_args = list(args)
+        prompt_index = (
+            configured_args.index("{prompt}") if "{prompt}" in configured_args else len(configured_args)
+        )
+        configured_args[prompt_index:prompt_index] = ["--patch", str(runtime_patch)]
+        return configured_args, runtime_root, effort, profile_label
 
     @staticmethod
     def _studio_native_browser_options(
@@ -5381,8 +5557,12 @@ class EvaluationService:
         args = _json(runner.get("args_json"), [])
         native_environment = _json(runner.get("env_json"), {})
         model_settings = _json(model.get("settings_json"), {})
+        harness_runtime_root: Path | None = None
+        harness_selection: tuple[str, str, str] | None = None
         if runner["runner_type"] == "deepseek_harness":
-            configured_provider, configured_model = deepseek_harness_default_model()
+            configured_provider, configured_model, configured_effort = (
+                deepseek_harness_default_selection()
+            )
             requested_provider = str(model_settings.get("agent_provider") or configured_provider)
             if (
                 str(model.get("provider") or "") != "deepseek-harness"
@@ -5396,7 +5576,7 @@ class EvaluationService:
                     self._empty_usage(),
                     0,
                     "harness_model_not_active",
-                    "DeepSeek Harness headless 模式只使用 settings.yaml 的默认模型。"
+                    "DeepSeek Harness headless 模式使用 settings.yaml 的默认模型身份。"
                     f"当前默认是 {configured_provider}/{configured_model}；请添加对应的 Harness 模型，"
                     "或先在 dsh web 中切换默认模型。",
                 )
@@ -5407,6 +5587,11 @@ class EvaluationService:
                 "standard": "workspace-write",
                 "full": "danger-full-access",
             }.get(permission, "workspace-write")
+            harness_selection = (
+                configured_provider,
+                configured_model,
+                str(metadata.get("reasoning_effort") or configured_effort),
+            )
         native_bridge_root: Path | None = None
         native_session_id = str(metadata.get("native_session_id") or "").strip()
         if metadata.get("studio_session"):
@@ -5475,13 +5660,7 @@ class EvaluationService:
         live_text_last_length = 0
 
         def workspace_state() -> dict[str, tuple[int, int]]:
-            state: dict[str, tuple[int, int]] = {}
-            for relative in workspace.list_files(max_items=500):
-                target = workspace.root / relative
-                with suppress(OSError):
-                    stat = target.stat()
-                    state[relative] = (int(stat.st_size), int(stat.st_mtime_ns))
-            return state
+            return _live_workspace_state(workspace.root)
 
         previous_workspace_state = workspace_state()
 
@@ -5581,8 +5760,9 @@ class EvaluationService:
             for path in previous_workspace_state.keys() - current_state.keys():
                 changes.append({"path": path, "change": "deleted", "size": 0})
             previous_workspace_state = current_state
-            for change in changes[:25]:
+            for change in changes[:12]:
                 event_sink("live.file_change", change)
+            phase, summary = _harness_activity_phase(changes, elapsed_ms)
             event_sink(
                 "live.heartbeat",
                 {
@@ -5590,10 +5770,37 @@ class EvaluationService:
                     "line_count": live_line_count,
                     "workspace_files": len(current_state),
                     "changes": len(changes),
+                    **(
+                        {"phase": phase, "summary": summary}
+                        if runner["runner_type"] == "deepseek_harness"
+                        else {}
+                    ),
                 },
             )
 
         try:
+            if harness_selection is not None:
+                harness_provider, harness_model, requested_effort = harness_selection
+                args, harness_runtime_root, actual_effort, effort_profile = (
+                    self._prepare_harness_run_config(
+                        list(args), harness_provider, harness_model, requested_effort
+                    )
+                )
+                event_sink(
+                    "live.phase",
+                    {
+                        "runner_type": "deepseek_harness",
+                        "phase": "runtime_config",
+                        "summary": (
+                            f"Harness 已应用{effort_profile}档（{actual_effort.upper()}）"
+                        ),
+                        "detail": (
+                            f"实际模型 {harness_provider}/{harness_model}；"
+                            "本次隔离配置不会修改 Harness 全局设置"
+                        ),
+                        "status": "completed",
+                    },
+                )
             command_result = run_native_cli(
                 executable=executable,
                 args=args,
@@ -5621,6 +5828,13 @@ class EvaluationService:
                 resolved_bridge_root = native_bridge_root.resolve()
                 if resolved_bridge_root.is_relative_to(expected_root):
                     shutil.rmtree(resolved_bridge_root, ignore_errors=True)
+            if harness_runtime_root is not None:
+                expected_harness_root = (
+                    self.settings.data_dir / "native-runtime" / "deepseek-harness"
+                ).resolve()
+                resolved_harness_root = harness_runtime_root.resolve()
+                if resolved_harness_root.is_relative_to(expected_harness_root):
+                    shutil.rmtree(resolved_harness_root, ignore_errors=True)
         with live_lock:
             pending_text = live_text_buffer.strip()
             pending_stream_id = f"native-message-{live_text_stream}"

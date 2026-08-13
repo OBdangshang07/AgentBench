@@ -97,6 +97,9 @@ def _discover_deepseek_harness() -> tuple[list[dict[str, Any]], list[dict[str, A
     default = default if isinstance(default, dict) else {}
     default_provider = str(default.get("provider") or "deepseek-official").strip()
     default_model = str(default.get("model") or "deepseek-v4-flash").strip()
+    default_effort = str(default.get("reasoningEffort") or "high").strip().lower()
+    if default_effort not in {"off", "high", "max"}:
+        default_effort = "high"
     provider_labels: dict[str, str] = {
         "deepseek-official": "DeepSeek Official",
     }
@@ -156,21 +159,35 @@ def _discover_deepseek_harness() -> tuple[list[dict[str, Any]], list[dict[str, A
         }
         for provider_id, provider_label in provider_labels.items()
     ]
+    effort_label = {"off": "快速", "high": "标准", "max": "极限"}[default_effort]
     warnings.append(
-        "Harness 为 Developer Preview；headless 运行使用 settings.yaml 中的默认模型，不支持单次 CLI 模型覆盖。"
+        "Harness 为 Developer Preview；headless 运行使用 settings.yaml 中的默认模型，"
+        f"全局推理档位为 {effort_label}（{default_effort.upper()}）。"
+        "AgentBench 运行时可通过隔离配置按任务覆盖推理档位，不会改写全局设置；"
+        "模型身份仍以 Harness 当前默认项为准。"
     )
     return models, providers, warnings
 
 
-def deepseek_harness_default_model() -> tuple[str, str]:
-    """Return the model identity Harness will actually use for a headless run."""
+def deepseek_harness_default_selection() -> tuple[str, str, str]:
+    """Return Harness' default provider, model and normalized reasoning effort."""
     settings, _ = _read_yaml(_dsh_home() / "settings.yaml")
     default = settings.get("agent-default-model")
     default = default if isinstance(default, dict) else {}
+    effort = str(default.get("reasoningEffort") or "high").strip().lower()
+    if effort not in {"off", "high", "max"}:
+        effort = "high"
     return (
         str(default.get("provider") or "deepseek-official").strip(),
         str(default.get("model") or "deepseek-v4-flash").strip(),
+        effort,
     )
+
+
+def deepseek_harness_default_model() -> tuple[str, str]:
+    """Compatibility wrapper returning the model identity used by headless runs."""
+    provider, model, _effort = deepseek_harness_default_selection()
+    return provider, model
 
 
 def _model_option(

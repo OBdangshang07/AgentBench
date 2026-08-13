@@ -32,6 +32,8 @@ def test_frontend_suite_is_fixed_and_manual_only(service: EvaluationService) -> 
     assert {item["metadata"]["source_commit"] for item in definitions} == {SOURCE_COMMIT}
     assert all(item["validators"] == [{"type": "manual_rubric", "weight": 100, "config": {"rubric_version": "1.0"}}] for item in definitions)
     assert all("历史参测作品" in item["instruction"] for item in definitions)
+    assert all("不要克隆仓库或下载大型代码库" in item["instruction"] for item in definitions)
+    assert all("与最终作品无关的调试" in item["instruction"] for item in definitions)
 
 
 def _frontend_run(service: EvaluationService) -> dict:

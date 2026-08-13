@@ -78,7 +78,11 @@ fn cleanup_obsolete_backends(resource_dir: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::is_packaged_backend_filename;
+    use super::{is_packaged_backend_filename, resolve_workspace_folder};
+    use std::{
+        env, fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn recognizes_only_release_sidecar_names() {
@@ -89,6 +93,34 @@ mod tests {
             "agentbench-backend-backup.exe"
         ));
         assert!(!is_packaged_backend_filename("unrelated.exe"));
+    }
+
+    #[test]
+    fn validates_workspace_folders_before_launching_explorer() {
+        assert_eq!(
+            resolve_workspace_folder("  ").unwrap_err(),
+            "Workspace path is empty"
+        );
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("agentbench-open-folder-{unique}"));
+        fs::create_dir(&root).expect("create test workspace");
+        let resolved = resolve_workspace_folder(root.to_str().expect("utf-8 path"))
+            .expect("existing directory should be accepted");
+        assert!(resolved.is_absolute());
+        assert!(resolved.is_dir());
+        assert!(!resolved.to_string_lossy().starts_with(r"\\?\"));
+
+        let file = root.join("artifact.txt");
+        fs::write(&file, "test").expect("create test artifact");
+        assert_eq!(
+            resolve_workspace_folder(file.to_str().expect("utf-8 path")).unwrap_err(),
+            "Workspace path is not a directory"
+        );
+        fs::remove_dir_all(root).expect("remove test workspace");
     }
 }
 
@@ -265,10 +297,49 @@ fn stop_backend(app_handle: &tauri::AppHandle) {
     };
 }
 
+fn resolve_workspace_folder(path: &str) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Workspace path is empty".into());
+    }
+    let resolved = PathBuf::from(trimmed)
+        .canonicalize()
+        .map_err(|error| format!("Workspace path does not exist or cannot be accessed: {error}"))?;
+    if !resolved.is_dir() {
+        return Err("Workspace path is not a directory".into());
+    }
+    // Windows canonicalization commonly adds an extended-length `\\?\` prefix.
+    // Filesystem APIs accept it, but Explorer can reject that spelling for an
+    // otherwise valid directory, so convert it back to a shell-friendly path.
+    let display = resolved.to_string_lossy();
+    if let Some(unc) = display.strip_prefix(r"\\?\UNC\") {
+        return Ok(PathBuf::from(format!(r"\\{unc}")));
+    }
+    if let Some(local) = display.strip_prefix(r"\\?\") {
+        return Ok(PathBuf::from(local));
+    }
+    Ok(resolved)
+}
+
+#[tauri::command]
+fn open_workspace_folder(path: String) -> Result<(), String> {
+    let resolved = resolve_workspace_folder(&path)?;
+    Command::new("explorer.exe")
+        .arg(resolved)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Could not open workspace in Windows Explorer: {error}"))?;
+    Ok(())
+}
+
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .invoke_handler(tauri::generate_handler![open_workspace_folder])
         .setup(|app| {
             let backend = ensure_backend(app).map_err(std::io::Error::other)?;
             if let Ok(resource_dir) = app.path().resource_dir() {

@@ -21,7 +21,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useWorkspaceUx } from "../components/WorkspaceUx";
 import { api } from "../lib/api";
-import { openFolder } from "../lib/openPath";
+import { useOpenFolder } from "../lib/useOpenFolder";
 import { useApi } from "../lib/useApi";
 import type { ModelConfig, Runner } from "../types";
 import type { AgentFlowSummary, AgentSession, PermissionProfile, Project, ProjectHealth, StudioTask } from "./types";
@@ -41,6 +41,7 @@ export default function ProjectDetail() {
   const { projectId } = useParams();
   const navigate = useNavigate();
   const ux = useWorkspaceUx();
+  const openWorkspace = useOpenFolder();
   const { data: project, loading, error, refresh } = useApi<Project>(projectId ? `/projects/${projectId}` : null, 8_000);
   const { data: health, refresh: refreshHealth } = useApi<ProjectHealth>(projectId ? `/projects/${projectId}/health` : null, 15_000);
   const { data: sessions } = useApi<AgentSession[]>(projectId ? `/sessions?project_id=${projectId}&limit=200` : null, 4_000);
@@ -127,7 +128,7 @@ export default function ProjectDetail() {
       <header className="v5-project-hero">
         <Link to="/projects" className="v5-back-link"><ArrowLeft size={15} />项目中心</Link>
         <div className="v5-project-identity"><span className="v4-project-logo">{project.name.slice(0, 2).toUpperCase()}</span><div><small>AUTHORIZED WORKSPACE</small><h1>{project.name}</h1><p>{project.description || "本地 Agent 工作区"}</p><code>{project.root_path}</code></div></div>
-        <div className="v5-project-hero-actions"><button className="v4-button secondary" type="button" onClick={() => void openFolder(project.root_path)}><FolderOpen size={15} />打开目录</button><button className="v4-button primary" type="button" onClick={() => void startSession()}><MessageSquarePlus size={15} />新建会话</button></div>
+        <div className="v5-project-hero-actions"><button className="v4-button secondary" type="button" onClick={() => void openWorkspace(project.root_path, "项目目录")}><FolderOpen size={15} />打开目录</button><button className="v4-button primary" type="button" onClick={() => void startSession()}><MessageSquarePlus size={15} />新建会话</button></div>
         <div className="v5-project-badges"><span><ShieldCheck size={12} />{project.permission_profile}</span><span><GitBranch size={12} />{project.branch || "local workspace"}</span><span className={health?.ready ? "ready" : "warning"}><i />{health?.ready ? "环境就绪" : "需要检查"}</span></div>
       </header>
 

@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from agentbench.api import create_app
 from agentbench.execution import CommandResult, Workspace
-from agentbench.model_discovery import discover_models
+from agentbench.model_discovery import deepseek_harness_default_selection, discover_models
 from agentbench.schemas import ModelCreate
 from agentbench.service import EvaluationService
 
@@ -31,6 +31,7 @@ def test_deepseek_harness_discovery_reads_default_and_provider_catalog(tmp_path,
 agent-default-model:
   provider: deepseek-official
   model: deepseek-v4-pro
+  reasoningEffort: max
 llm-deepseek:
   models:
     - id: deepseek-v4-flash
@@ -59,6 +60,12 @@ llm-pi-ai:
     assert ("third-party", "fable-5") in by_key
     assert "DO-NOT-EXPOSE" not in json.dumps(result)
     assert any("Developer Preview" in warning for warning in result["warnings"])
+    assert any("极限（MAX）" in warning for warning in result["warnings"])
+    assert deepseek_harness_default_selection() == (
+        "deepseek-official",
+        "deepseek-v4-pro",
+        "max",
+    )
 
 
 def test_deepseek_harness_discovery_survives_malformed_yaml(tmp_path, monkeypatch):
