@@ -431,7 +431,7 @@ def test_seed_disables_retired_builtin_cases(settings):
             "SELECT enabled FROM test_cases WHERE id='retired'"
         )
         assert retired == {"enabled": 0}
-        assert service.dashboard()["test_cases"] == 258
+        assert service.dashboard()["test_cases"] == 282
     finally:
         service.close()
 
@@ -567,7 +567,7 @@ def test_seeded_suites_have_expected_sizes(settings):
         assert len(gauntlet_cases) >= 55
         assert {case["category"] for case in gauntlet_cases}.isdisjoint({"office-exam"})
         assert 50 <= len(gauntlet_lite_cases) <= 75
-        assert service.dashboard()["test_cases"] == 258
+        assert service.dashboard()["test_cases"] == 282
         suites = {item["id"]: item for item in service.list_suites()}
         assert suites[FRONTIER_SUITE_ID]["difficulty_max"] == 5
         assert suites[PRACTICAL_SUITE_ID]["docker_case_count"] > 0

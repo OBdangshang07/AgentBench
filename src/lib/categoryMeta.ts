@@ -8,6 +8,7 @@ import {
   Shield,
   Sigma,
   Workflow,
+  MonitorSmartphone,
   Wrench,
   type LucideIcon,
 } from "lucide-react";
@@ -31,6 +32,10 @@ export const categoryMeta: Record<string, CategoryMeta> = {
   planning: { name: "规划决策", icon: Route, color: "gold" },
   "ultra-engineering": { name: "Ultra 工程", icon: Code2, color: "ultra" },
   "ultra-planning": { name: "Ultra 规划", icon: Route, color: "ultra" },
+  "frontend-ui": { name: "前端 UI 与视觉", icon: MonitorSmartphone, color: "teal" },
+  "frontend-games": { name: "网页游戏", icon: Code2, color: "green" },
+  "frontend-graphics": { name: "3D / WebGL", icon: Braces, color: "cyan" },
+  "frontend-expert": { name: "专家级前端", icon: MonitorSmartphone, color: "ultra" },
 };
 
 /** 分类固定顺序（与 categoryMeta 声明顺序一致）。 */

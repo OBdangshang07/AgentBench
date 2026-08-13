@@ -17,6 +17,8 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -369,6 +371,8 @@ class EvaluationService:
             max_workers=1, thread_name_prefix="agentbench-install"
         )
         self._cancel_events: dict[str, threading.Event] = {}
+        self._paused_runs: set[str] = set()
+        self._skipped_runs: set[str] = set()
         self._session_cancel_events: dict[str, threading.Event] = {}
         self._flow_cancel_events: dict[str, threading.Event] = {}
         self._browser_bridges: dict[str, dict[str, Any]] = {}
@@ -376,6 +380,7 @@ class EvaluationService:
         self._terminals: dict[str, tuple[str, InteractiveTerminal]] = {}
         self._experiment_semaphores: dict[str, threading.Semaphore] = {}
         self._install_jobs: dict[str, dict[str, Any]] = {}
+        self._preview_servers: dict[str, tuple[ThreadingHTTPServer, threading.Thread, str]] = {}
         self._state_lock = threading.RLock()
         self.recover_interrupted_runs()
 
@@ -419,6 +424,12 @@ class EvaluationService:
         for _, terminal in terminals:
             with suppress(Exception):
                 terminal.close()
+        with self._state_lock:
+            previews = list(self._preview_servers.values())
+            self._preview_servers.clear()
+        for server, thread, _url in previews:
+            with suppress(Exception):
+                self._shutdown_preview_server(server, thread)
         self.executor.shutdown(wait=False, cancel_futures=True)
         self.install_executor.shutdown(wait=False, cancel_futures=False)
         with suppress(Exception):
@@ -3626,6 +3637,8 @@ class EvaluationService:
             row["requires_judge"] = any(
                 item.get("type") == "ai_rubric" for item in validators
             )
+            row["manual_scoring"] = bool(metadata.get("manual_scoring"))
+            row["suite_kind"] = metadata.get("suite_kind")
         self._attach_test_health(rows)
         return rows
 
@@ -3756,6 +3769,7 @@ class EvaluationService:
             "command",
             "command_metrics",
             "ai_rubric",
+            "manual_rubric",
         }
         unknown = [
             item["type"] for item in definition["validators"] if item.get("type") not in supported
@@ -3934,6 +3948,7 @@ class EvaluationService:
         if not row:
             raise KeyError("experiment_not_found")
         row["participants"] = _json(row.pop("participants_json"), [])
+        row["suite_metadata"] = self._suite_runtime_metadata(experiment_id)
         row["summary"] = self.database.fetch_one(
             "SELECT COUNT(*) AS total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed,"
             "SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed,"
@@ -3955,12 +3970,72 @@ class EvaluationService:
         if math_score and row["summary"]:
             row["summary"]["avg_score"] = math_score["weighted_score"]
             row["summary"].update(math_score)
+        if row["suite_metadata"].get("kind") == "frontend" and row["summary"]:
+            row["summary"].update(self._frontend_experiment_score(experiment_id))
         return row
+
+    def _suite_runtime_metadata(self, experiment_id: str) -> dict[str, Any]:
+        definitions = self.database.fetch_all(
+            "SELECT DISTINCT COALESCE(tr.definition_json,t.definition_json) definition_json "
+            "FROM runs r JOIN test_cases t ON t.id=r.test_case_id "
+            "LEFT JOIN test_case_revisions tr ON tr.id=r.test_revision_id "
+            "WHERE r.experiment_id=?",
+            (experiment_id,),
+        )
+        metadata = [(_json(row["definition_json"], {}).get("metadata") or {}) for row in definitions]
+        frontend = [item for item in metadata if item.get("suite_kind") == "frontend"]
+        if not frontend:
+            return {"kind": "benchmark"}
+        return {
+            "kind": "frontend",
+            "manual_scoring": True,
+            "source_repository": frontend[0].get("source_repository"),
+            "source_commit": frontend[0].get("source_commit"),
+            "suite_revision": frontend[0].get("suite_revision"),
+        }
+
+    def _frontend_experiment_score(self, experiment_id: str) -> dict[str, Any]:
+        rows = self.database.fetch_all(
+            "SELECT r.id,r.model_id,r.runner_id,r.score,r.status,t.definition_json "
+            "FROM runs r JOIN test_cases t ON t.id=r.test_case_id WHERE r.experiment_id=?",
+            (experiment_id,),
+        )
+        weights = {2: 0.7, 3: 0.9, 4: 1.0, 5: 1.2, 6: 1.4}
+        reviewed = []
+        total_weight = 0.0
+        weighted = 0.0
+        for row in rows:
+            definition = _json(row["definition_json"], {})
+            difficulty = int((definition.get("metadata") or {}).get("difficulty", 3))
+            weight = weights.get(difficulty, 1.0)
+            total_weight += weight
+            if row["score"] is not None:
+                reviewed.append(row)
+                weighted += float(row["score"]) * weight
+        reviewed_weight = sum(
+            weights.get(int((_json(row["definition_json"], {}).get("metadata") or {}).get("difficulty", 3)), 1.0)
+            for row in reviewed
+        )
+        return {
+            "reviewed_runs": len(reviewed),
+            "unreviewed_runs": len(rows) - len(reviewed),
+            "review_progress": round(len(reviewed) * 100 / len(rows), 1) if rows else 0,
+            "reviewed_weighted_score": round(weighted / reviewed_weight, 2) if reviewed_weight else None,
+            "frontend_weighted_score": round(weighted / total_weight, 2) if rows and len(reviewed) == len(rows) and total_weight else None,
+        }
 
     def start_experiment(self, experiment_id: str) -> dict[str, Any]:
         experiment = self.get_experiment(experiment_id)
         if experiment["status"] not in {"draft", "interrupted"}:
             raise ValueError("experiment_not_startable")
+        if experiment["status"] == "interrupted":
+            stopping = self.database.fetch_one(
+                "SELECT COUNT(*) AS count FROM runs WHERE experiment_id=? "
+                "AND status IN ('preparing','running','validating','judging')",
+                (experiment_id,),
+            )
+            if stopping and int(stopping["count"] or 0):
+                raise ValueError("套件仍在停止当前项目，请等待状态稳定后再继续")
         preflight = self.preflight_experiment(experiment_id)
         if not preflight["ok"]:
             detail = "\n- ".join(preflight["errors"])
@@ -4023,6 +4098,7 @@ class EvaluationService:
             for row in definitions
             for validator in (_json(row["definition_json"], {}).get("validators") or [])
         ]
+        manual_only = any(item.get("type") == "manual_rubric" for item in validators)
         native_incompatible = any(
             (_json(row["definition_json"], {}).get("metadata") or {}).get(
                 "native_agent_compatible"
@@ -4108,6 +4184,7 @@ class EvaluationService:
                 "native_runners": len(native_runners),
                 "requires_docker": requires_docker,
                 "requires_judge": requires_judge,
+                "manual_scoring": manual_only,
             },
         }
 
@@ -4221,6 +4298,53 @@ class EvaluationService:
         self.database.insert_audit("experiment.cancelled", "experiment", experiment_id)
         return self.get_experiment(experiment_id)
 
+    def pause_experiment(self, experiment_id: str) -> dict[str, Any]:
+        experiment = self.get_experiment(experiment_id)
+        if experiment["status"] != "running":
+            raise ValueError("experiment_not_running")
+        self.database.execute(
+            "UPDATE experiments SET status='interrupted',completed_at=? WHERE id=?",
+            (utc_now(), experiment_id),
+        )
+        self.database.execute(
+            "UPDATE runs SET status='interrupted',error_code='suite_paused',"
+            "error_message='用户暂停了套件；恢复时将重新执行本题',completed_at=? "
+            "WHERE experiment_id=? AND status='queued'",
+            (utc_now(), experiment_id),
+        )
+        active = self.database.fetch_all(
+            "SELECT id FROM runs WHERE experiment_id=? AND status IN ('preparing','running','validating','judging')",
+            (experiment_id,),
+        )
+        with self._state_lock:
+            for row in active:
+                self._paused_runs.add(row["id"])
+                self._cancel_events.setdefault(row["id"], threading.Event()).set()
+        self.database.insert_audit("experiment.paused", "experiment", experiment_id)
+        return self.get_experiment(experiment_id)
+
+    def skip_run(self, run_id: str) -> dict[str, Any]:
+        run = self.get_run(run_id)
+        if run["status"] not in {"queued", "interrupted", "preparing", "running"}:
+            raise ValueError("run_not_skippable")
+        if not run.get("frontend"):
+            raise ValueError("skip_only_available_for_frontend_suite")
+        if run["status"] in {"preparing", "running"}:
+            with self._state_lock:
+                self._skipped_runs.add(run_id)
+                self._cancel_events.setdefault(run_id, threading.Event()).set()
+            self.database.insert_audit("run.skip_requested", "run", run_id)
+            return self.get_run(run_id)
+        self.database.execute(
+            "UPDATE runs SET status='cancelled',error_code='suite_skipped',"
+            "error_message='用户跳过了此项目',completed_at=? WHERE id=?",
+            (utc_now(), run_id),
+        )
+        self.database.insert_audit("run.skipped", "run", run_id)
+        self._refresh_experiment(run["experiment_id"])
+        self._write_frontend_portfolio_manifest(run["experiment_id"])
+        return self.get_run(run_id)
+
     def list_runs(self, experiment_id: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
         where = "WHERE r.experiment_id=?" if experiment_id else ""
         params: tuple[Any, ...] = (
@@ -4258,6 +4382,8 @@ class EvaluationService:
             raise KeyError("run_not_found")
         row["passed"] = None if row["passed"] is None else bool(row["passed"])
         definition, revision = self._definition_for_run(row)
+        raw_metadata = copy.deepcopy(definition.get("metadata") or {})
+        raw_rubric = copy.deepcopy(definition.get("rubric") or {})
         row["test_case_version"] = revision.get("version")
         row["test_definition_hash"] = revision.get("definition_hash")
         definition.pop("metadata", None)
@@ -4269,6 +4395,17 @@ class EvaluationService:
             for name, value in initial_files.items()
         ]
         row["test_definition"] = public
+        if raw_metadata.get("suite_kind") == "frontend":
+            row["frontend"] = {
+                "difficulty": raw_metadata.get("difficulty"),
+                "source_repository": raw_metadata.get("source_repository"),
+                "source_commit": raw_metadata.get("source_commit"),
+                "source_path": raw_metadata.get("source_path"),
+                "suite_revision": raw_metadata.get("suite_revision"),
+                "preview_entry": raw_metadata.get("preview_entry"),
+                "rubric": raw_rubric,
+                "review": self.get_manual_review(run_id),
+            }
         row["events"] = self.get_run_events(run_id)
         row["validators"] = self.database.fetch_all(
             "SELECT * FROM validator_results WHERE run_id=? ORDER BY created_at", (run_id,)
@@ -4634,6 +4771,13 @@ class EvaluationService:
 
     def _run_with_semaphore(self, run_id: str, semaphore: threading.Semaphore) -> None:
         with semaphore:
+            experiment = self.database.fetch_one(
+                "SELECT e.status FROM runs r JOIN experiments e ON e.id=r.experiment_id "
+                "WHERE r.id=?",
+                (run_id,),
+            )
+            if not experiment or experiment["status"] != "running":
+                return
             self._execute_run(run_id)
 
     def _execute_run(self, run_id: str) -> None:
@@ -4676,8 +4820,31 @@ class EvaluationService:
                     "scoring_profile": run.get("scoring_profile") or "balanced-v2",
                 },
             )
-            workspace_path = (self.settings.workspaces_dir / run_id).resolve()
-            if not workspace_path.is_relative_to(self.settings.workspaces_dir.resolve()):
+            metadata = definition.get("metadata") or {}
+            workspace_root = self.settings.workspaces_dir.resolve()
+            workspace_path = (workspace_root / run_id).resolve()
+            if metadata.get("suite_kind") == "frontend":
+                workspace_root = (self.settings.data_dir / "frontend-portfolios").resolve()
+                position_row = self.database.fetch_one(
+                    "SELECT sc.position,t.slug FROM experiments e "
+                    "JOIN suite_cases sc ON sc.suite_id=e.suite_id "
+                    "JOIN test_cases t ON t.id=sc.test_case_id "
+                    "WHERE e.id=? AND t.id=?",
+                    (run["experiment_id"], run["test_case_id"]),
+                ) or {"position": 0, "slug": run_id}
+                participant = (
+                    f"{self._safe_folder_name(model['name'])}-{run['model_id'][:8]}__"
+                    f"{self._safe_folder_name(runner['name'])}-{run['runner_id'][:8]}"
+                )
+                project = str(position_row["slug"]).removeprefix("frontend.xnmk-")
+                workspace_path = (
+                    workspace_root
+                    / run["experiment_id"]
+                    / participant
+                    / f"r{int(run['repetition']):02d}"
+                    / f"{int(position_row['position']) + 1:02d}-{self._safe_folder_name(project)}"
+                ).resolve()
+            if not workspace_path.is_relative_to(workspace_root):
                 raise RuntimeError("Invalid workspace path")
             if workspace_path.exists():
                 shutil.rmtree(workspace_path)
@@ -4759,15 +4926,34 @@ class EvaluationService:
                 cost, cost_source = self._usage_cost(model, cumulative_usage)
                 attempt_cost, _ = self._usage_cost(model, result.usage)
                 if cancel_event.is_set():
-                    self.database.execute(
-                        "UPDATE run_attempts SET status='cancelled',completed_at=? WHERE id=?",
-                        (utc_now(), attempt_id),
+                    with self._state_lock:
+                        paused = run_id in self._paused_runs
+                        skipped = run_id in self._skipped_runs
+                    terminal_status = "interrupted" if paused else "cancelled"
+                    terminal_code = "suite_paused" if paused else "suite_skipped" if skipped else None
+                    terminal_message = (
+                        "用户暂停了套件；恢复时将重新执行本题"
+                        if paused
+                        else "用户跳过了此项目" if skipped else None
                     )
                     self.database.execute(
-                        "UPDATE runs SET status='cancelled',completed_at=? WHERE id=?",
-                        (utc_now(), run_id),
+                        "UPDATE run_attempts SET status=?,completed_at=? WHERE id=?",
+                        (terminal_status, utc_now(), attempt_id),
                     )
-                    event_sink("run.cancelled", {})
+                    self.database.execute(
+                        "UPDATE runs SET status=?,error_code=?,error_message=?,completed_at=? WHERE id=?",
+                        (
+                            terminal_status,
+                            terminal_code,
+                            terminal_message,
+                            utc_now(),
+                            run_id,
+                        ),
+                    )
+                    event_sink(
+                        "run.interrupted" if paused else "run.skipped" if skipped else "run.cancelled",
+                        {},
+                    )
                     return
                 if not result.ok:
                     infrastructure_failure = result.error_code in {
@@ -4825,7 +5011,10 @@ class EvaluationService:
                     return
                 self.database.execute("UPDATE runs SET status='validating' WHERE id=?", (run_id,))
                 event_sink("run.validating", {"attempt": attempt_no})
-                judge_callback = self._judge_callback(
+                manual_scoring = bool(
+                    (attempt_definition.get("metadata") or {}).get("manual_scoring")
+                )
+                judge_callback = None if manual_scoring else self._judge_callback(
                     {**run, "final_answer": result.final_answer},
                     attempt_definition,
                     workspace,
@@ -5065,8 +5254,17 @@ class EvaluationService:
         finally:
             with self._state_lock:
                 self._cancel_events.pop(run_id, None)
+                self._paused_runs.discard(run_id)
+                self._skipped_runs.discard(run_id)
             if run:
                 self._refresh_experiment(run["experiment_id"])
+                with suppress(Exception):
+                    self._write_frontend_portfolio_manifest(run["experiment_id"])
+
+    @staticmethod
+    def _safe_folder_name(value: str) -> str:
+        cleaned = re.sub(r"[^\w.-]+", "-", str(value), flags=re.UNICODE).strip(".-")
+        return cleaned[:80] or "item"
 
     @staticmethod
     def _attempt_instruction(
@@ -6130,6 +6328,262 @@ class EvaluationService:
             )
             event_sink("artifact.created", item)
 
+    def _frontend_workspace_root(self, experiment_id: str) -> Path:
+        root = (self.settings.data_dir / "frontend-portfolios" / experiment_id).resolve()
+        allowed = (self.settings.data_dir / "frontend-portfolios").resolve()
+        if not root.is_relative_to(allowed):
+            raise ValueError("frontend_portfolio_path_invalid")
+        return root
+
+    def _write_frontend_portfolio_manifest(self, experiment_id: str) -> None:
+        if self._suite_runtime_metadata(experiment_id).get("kind") != "frontend":
+            return
+        root = self._frontend_workspace_root(experiment_id)
+        root.mkdir(parents=True, exist_ok=True)
+        experiment = self.database.fetch_one(
+            "SELECT e.id,e.name,e.suite_id,e.status,e.created_at,e.started_at,e.completed_at,"
+            "s.name suite_name,s.version suite_version FROM experiments e "
+            "JOIN test_suites s ON s.id=e.suite_id WHERE e.id=?",
+            (experiment_id,),
+        )
+        runs = self.database.fetch_all(
+            "SELECT r.id,r.status,r.score,r.duration_ms,r.tokens_input,r.tokens_output,r.cost_usd,"
+            "r.workspace_path,r.repetition,t.title,t.slug,m.name model_name,a.name runner_name "
+            "FROM runs r JOIN test_cases t ON t.id=r.test_case_id "
+            "JOIN models m ON m.id=r.model_id JOIN agent_runners a ON a.id=r.runner_id "
+            "WHERE r.experiment_id=? ORDER BY r.created_at",
+            (experiment_id,),
+        )
+        manifest = {
+            "schema": "agentbench.frontend-portfolio.v1",
+            "experiment": experiment,
+            "source": self._suite_runtime_metadata(experiment_id),
+            "score": self._frontend_experiment_score(experiment_id),
+            "runs": runs,
+            "updated_at": utc_now(),
+        }
+        (root / "portfolio.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def get_frontend_portfolio(self, experiment_id: str) -> dict[str, Any]:
+        experiment = self.get_experiment(experiment_id)
+        if experiment["suite_metadata"].get("kind") != "frontend":
+            raise ValueError("experiment_is_not_frontend_suite")
+        self._write_frontend_portfolio_manifest(experiment_id)
+        runs = self.database.fetch_all(
+            "SELECT r.id,r.model_id,r.runner_id,r.repetition,r.status,r.score,r.workspace_path,"
+            "r.duration_ms,r.tokens_input,r.tokens_output,r.cost_usd,t.title,t.slug,t.definition_json,"
+            "m.name model_name,a.name runner_name FROM runs r "
+            "JOIN test_cases t ON t.id=r.test_case_id JOIN models m ON m.id=r.model_id "
+            "JOIN agent_runners a ON a.id=r.runner_id WHERE r.experiment_id=? ORDER BY r.created_at",
+            (experiment_id,),
+        )
+        for run in runs:
+            metadata = (_json(run.pop("definition_json"), {}).get("metadata") or {})
+            run["difficulty"] = metadata.get("difficulty")
+            run["preview"] = self.frontend_preview_status(run["id"])
+            run["review"] = self.get_manual_review(run["id"])
+        return {
+            "experiment_id": experiment_id,
+            "root_path": str(self._frontend_workspace_root(experiment_id)),
+            "metadata": experiment["suite_metadata"],
+            "score": self._frontend_experiment_score(experiment_id),
+            "runs": runs,
+        }
+
+    def get_manual_review(self, run_id: str) -> dict[str, Any] | None:
+        row = self.database.fetch_one("SELECT * FROM manual_reviews WHERE run_id=?", (run_id,))
+        if not row:
+            return None
+        for source, target, fallback in (
+            ("dimension_scores_json", "dimension_scores", {}),
+            ("checklist_json", "checklist", {}),
+            ("critical_defects_json", "critical_defects", []),
+            ("evidence_json", "evidence", []),
+        ):
+            row[target] = _json(row.pop(source), fallback)
+        return row
+
+    def save_manual_review(
+        self, run_id: str, values: dict[str, Any], *, submit: bool
+    ) -> dict[str, Any]:
+        run = self.get_run(run_id)
+        frontend = run.get("frontend")
+        if not frontend:
+            raise ValueError("manual_rubric_not_available")
+        rubric = frontend.get("rubric") or {}
+        dimensions = rubric.get("dimensions") or []
+        allowed_dimensions = {str(item["key"]): float(item["max_score"]) for item in dimensions}
+        scores = {str(key): float(value) for key, value in (values.get("dimension_scores") or {}).items()}
+        if set(scores) - set(allowed_dimensions):
+            raise ValueError("manual_review_dimension_invalid")
+        for key, value in scores.items():
+            if value < 0 or value > allowed_dimensions[key]:
+                raise ValueError(f"manual_review_score_out_of_range:{key}")
+        if submit and set(scores) != set(allowed_dimensions):
+            raise ValueError("manual_review_dimensions_incomplete")
+        checklist = {str(key): bool(value) for key, value in (values.get("checklist") or {}).items()}
+        defects = [str(item) for item in values.get("critical_defects") or []]
+        allowed_defects = {str(item["key"]) for item in rubric.get("critical_defects") or []}
+        if set(defects) - allowed_defects:
+            raise ValueError("manual_review_defect_invalid")
+        raw_total = round(sum(scores.values()), 2)
+        total = min(raw_total, 59.0) if defects else raw_total
+        now = utc_now()
+        current = self.get_manual_review(run_id)
+        review_id = current["id"] if current else new_id()
+        evidence = (current or {}).get("evidence", [])
+        self.database.execute(
+            "INSERT INTO manual_reviews(id,run_id,status,rubric_version,reviewer,"
+            "dimension_scores_json,checklist_json,critical_defects_json,comment,evidence_json,"
+            "total_score,created_at,updated_at,submitted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(run_id) DO UPDATE SET status=excluded.status,"
+            "rubric_version=excluded.rubric_version,reviewer=excluded.reviewer,"
+            "dimension_scores_json=excluded.dimension_scores_json,checklist_json=excluded.checklist_json,"
+            "critical_defects_json=excluded.critical_defects_json,comment=excluded.comment,"
+            "total_score=excluded.total_score,updated_at=excluded.updated_at,"
+            "submitted_at=excluded.submitted_at",
+            (
+                review_id, run_id, "submitted" if submit else "draft", rubric.get("version", "1.0"),
+                str(values.get("reviewer") or "本机用户"), json.dumps(scores),
+                json.dumps(checklist), json.dumps(defects), str(values.get("comment") or ""),
+                json.dumps(evidence), total if submit else None, now, now, now if submit else None,
+            ),
+        )
+        if submit:
+            evidence_payload = {
+                "source": "manual_rubric",
+                "review_id": review_id,
+                "rubric_version": rubric.get("version", "1.0"),
+                "dimensions": scores,
+                "critical_defects": defects,
+            }
+            with self.database.transaction() as connection:
+                connection.execute("DELETE FROM score_components WHERE run_id=?", (run_id,))
+                connection.execute(
+                    "INSERT INTO score_components(id,run_id,dimension,score,weight,evidence_json,created_at) "
+                    "VALUES (?,?,?,?,100,?,?)",
+                    (new_id(), run_id, "manual_quality", total, json.dumps(evidence_payload, ensure_ascii=False), now),
+                )
+                connection.execute(
+                    "UPDATE runs SET score=?,status='completed',passed=?,completed_at=? WHERE id=?",
+                    (total, int(total >= 60), now, run_id),
+                )
+            self.database.insert_audit("run.manual_rubric_submitted", "run", run_id, evidence_payload)
+        else:
+            self.database.insert_audit("run.manual_rubric_saved", "run", run_id)
+        self._write_frontend_portfolio_manifest(run["experiment_id"])
+        return self.get_run(run_id)
+
+    def add_manual_review_evidence(self, run_id: str, filename: str, content: bytes) -> dict[str, Any]:
+        run = self.get_run(run_id)
+        if not run.get("frontend"):
+            raise ValueError("manual_rubric_not_available")
+        suffix = Path(filename).suffix.lower()
+        if suffix not in {".png", ".jpg", ".jpeg", ".webp"} or len(content) > 12 * 1024 * 1024:
+            raise ValueError("manual_review_evidence_invalid")
+        root = (self.settings.data_dir / "review-evidence" / run_id).resolve()
+        allowed = (self.settings.data_dir / "review-evidence").resolve()
+        if not root.is_relative_to(allowed):
+            raise ValueError("manual_review_evidence_path_invalid")
+        root.mkdir(parents=True, exist_ok=True)
+        name = f"{new_id()}{suffix}"
+        (root / name).write_bytes(content)
+        current = self.get_manual_review(run_id)
+        if not current:
+            self.save_manual_review(run_id, {"reviewer": "本机用户"}, submit=False)
+            current = self.get_manual_review(run_id)
+        assert current
+        evidence = current.get("evidence", []) + [{"name": filename, "path": name, "size": len(content)}]
+        self.database.execute(
+            "UPDATE manual_reviews SET evidence_json=?,updated_at=? WHERE run_id=?",
+            (json.dumps(evidence, ensure_ascii=False), utc_now(), run_id),
+        )
+        return self.get_manual_review(run_id) or {}
+
+    def manual_review_evidence_path(self, run_id: str, evidence_name: str) -> Path:
+        review = self.get_manual_review(run_id)
+        if not review:
+            raise KeyError("manual_review_not_found")
+        evidence = next(
+            (item for item in review.get("evidence", []) if item.get("path") == evidence_name),
+            None,
+        )
+        if not evidence:
+            raise KeyError("manual_review_evidence_not_found")
+        root = (self.settings.data_dir / "review-evidence" / run_id).resolve()
+        allowed = (self.settings.data_dir / "review-evidence").resolve()
+        path = (root / evidence_name).resolve()
+        if not root.is_relative_to(allowed) or not path.is_relative_to(root) or not path.is_file():
+            raise KeyError("manual_review_evidence_not_found")
+        return path
+
+    def frontend_preview_status(self, run_id: str) -> dict[str, Any]:
+        row = self.database.fetch_one("SELECT workspace_path FROM runs WHERE id=?", (run_id,))
+        if not row or not row.get("workspace_path"):
+            return {"available": False, "kind": "none", "reason": "workspace_not_ready"}
+        root = Path(row["workspace_path"]).resolve()
+        allowed = (self.settings.data_dir / "frontend-portfolios").resolve()
+        if not root.is_relative_to(allowed) or not root.is_dir():
+            return {"available": False, "kind": "none", "reason": "workspace_invalid"}
+        candidates = [root / "dist" / "index.html", root / "build" / "index.html", root / "index.html"]
+        candidates.extend(sorted(root.glob("*.html")))
+        candidates.extend(sorted(root.glob("*.svg")))
+        for candidate in candidates:
+            if candidate.is_file() and candidate.resolve().is_relative_to(root):
+                return {"available": True, "kind": "static", "entry": candidate.relative_to(root).as_posix()}
+        package = root / "package.json"
+        if package.is_file():
+            with suppress(json.JSONDecodeError, OSError):
+                data = json.loads(package.read_text(encoding="utf-8"))
+                scripts = data.get("scripts") if isinstance(data.get("scripts"), dict) else {}
+                return {"available": False, "kind": "project", "scripts": list(scripts), "reason": "build_required"}
+        return {"available": False, "kind": "none", "reason": "entry_not_found"}
+
+    def start_frontend_preview(self, run_id: str) -> dict[str, Any]:
+        status = self.frontend_preview_status(run_id)
+        if status.get("kind") != "static" or not status.get("available"):
+            raise ValueError("static_preview_unavailable")
+        row = self.database.fetch_one("SELECT workspace_path FROM runs WHERE id=?", (run_id,))
+        assert row and row["workspace_path"]
+        root = Path(row["workspace_path"]).resolve()
+        with self._state_lock:
+            existing = self._preview_servers.get(run_id)
+            if existing:
+                return {"url": existing[2], **status}
+            handler = partial(SimpleHTTPRequestHandler, directory=str(root))
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            server.daemon_threads = True
+            thread = threading.Thread(
+                target=server.serve_forever,
+                kwargs={"poll_interval": 0.1},
+                name=f"frontend-preview-{run_id[:8]}",
+                daemon=True,
+            )
+            thread.start()
+            entry = str(status["entry"]).replace("\\", "/")
+            url = f"http://127.0.0.1:{server.server_port}/{entry}"
+            self._preview_servers[run_id] = (server, thread, url)
+        return {"url": url, **status}
+
+    def stop_frontend_preview(self, run_id: str) -> dict[str, Any]:
+        with self._state_lock:
+            value = self._preview_servers.pop(run_id, None)
+        if value:
+            self._shutdown_preview_server(value[0], value[1])
+        return {"stopped": bool(value)}
+
+    @staticmethod
+    def _shutdown_preview_server(
+        server: ThreadingHTTPServer, thread: threading.Thread
+    ) -> None:
+        if thread.is_alive():
+            server.shutdown()
+        server.server_close()
+        if thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=2)
+
     def _refresh_experiment(self, experiment_id: str) -> None:
         summary = self.database.fetch_one(
             "SELECT COUNT(*) total,SUM(CASE WHEN status IN ('queued','preparing','running','validating',"
@@ -6140,7 +6594,7 @@ class EvaluationService:
             current = self.database.fetch_one(
                 "SELECT status FROM experiments WHERE id=?", (experiment_id,)
             )
-            if current and current["status"] != "cancelled":
+            if current and current["status"] not in {"cancelled", "interrupted"}:
                 self.database.execute(
                     "UPDATE experiments SET status='completed',completed_at=? WHERE id=?",
                     (utc_now(), experiment_id),
@@ -6313,6 +6767,187 @@ class EvaluationService:
             + " GROUP BY r.model_id,r.runner_id,r.lane ORDER BY avg_score DESC,success_rate DESC",
             params,
         )
+
+    @staticmethod
+    def _run_answer_quality(row: dict[str, Any]) -> float | None:
+        """Return answer quality without time, step, token, or cost adjustments."""
+        components = [
+            (float(score), float(weight))
+            for score, weight in (
+                (row.get("objective_score"), row.get("objective_weight")),
+                (row.get("judge_score"), row.get("judge_weight")),
+            )
+            if score is not None and weight is not None and float(weight) > 0
+        ]
+        if components:
+            quality = sum(score * weight for score, weight in components) / sum(
+                weight for _, weight in components
+            )
+            return max(0.0, min(100.0, quality))
+        # Runs from before score dimensions existed retain their historical score.
+        # A modern run with efficiency dimensions but no quality evidence is incomplete.
+        if row.get("score") is not None and int(row.get("component_count") or 0) == 0:
+            return max(0.0, min(100.0, float(row["score"])))
+        return None
+
+    def exam_leaderboard(
+        self,
+        exam: str,
+        mode: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Aggregate complete exam papers, never isolated tasks or extrapolated subsets."""
+        if exam not in {"math-2025", "ncre"}:
+            raise ValueError("unsupported_exam_leaderboard")
+        if exam == "math-2025" and mode not in {"closed-book", "tool-augmented"}:
+            raise ValueError("unsupported_math_exam_mode")
+
+        rows = self.database.fetch_all(
+            "SELECT r.id AS run_id,r.experiment_id,r.model_id,r.runner_id,r.repetition,"
+            "r.score,r.duration_ms,r.tokens_input,r.tokens_output,r.cost_usd,"
+            "m.name AS model_name,a.name AS runner_name,t.definition_json,"
+            "(SELECT COUNT(*) FROM score_components sc WHERE sc.run_id=r.id) "
+            "AS component_count,"
+            "(SELECT sc.score FROM score_components sc WHERE sc.run_id=r.id "
+            "AND sc.dimension='objective_quality' LIMIT 1) AS objective_score,"
+            "(SELECT sc.weight FROM score_components sc WHERE sc.run_id=r.id "
+            "AND sc.dimension='objective_quality' LIMIT 1) AS objective_weight,"
+            "(SELECT sc.score FROM score_components sc WHERE sc.run_id=r.id "
+            "AND sc.dimension='judge_quality' LIMIT 1) AS judge_score,"
+            "(SELECT sc.weight FROM score_components sc WHERE sc.run_id=r.id "
+            "AND sc.dimension='judge_quality' LIMIT 1) AS judge_weight "
+            "FROM runs r JOIN test_cases t ON t.id=r.test_case_id "
+            "JOIN models m ON m.id=r.model_id "
+            "JOIN agent_runners a ON a.id=r.runner_id "
+            "WHERE r.status='completed' AND t.enabled=1"
+        )
+
+        papers: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for row in rows:
+            metadata = _json(row["definition_json"], {}).get("metadata") or {}
+            quality = self._run_answer_quality(row)
+            if quality is None:
+                continue
+            if exam == "math-2025":
+                if (
+                    metadata.get("exam") != MATH_EXAM_ID
+                    or int(metadata.get("year") or 0) != 2025
+                    or metadata.get("lane") != mode
+                ):
+                    continue
+                item_id = int(metadata.get("question_no") or 0)
+                points = float(metadata.get("points") or 0)
+                paper_name = str(mode)
+            else:
+                if metadata.get("exam") != "ncre-office":
+                    continue
+                item_id = str(metadata.get("exam_section") or "")
+                points = float(metadata.get("exam_points") or 0)
+                paper_name = str(metadata.get("exam_paper") or "")
+            if not item_id or points <= 0 or not paper_name:
+                continue
+            key = (
+                row["experiment_id"],
+                row["model_id"],
+                row["runner_id"],
+                int(row["repetition"]),
+                paper_name,
+            )
+            paper = papers.setdefault(
+                key,
+                {
+                    "model_id": row["model_id"],
+                    "runner_id": row["runner_id"],
+                    "model_name": row["model_name"],
+                    "runner_name": row["runner_name"],
+                    "items": {},
+                },
+            )
+            paper["items"][item_id] = {
+                "quality": quality,
+                "points": points,
+                "duration_ms": int(row.get("duration_ms") or 0),
+                "tokens": int(row.get("tokens_input") or 0)
+                + int(row.get("tokens_output") or 0),
+                "cost": float(row.get("cost_usd") or 0),
+            }
+
+        expected_items: set[Any] = (
+            set(range(1, 23)) if exam == "math-2025" else {"choice", "word", "excel", "ppt"}
+        )
+        exam_total = 150.0 if exam == "math-2025" else 100.0
+        benchmark = 90.0 if exam == "math-2025" else 60.0
+        complete_papers: list[dict[str, Any]] = []
+        for paper in papers.values():
+            if set(paper["items"]) != expected_items:
+                continue
+            items = list(paper["items"].values())
+            if round(sum(item["points"] for item in items), 6) != exam_total:
+                continue
+            score = sum(item["quality"] / 100 * item["points"] for item in items)
+            complete_papers.append(
+                {
+                    **{key: value for key, value in paper.items() if key != "items"},
+                    "exam_score": score,
+                    "duration_ms": sum(item["duration_ms"] for item in items),
+                    "tokens": sum(item["tokens"] for item in items),
+                    "cost": sum(item["cost"] for item in items),
+                }
+            )
+
+        participants: dict[tuple[str, str], dict[str, Any]] = {}
+        for paper in complete_papers:
+            key = (paper["model_id"], paper["runner_id"])
+            participant = participants.setdefault(
+                key,
+                {
+                    "model_id": paper["model_id"],
+                    "runner_id": paper["runner_id"],
+                    "model_name": paper["model_name"],
+                    "runner_name": paper["runner_name"],
+                    "scores": [],
+                    "durations": [],
+                    "tokens": [],
+                    "cost": 0.0,
+                },
+            )
+            participant["scores"].append(paper["exam_score"])
+            participant["durations"].append(paper["duration_ms"])
+            participant["tokens"].append(paper["tokens"])
+            participant["cost"] += paper["cost"]
+
+        result = []
+        for participant in participants.values():
+            scores = participant.pop("scores")
+            durations = participant.pop("durations")
+            tokens = participant.pop("tokens")
+            total_cost = participant.pop("cost")
+            result.append(
+                {
+                    **participant,
+                    "board": exam,
+                    "mode": mode if exam == "math-2025" else "office",
+                    "papers": len(scores),
+                    "exam_total": exam_total,
+                    "avg_exam_score": round(statistics.fmean(scores), 2),
+                    "best_exam_score": round(max(scores), 2),
+                    "benchmark_score": benchmark,
+                    "benchmark_rate": round(
+                        sum(score >= benchmark for score in scores) * 100 / len(scores), 2
+                    ),
+                    "avg_duration_ms": round(statistics.fmean(durations)),
+                    "avg_tokens": round(statistics.fmean(tokens)),
+                    "total_cost": round(total_cost, 6),
+                }
+            )
+        result.sort(
+            key=lambda item: (
+                -item["avg_exam_score"],
+                -item["best_exam_score"],
+                -item["papers"],
+                item["model_name"].lower(),
+            )
+        )
+        return result
 
     def model_profiles(
         self, lane: str | None = None, benchmark_generation: str = "v3"

@@ -22,6 +22,8 @@ from .schemas import (
     BrowserToolCall,
     ExperimentCreate,
     FileChangeReview,
+    FrontendPreviewRequest,
+    ManualRubricReviewUpdate,
     ManualScoreUpdate,
     MathQuestionUpdate,
     McpServerCreate,
@@ -830,6 +832,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def cancel_experiment(experiment_id: str, svc: Service) -> dict[str, Any]:
         return svc.cancel_experiment(experiment_id)
 
+    @app.post("/api/v1/experiments/{experiment_id}/pause")
+    def pause_experiment(experiment_id: str, svc: Service) -> dict[str, Any]:
+        return svc.pause_experiment(experiment_id)
+
+    @app.get("/api/v1/experiments/{experiment_id}/frontend-portfolio")
+    def frontend_portfolio(experiment_id: str, svc: Service) -> dict[str, Any]:
+        return svc.get_frontend_portfolio(experiment_id)
+
     @app.post("/api/v1/experiments/{experiment_id}/rejudge")
     def rejudge_experiment(
         experiment_id: str,
@@ -894,6 +904,52 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/v1/runs/{run_id}/manual-score")
     def manual_score(run_id: str, payload: ManualScoreUpdate, svc: Service) -> dict[str, Any]:
         return svc.manual_score(run_id, payload.score, payload.reason)
+
+    @app.put("/api/v1/runs/{run_id}/manual-review/draft")
+    def save_manual_review_draft(
+        run_id: str, payload: ManualRubricReviewUpdate, svc: Service
+    ) -> dict[str, Any]:
+        return svc.save_manual_review(run_id, payload.model_dump(), submit=False)
+
+    @app.post("/api/v1/runs/{run_id}/manual-review/submit")
+    def submit_manual_review(
+        run_id: str, payload: ManualRubricReviewUpdate, svc: Service
+    ) -> dict[str, Any]:
+        return svc.save_manual_review(run_id, payload.model_dump(), submit=True)
+
+    @app.post("/api/v1/runs/{run_id}/manual-review/evidence")
+    async def add_manual_review_evidence(
+        run_id: str,
+        request: Request,
+        svc: Service,
+        filename: str = Query(min_length=1, max_length=255),
+    ) -> dict[str, Any]:
+        return svc.add_manual_review_evidence(run_id, filename, await request.body())
+
+    @app.get("/api/v1/runs/{run_id}/manual-review/evidence/{evidence_name}")
+    def get_manual_review_evidence(
+        run_id: str, evidence_name: str, svc: Service
+    ) -> FileResponse:
+        path = svc.manual_review_evidence_path(run_id, evidence_name)
+        return FileResponse(path, filename=path.name)
+
+    @app.get("/api/v1/runs/{run_id}/frontend-preview")
+    def frontend_preview_status(run_id: str, svc: Service) -> dict[str, Any]:
+        return svc.frontend_preview_status(run_id)
+
+    @app.post("/api/v1/runs/{run_id}/frontend-preview")
+    def start_frontend_preview(
+        run_id: str, _payload: FrontendPreviewRequest, svc: Service
+    ) -> dict[str, Any]:
+        return svc.start_frontend_preview(run_id)
+
+    @app.delete("/api/v1/runs/{run_id}/frontend-preview")
+    def stop_frontend_preview(run_id: str, svc: Service) -> dict[str, Any]:
+        return svc.stop_frontend_preview(run_id)
+
+    @app.post("/api/v1/runs/{run_id}/skip")
+    def skip_run(run_id: str, svc: Service) -> dict[str, Any]:
+        return svc.skip_run(run_id)
 
     @app.get("/api/v1/runs/{run_id}/events")
     def run_events(run_id: str, svc: Service, after: int = Query(default=0, ge=0)):
@@ -976,6 +1032,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         benchmark_generation: str = Query(default="v3", pattern="^(v2|v3|all)$"),
     ) -> list[dict[str, Any]]:
         return svc.leaderboard(lane, suite_id, benchmark_generation)
+
+    @app.get("/api/v1/leaderboard/exams/{exam}")
+    def exam_leaderboard(
+        exam: str,
+        svc: Service,
+        mode: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if exam not in {"math-2025", "ncre"}:
+            raise HTTPException(status_code=404, detail="exam_leaderboard_not_found")
+        if exam == "math-2025" and mode not in {"closed-book", "tool-augmented"}:
+            raise HTTPException(status_code=422, detail="math_exam_mode_required")
+        return svc.exam_leaderboard(exam, mode)
 
     @app.get("/api/v1/model-profiles")
     def model_profiles(

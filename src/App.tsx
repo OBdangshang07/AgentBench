@@ -6,6 +6,7 @@ const TestLibrary = lazy(() => import("./pages/TestLibrary"));
 const Experiments = lazy(() => import("./pages/Experiments"));
 const ExperimentDetail = lazy(() => import("./pages/ExperimentDetail"));
 const RunDetail = lazy(() => import("./pages/RunDetail"));
+const FrontendPortfolio = lazy(() => import("./pages/FrontendPortfolio"));
 const Leaderboard = lazy(() => import("./pages/Leaderboard"));
 const Profiles = lazy(() => import("./pages/Profiles"));
 const SettingsPage = lazy(() => import("./pages/Settings"));
@@ -47,6 +48,7 @@ export default function App() {
           <Route path="library" element={deferred(<TestLibrary />)} />
           <Route path="experiments" element={deferred(<Experiments />)} />
           <Route path="experiments/:experimentId" element={deferred(<ExperimentDetail />)} />
+          <Route path="experiments/:experimentId/portfolio" element={deferred(<FrontendPortfolio />)} />
           <Route path="runs/:runId" element={deferred(<RunDetail />)} />
           <Route path="leaderboard" element={deferred(<Leaderboard />)} />
           <Route path="profiles" element={deferred(<Profiles />)} />

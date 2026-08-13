@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from .db import Database, utc_now
+from .frontend_suite import GROUPS as FRONTEND_GROUPS
+from .frontend_suite import build_frontend_cases, project_keys
 from .math_builtin import build_builtin_math_cases
 from .ncre_assets import blobs, blobs_paper02, blobs_paper03, exam_data_paper02, exam_data_paper03
 from .ncre_assets.exam_data import (
@@ -56,6 +58,11 @@ GAUNTLET_SUITE_ID = stable_id("suite", "v2-gauntlet")
 GAUNTLET_LITE_SUITE_ID = stable_id("suite", "v2-gauntlet-lite")
 MATH_2025_CLOSED_SUITE_ID = stable_id("suite", "postgraduate-math-2025-math1-closed")
 MATH_2025_TOOL_SUITE_ID = stable_id("suite", "postgraduate-math-2025-math1-tools")
+FRONTEND_FULL_SUITE_ID = stable_id("suite", "xnmk-frontend-full-2026-08-r1")
+FRONTEND_UI_SUITE_ID = stable_id("suite", "xnmk-frontend-ui-2026-08-r1")
+FRONTEND_GAMES_SUITE_ID = stable_id("suite", "xnmk-frontend-games-2026-08-r1")
+FRONTEND_GRAPHICS_SUITE_ID = stable_id("suite", "xnmk-frontend-graphics-2026-08-r1")
+FRONTEND_EXPERT_SUITE_ID = stable_id("suite", "xnmk-frontend-expert-2026-08-r1")
 
 _NCRE_ASSET_DIR = Path(__file__).resolve().parent / "ncre_assets"
 
@@ -3116,7 +3123,8 @@ def seed_builtin_data(database: Database) -> None:
     math_cases_by_lane = build_builtin_math_cases()
     math_closed_cases = [item["definition"] for item in math_cases_by_lane["closed-book"]]
     math_tool_cases = [item["definition"] for item in math_cases_by_lane["tool-augmented"]]
-    cases = base_cases + ultra_cases + math_closed_cases + math_tool_cases
+    frontend_cases = build_frontend_cases()
+    cases = base_cases + ultra_cases + math_closed_cases + math_tool_cases + frontend_cases
     for definition in cases:
         case_id = stable_id("case", f"{definition['slug']}@{definition['version']}")
         case_ids.append(case_id)
@@ -3158,9 +3166,15 @@ def seed_builtin_data(database: Database) -> None:
     ultra_start = len(base_cases)
     math_closed_start = ultra_start + len(ultra_cases)
     math_tool_start = math_closed_start + len(math_closed_cases)
+    frontend_start = math_tool_start + len(math_tool_cases)
     ultra_case_ids = case_ids[ultra_start:math_closed_start]
     math_closed_ids = case_ids[math_closed_start:math_tool_start]
-    math_tool_ids = case_ids[math_tool_start:]
+    math_tool_ids = case_ids[math_tool_start:frontend_start]
+    frontend_ids = case_ids[frontend_start:]
+    frontend_by_key = {
+        definition["slug"].removeprefix("frontend.xnmk-"): case_id
+        for definition, case_id in zip(frontend_cases, frontend_ids, strict=True)
+    }
     quick_v2 = (
         base_case_ids[:4]
         + base_case_ids[25:29]
@@ -3385,6 +3399,28 @@ def seed_builtin_data(database: Database) -> None:
             "3.0.0",
             gauntlet_lite_members,
         ),
+        (
+            FRONTEND_FULL_SUITE_ID,
+            "Xnmk Library 前端工程全套",
+            "固定版本的 24 项真实前端工程测试；每题独立作品目录，完成后全部进入纯人工评分。",
+            "5.2.0-r1",
+            frontend_ids,
+        ),
+        *[
+            (
+                suite_id,
+                FRONTEND_GROUPS[group]["name"],
+                FRONTEND_GROUPS[group]["description"] + " 全部采用纯人工评分。",
+                "5.2.0-r1",
+                [frontend_by_key[key] for key in project_keys(group)],
+            )
+            for group, suite_id in (
+                ("ui", FRONTEND_UI_SUITE_ID),
+                ("games", FRONTEND_GAMES_SUITE_ID),
+                ("graphics", FRONTEND_GRAPHICS_SUITE_ID),
+                ("expert", FRONTEND_EXPERT_SUITE_ID),
+            )
+        ],
     ]
     for suite_id, name, description, version, members in suites:
         if not database.fetch_one("SELECT id FROM test_suites WHERE id = ?", (suite_id,)):

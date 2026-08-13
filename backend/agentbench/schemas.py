@@ -125,6 +125,22 @@ class ManualScoreUpdate(BaseModel):
     reason: str = Field(min_length=3, max_length=1000)
 
 
+class ManualRubricReviewUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reviewer: str = Field(default="本机用户", min_length=1, max_length=100)
+    dimension_scores: dict[str, float] = Field(default_factory=dict)
+    checklist: dict[str, bool] = Field(default_factory=dict)
+    critical_defects: list[str] = Field(default_factory=list, max_length=20)
+    comment: str = Field(default="", max_length=5000)
+
+
+class FrontendPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    allow_project_scripts: bool = False
+
+
 class AppSettingUpdate(BaseModel):
     judge_model_id: str | None = None
     judge_runner_id: str | None = None

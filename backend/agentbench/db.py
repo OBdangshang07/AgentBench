@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 
 def utc_now() -> str:
@@ -236,6 +236,23 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     subject_id TEXT,
     detail_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS manual_reviews (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'draft',
+    rubric_version TEXT NOT NULL,
+    reviewer TEXT NOT NULL DEFAULT '',
+    dimension_scores_json TEXT NOT NULL DEFAULT '{}',
+    checklist_json TEXT NOT NULL DEFAULT '{}',
+    critical_defects_json TEXT NOT NULL DEFAULT '[]',
+    comment TEXT NOT NULL DEFAULT '',
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    total_score REAL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    submitted_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS projects (
@@ -539,6 +556,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_experiment ON runs(experiment_id);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 CREATE INDEX IF NOT EXISTS idx_attempts_run ON run_attempts(run_id, attempt_no);
 CREATE INDEX IF NOT EXISTS idx_events_run ON run_events(run_id, seq);
+CREATE INDEX IF NOT EXISTS idx_manual_reviews_status ON manual_reviews(status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_tests_category ON test_cases(category);
 CREATE INDEX IF NOT EXISTS idx_revisions_case ON test_case_revisions(test_case_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_projects_archived ON projects(archived, updated_at);

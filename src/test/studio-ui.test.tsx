@@ -4,9 +4,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import Layout from "../components/Layout";
 import TestLibrary from "../pages/TestLibrary";
 
-const health = { name: "AgentBench Desktop", version: "5.1.0" };
+const health = { name: "AgentBench Desktop", version: "5.2.0" };
 const systemStatus = {
-  version: "5.1.0",
+  version: "5.2.0",
   data_dir: "C:/AgentBench",
   database: { path: "C:/AgentBench/agentbench.db", ready: true },
   docker: { installed: true, available: true, executable: "docker" },

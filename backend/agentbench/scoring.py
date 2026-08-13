@@ -164,6 +164,19 @@ class ScoringEngine:
                     ]
                 else:
                     produced = [judge_callback(config, weight)]
+            elif kind == "manual_rubric":
+                produced = [
+                    ValidationResult(
+                        kind,
+                        weight,
+                        0,
+                        "needs_review",
+                        {
+                            "reason": "作品已交付，等待用户按人工量表评分",
+                            "rubric_version": config.get("rubric_version", "1.0"),
+                        },
+                    )
+                ]
             elif kind == "command_metrics":
                 produced = self._validate_command_metrics(
                     weight, config, workspace, definition
@@ -1057,9 +1070,18 @@ class ScoringEngine:
                 item
                 for item in results
                 if item.validator_type
-                not in {"ai_rubric", "time_efficiency", "step_efficiency", "token_efficiency"}
+                not in {
+                    "ai_rubric",
+                    "manual_rubric",
+                    "time_efficiency",
+                    "step_efficiency",
+                    "token_efficiency",
+                }
             ],
             "judge_quality": [item for item in results if item.validator_type == "ai_rubric"],
+            "manual_quality": [
+                item for item in results if item.validator_type == "manual_rubric"
+            ],
             "time_efficiency": [
                 item for item in results if item.validator_type == "time_efficiency"
             ],

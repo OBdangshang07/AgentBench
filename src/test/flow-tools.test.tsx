@@ -59,7 +59,7 @@ describe("real Flow and tool management workbenches", () => {
     const created = { ...flow, id: "flow-created", name: "并行发布检查" };
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.1.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.0" });
       if (url.endsWith("/flow-templates")) return json(flowTemplates);
       if (url.endsWith("/flows") && init?.method === "POST") return json(created, 201);
       if (url.endsWith("/flows/flow-1")) return json(flow);
@@ -88,7 +88,7 @@ describe("real Flow and tool management workbenches", () => {
   it("connects node ports with a default structured binding", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.1.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.0" });
       if (url.endsWith("/flow-templates")) return json(flowTemplates);
       if (url.endsWith("/flows/flow-1") && init?.method === "PATCH") return json(flow);
       if (url.endsWith("/flows/flow-1")) return json(flow);
@@ -123,7 +123,7 @@ describe("real Flow and tool management workbenches", () => {
     };
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.1.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.0" });
       if (url.endsWith("/flow-templates")) return json(flowTemplates);
       if (url.endsWith("/flows/flow-1/nodes/node-a/test") && init?.method === "POST") { tested = true; return json(nodeTestRun, 202); }
       if (url.includes("/flows/flow-1/runs")) return json(tested ? [nodeTestRun] : []);
@@ -151,7 +151,7 @@ describe("real Flow and tool management workbenches", () => {
   it("adds a Flow node and persists the edited graph", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.1.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.0" });
       if (url.endsWith("/flows/flow-1") && init?.method === "PATCH") return json(flow);
       if (url.endsWith("/flows/flow-1")) return json(flow);
       if (url.endsWith("/flows")) return json([flow]);
@@ -201,7 +201,7 @@ describe("real Flow and tool management workbenches", () => {
     };
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.1.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.0" });
       if (url.endsWith("/flows/validate") && init?.method === "POST") return json(validation);
       if (url.endsWith("/flows/flow-1/dry-run") && init?.method === "POST") return json(dryRun, 201);
       if (url.includes("/flows/flow-1/runs")) return json([]);
@@ -231,7 +231,7 @@ describe("real Flow and tool management workbenches", () => {
     const server = { id: "mcp-1", name: "Playwright MCP", transport: "stdio", command: "npx", args: ["playwright"], url: null, env_keys: ["API_KEY"], tools: [], health_status: "unknown", last_error: null, last_checked_at: null, enabled: true, builtin: false, created_at: now, updated_at: now };
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.1.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.0" });
       if (url.endsWith("/mcp-servers/mcp-1") && init?.method === "PATCH") return json(server);
       if (url.endsWith("/mcp-servers")) return json([server]);
       if (url.endsWith("/tools/status")) return json([
@@ -296,7 +296,7 @@ describe("real Flow and tool management workbenches", () => {
     };
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.1.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.0" });
       if (url.endsWith("/mcp-servers/mcp-schema/tools/call") && init?.method === "POST") return json({ ok: true });
       if (url.endsWith("/mcp-servers")) return json([server]);
       if (url.endsWith("/tools/status") || url.endsWith("/skill-packs") || url.endsWith("/runners") || url.endsWith("/runtime-profiles")) return json([]);

@@ -28,6 +28,7 @@ import {
   Download,
   Edit3,
   Maximize2,
+  MessageSquarePlus,
   Minimize2,
   ListChecks,
   Paperclip,
@@ -232,6 +233,15 @@ function operationSummary(events: StudioEvent[]) {
   ].filter(Boolean).join(" · ");
 }
 
+function isRuntimeNoise(event: StudioEvent) {
+  const path = String(event.payload.path ?? event.payload.detail ?? "").replaceAll("\\", "/").toLowerCase();
+  return [
+    "/node_modules/", "/.git/", "/__pycache__/", "/.venv/", "/.packaging-venv/",
+    "/browser-profile/", "/guide-browser-profile/", "/cache/", "/code cache/",
+    "/gpu cache/", "/session storage/", "/safe browsing/", "/gcm store/",
+  ].some((fragment) => path.includes(fragment));
+}
+
 function MarkdownMessage({ content }: { content: string }) {
   const [copied, setCopied] = useState<string | null>(null);
 
@@ -309,10 +319,10 @@ interface StudioLayoutState {
   dockHeight: number;
 }
 
-const studioLayoutKey = "agentbench.studio.layout.v1";
+const studioLayoutKey = "agentbench.studio.layout.v2";
 
 function initialStudioLayout(): StudioLayoutState {
-  const defaults = { left: true, right: true, dock: true, dockExpanded: false, leftWidth: 250, rightWidth: 310, dockHeight: 246 };
+  const defaults = { left: true, right: false, dock: false, dockExpanded: false, leftWidth: 286, rightWidth: 520, dockHeight: 246 };
   try {
     const stored = window.localStorage.getItem(studioLayoutKey);
     if (stored) {
@@ -320,7 +330,7 @@ function initialStudioLayout(): StudioLayoutState {
       return {
         ...value,
         leftWidth: Math.max(210, Math.min(420, Number(value.leftWidth) || defaults.leftWidth)),
-        rightWidth: Math.max(270, Math.min(480, Number(value.rightWidth) || defaults.rightWidth)),
+        rightWidth: Math.max(380, Math.min(760, Number(value.rightWidth) || defaults.rightWidth)),
         dockHeight: Math.max(180, Math.min(520, Number(value.dockHeight) || defaults.dockHeight)),
       };
     }
@@ -517,7 +527,7 @@ export default function AgentStudio() {
   );
   const [treePath, setTreePath] = useState(".");
   const { data: tree } = useApi<ProjectTree>(detail ? `/projects/${detail.project_id}/files?path=${encodeURIComponent(treePath)}` : null, 4_000);
-  const [railMode, setRailMode] = useState<"files" | "search">("files");
+  const [railMode, setRailMode] = useState<"sessions" | "files" | "search">("sessions");
   const [fileQuery, setFileQuery] = useState("");
   const normalizedFileQuery = fileQuery.trim();
   const { data: searchResult, loading: searchLoading, error: searchError } = useApi<ProjectFileSearch>(
@@ -535,6 +545,7 @@ export default function AgentStudio() {
   const [contextFiles, setContextFiles] = useState<string[]>([]);
   const [draftLoadedFor, setDraftLoadedFor] = useState("");
   const [composerInspectorOpen, setComposerInspectorOpen] = useState(false);
+  const [runtimeConfigOpen, setRuntimeConfigOpen] = useState(false);
   const [sessionQuery, setSessionQuery] = useState("");
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
@@ -571,6 +582,7 @@ export default function AgentStudio() {
   const lastScrollTopRef = useRef(0);
   const prependScrollHeightRef = useRef<number | null>(null);
   const fileSearchRef = useRef<HTMLInputElement>(null);
+  const activeProjectRef = useRef<string | null>(null);
   const terminalWriteChainRef = useRef<Promise<void>>(Promise.resolve());
   const resizeRef = useRef<{ kind: "left" | "right" | "dock"; x: number; y: number; value: number } | null>(null);
   const [resizing, setResizing] = useState<"left" | "right" | "dock" | null>(null);
@@ -599,11 +611,18 @@ export default function AgentStudio() {
   }, [createRequested, projects]);
 
   useEffect(() => {
-    setTreePath(".");
-    setPreview(null);
-    setRailMode("files");
-    setFileQuery("");
-    if (detail?.project_id) ux.setSelectedProjectId(detail.project_id);
+    const projectId = detail?.project_id;
+    if (!projectId) return;
+    // Do not overwrite a tab selected while the first session payload is arriving.
+    // Reset navigation only when an already-loaded Studio switches projects.
+    if (activeProjectRef.current && activeProjectRef.current !== projectId) {
+      setTreePath(".");
+      setPreview(null);
+      setRailMode("sessions");
+      setFileQuery("");
+    }
+    activeProjectRef.current = projectId;
+    ux.setSelectedProjectId(projectId);
   }, [detail?.project_id]);
 
   useEffect(() => {
@@ -740,7 +759,7 @@ export default function AgentStudio() {
       if (!resize) return;
       setStudioLayout((current) => {
         if (resize.kind === "left") return { ...current, leftWidth: Math.max(210, Math.min(420, resize.value + event.clientX - resize.x)) };
-        if (resize.kind === "right") return { ...current, rightWidth: Math.max(270, Math.min(480, resize.value - event.clientX + resize.x)) };
+        if (resize.kind === "right") return { ...current, rightWidth: Math.max(380, Math.min(760, resize.value - event.clientX + resize.x)) };
         return { ...current, dockHeight: Math.max(180, Math.min(520, resize.value - event.clientY + resize.y)), dockExpanded: false };
       });
     }
@@ -771,7 +790,7 @@ export default function AgentStudio() {
     setStudioLayout((current) => kind === "left"
       ? { ...current, leftWidth: Math.max(210, Math.min(420, current.leftWidth + direction * 16)) }
       : kind === "right"
-        ? { ...current, rightWidth: Math.max(270, Math.min(480, current.rightWidth - direction * 16)) }
+        ? { ...current, rightWidth: Math.max(380, Math.min(760, current.rightWidth - direction * 16)) }
         : { ...current, dockHeight: Math.max(180, Math.min(520, current.dockHeight - direction * 16)), dockExpanded: false });
   }
 
@@ -813,6 +832,11 @@ export default function AgentStudio() {
     () => processEvents.filter(isSecondaryOperation),
     [processEvents],
   );
+  const visibleOperationEvents = useMemo(
+    () => operationEvents.filter((event) => !isRuntimeNoise(event)),
+    [operationEvents],
+  );
+  const runtimeNoiseCount = operationEvents.length - visibleOperationEvents.length;
   const collapsedEventCount = Math.max(0, events.length - processEvents.length);
   const pendingApprovals = useMemo(
     () => detail?.approvals.filter((item) => item.status === "pending") ?? [],
@@ -838,6 +862,10 @@ export default function AgentStudio() {
   const retryableTurn = useMemo(() => {
     const latest = detail?.turns.at(-1);
     return latest && ["failed", "cancelled", "interrupted"].includes(latest.status) ? latest : null;
+  }, [detail?.turns]);
+  const completedTurn = useMemo(() => {
+    const latest = detail?.turns.at(-1);
+    return latest && latest.status === "completed" ? latest : null;
   }, [detail?.turns]);
 
   const runnerOptions = useMemo<StudioPickerOption[]>(() => (runners ?? [])
@@ -1262,7 +1290,7 @@ export default function AgentStudio() {
       const file = await api<{ path: string; content: string }>(`/projects/${detail.project_id}/file?path=${encodeURIComponent(entry.path)}`);
       setPreview(file);
       setDock("file");
-      setStudioLayout((current) => ({ ...current, dock: true }));
+      setStudioLayout((current) => ({ ...current, dock: true, right: true }));
     } catch (value) {
       setActionError(value instanceof Error ? value.message : "无法打开文件");
     }
@@ -1287,7 +1315,7 @@ export default function AgentStudio() {
       setChangePreview(value);
       setChangeEdit(String(value?.current_content ?? ""));
       setDock("changes");
-      setStudioLayout((current) => ({ ...current, dock: true }));
+      setStudioLayout((current) => ({ ...current, dock: true, right: true }));
     } catch (value) {
       setActionError(value instanceof Error ? value.message : "无法读取变更 Diff");
     }
@@ -1320,7 +1348,7 @@ export default function AgentStudio() {
       setTerminals((current) => [...current.filter((item) => item.id !== value.id), { ...value, text: value.chunks.map((item) => item.data).join("") }]);
       setActiveTerminalId(value.id);
       setDock("terminal");
-      setStudioLayout((current) => ({ ...current, dock: true }));
+      setStudioLayout((current) => ({ ...current, dock: true, right: true }));
       if (!value.running) setActionError("终端进程未能保持运行，请点击“重新启动”重试。");
     } catch (value) {
       setActionError(value instanceof Error ? value.message : "无法启动交互终端");
@@ -1368,7 +1396,7 @@ export default function AgentStudio() {
 
   function openTerminalPanel() {
     setDock("terminal");
-    setStudioLayout((current) => ({ ...current, dock: true }));
+    setStudioLayout((current) => ({ ...current, dock: true, right: true }));
     if ((!terminal || !terminal.running) && (detail?.permission_profile === "standard" || detail?.permission_profile === "full")) {
       void startInteractiveTerminal();
     }
@@ -1397,7 +1425,7 @@ export default function AgentStudio() {
 
   async function openBrowserDock() {
     setDock("browser");
-    setStudioLayout((current) => ({ ...current, dock: true, dockExpanded: true }));
+    setStudioLayout((current) => ({ ...current, dock: true, right: true, dockExpanded: false }));
     setBrowserBusy(true);
     setActionError(null);
     try {
@@ -1575,8 +1603,11 @@ export default function AgentStudio() {
       {draggingFiles && <div className="v5-studio-dropzone"><Upload size={28} /><strong>放下即可附加到当前会话</strong><span>图片和文件最多 10 个，单个最大 50 MB</span></div>}
       <aside className="v4-studio-rail">
         <header>{detail ? <><span className="v4-project-logo">{detail.project_name.slice(0, 2).toUpperCase()}</span><div><strong>{detail.project_name}</strong><small title={detail.workspace_path}><GitBranch size={11} /> {detail.workspace_path}</small></div></> : <span>加载项目…</span>}</header>
-        <div className="v4-rail-tabs"><button className={railMode === "files" ? "active" : ""} type="button" onClick={() => setRailMode("files")}><Folder size={13} />文件</button><button className={railMode === "search" ? "active" : ""} type="button" onClick={() => setRailMode("search")}><Search size={13} />搜索</button></div>
-        {railMode === "files" ? (
+        <button className="v5-new-session-primary" type="button" onClick={openCreate}><Plus size={15} />新建会话</button>
+        <div className="v4-rail-tabs v5-studio-nav-tabs"><button className={railMode === "sessions" ? "active" : ""} type="button" onClick={() => setRailMode("sessions")}><Bot size={13} />会话</button><button className={railMode === "files" ? "active" : ""} type="button" onClick={() => setRailMode("files")}><Folder size={13} />文件</button><button className={railMode === "search" ? "active" : ""} type="button" onClick={() => setRailMode("search")}><Search size={13} />搜索</button></div>
+        {railMode === "sessions" ? (
+          <section className="v4-session-list v5-session-list-primary"><header><span>RECENT SESSIONS</span><button type="button" aria-label="新建 Agent 会话" onClick={openCreate}><Plus size={14} /></button></header><label className="v5-session-search"><Search size={13} /><input aria-label="搜索会话" value={sessionQuery} onChange={(event) => setSessionQuery(event.target.value)} placeholder="搜索会话…" />{sessionQuery && <button type="button" aria-label="清除会话搜索" onClick={() => setSessionQuery("")}><X size={12} /></button>}</label>{visibleSessions.slice(0, 40).map((session) => <button key={session.id} className={session.id === sessionId ? "active" : ""} type="button" onClick={() => navigate(`/studio/${session.id}`)}><i className={activeStatuses.has(session.status) ? "live" : ""} /><span><strong>{session.title}</strong><small>{session.project_name} · {session.runner_name}</small></span><em>{statusLabels[session.status] ?? session.status}</em></button>)}{sessionQuery && !visibleSessions.length && <div className="v5-session-none">没有匹配会话</div>}</section>
+        ) : railMode === "files" ? (
           <section className="v4-file-tree">
             <button className="v4-tree-up" type="button" disabled={treePath === "."} onClick={() => setTreePath(treePath.includes("/") ? treePath.slice(0, treePath.lastIndexOf("/")) : ".")}><ChevronDown size={14} />WORKSPACE · {treePath}</button>
             {tree?.entries.map((entry) => <button key={entry.path} title={entry.path} type="button" onClick={() => void openEntry(entry)}>{entry.kind === "directory" ? <Folder size={15} /> : <FileCode2 size={15} />}<span>{entry.name}</span>{entry.kind === "directory" && <ChevronRight size={13} />}</button>)}
@@ -1596,22 +1627,22 @@ export default function AgentStudio() {
             {searchResult && <footer>已扫描 {searchResult.scanned.toLocaleString()} 项{searchResult.truncated ? " · 已达到结果上限" : ""}</footer>}
           </section>
         )}
-        <section className="v4-session-list"><header><span>RECENT SESSIONS</span><button type="button" onClick={openCreate}><Plus size={14} /></button></header><label className="v5-session-search"><Search size={13} /><input aria-label="搜索会话" value={sessionQuery} onChange={(event) => setSessionQuery(event.target.value)} placeholder="搜索会话…" />{sessionQuery && <button type="button" aria-label="清除会话搜索" onClick={() => setSessionQuery("")}><X size={12} /></button>}</label>{visibleSessions.slice(0, 40).map((session) => <button key={session.id} className={session.id === sessionId ? "active" : ""} type="button" onClick={() => navigate(`/studio/${session.id}`)}><i className={activeStatuses.has(session.status) ? "live" : ""} /><span><strong>{session.title}</strong><small>{session.runner_name} · {statusLabels[session.status] ?? session.status}</small></span></button>)}{sessionQuery && !visibleSessions.length && <div className="v5-session-none">没有匹配会话</div>}</section>
       </aside>
 
-      {studioLayout.left && <div className="v5-studio-resizer left" role="separator" aria-label="调整项目侧栏宽度" aria-orientation="vertical" tabIndex={0} onPointerDown={(event) => beginResize("left", event)} onKeyDown={(event) => resizeWithKeyboard("left", event.key)} />}
+      {studioLayout.left && <div className="v5-studio-resizer left" role="separator" aria-label="调整导航侧栏宽度" aria-orientation="vertical" tabIndex={0} onPointerDown={(event) => beginResize("left", event)} onKeyDown={(event) => resizeWithKeyboard("left", event.key)} />}
 
       <section className="v4-conversation">
         <header className="v4-conversation-head">
-          <button className={`v4-pane-toggle with-label ${studioLayout.left ? "active" : ""}`} type="button" aria-label={studioLayout.left ? "收起项目侧栏" : "展开项目侧栏"} title={`${studioLayout.left ? "收起" : "展开"}项目侧栏 · Ctrl B`} onClick={() => setStudioLayout((current) => ({ ...current, left: !current.left }))}>{studioLayout.left ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}<span>项目栏</span></button>
+          <button className={`v4-pane-toggle with-label ${studioLayout.left ? "active" : ""}`} type="button" aria-label={studioLayout.left ? "收起导航侧栏" : "展开导航侧栏"} title={`${studioLayout.left ? "收起" : "展开"}导航侧栏 · Ctrl B`} onClick={() => setStudioLayout((current) => ({ ...current, left: !current.left }))}>{studioLayout.left ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}<span>导航</span></button>
           {editingTitle ? <form className="v5-session-title-edit" onSubmit={renameSession}><input autoFocus aria-label="会话名称" value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} /><button type="submit"><Check size={14} /></button><button type="button" onClick={() => setEditingTitle(false)}><X size={14} /></button></form> : <div className="v4-conversation-title"><strong>{detail?.title ?? "正在加载会话"}</strong><small title={detail?.workspace_path}>SESSION / {sessionId?.slice(0, 8)} · {detail?.workspace_path}</small></div>}
           <span className={`v4-status ${activeStatuses.has(detail?.status ?? "") ? "green" : ""}`}><i />{detail ? statusLabels[detail.status] ?? detail.status : "加载中"}</span>
-          <StudioPicker ariaLabel="选择 Agent" caption="AGENT" icon={<Bot size={15} />} disabled={activeStatuses.has(detail?.status ?? "")} value={detail?.runner_id ?? ""} options={runnerOptions} onChange={(runnerId) => void updateSession({ runner_id: runnerId })} />
-          <StudioPicker ariaLabel="选择模型" caption="MODEL" icon={<Cpu size={15} />} disabled={activeStatuses.has(detail?.status ?? "")} value={detail?.model_id ?? ""} options={modelOptions} onChange={(modelId) => void updateSession({ model_id: modelId })} />
+          <button className="v5-runtime-summary" type="button" aria-label="打开运行配置" aria-expanded={runtimeConfigOpen} onClick={() => setRuntimeConfigOpen((current) => !current)}><Bot size={14} /><span><strong>{detail?.runner_name ?? "选择 Agent"}</strong><small>{detail?.model_name ?? "选择模型"} · {effortLabels[detail?.reasoning_effort ?? "medium"]}思考 · {permissionLabels[detail?.permission_profile ?? "workspace"]}</small></span><ChevronDown size={13} /></button>
           <button className="v4-pane-toggle" type="button" onClick={() => void refresh()} title="刷新会话"><RefreshCw className={loading ? "spin" : ""} size={16} /></button>
           <button className="v4-pane-toggle" type="button" disabled={!detail} onClick={() => { setTitleDraft(detail?.title ?? ""); setEditingTitle(true); }} title="重命名会话"><Edit3 size={15} /></button>
-          <button className={`v4-pane-toggle with-label ${studioLayout.right ? "active" : ""}`} type="button" aria-label={studioLayout.right ? "收起会话侧栏" : "展开会话侧栏"} title={`${studioLayout.right ? "收起" : "展开"}会话上下文`} onClick={() => setStudioLayout((current) => ({ ...current, right: !current.right }))}>{studioLayout.right ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}<span>上下文</span></button>
+          <button className={`v4-pane-toggle with-label ${studioLayout.right ? "active" : ""}`} type="button" aria-label={studioLayout.right ? "关闭工具工作台" : "打开工具工作台"} title={`${studioLayout.right ? "关闭" : "打开"}工具工作台`} onClick={() => setStudioLayout((current) => ({ ...current, right: !current.right, dock: !current.right }))}>{studioLayout.right ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}<span>工具</span></button>
         </header>
+
+        {runtimeConfigOpen && <section className="v5-runtime-config-popover"><header><div><strong>运行配置</strong><small>当前会话立即生效；运行中限制切换 Agent 与模型</small></div><button type="button" aria-label="关闭运行配置" onClick={() => setRuntimeConfigOpen(false)}><X size={14} /></button></header><div className="v5-runtime-primary"><StudioPicker ariaLabel="选择 Agent" caption="AGENT" icon={<Bot size={15} />} disabled={activeStatuses.has(detail?.status ?? "")} value={detail?.runner_id ?? ""} options={runnerOptions} onChange={(runnerId) => void updateSession({ runner_id: runnerId })} /><StudioPicker ariaLabel="选择模型" caption="MODEL" icon={<Cpu size={15} />} disabled={activeStatuses.has(detail?.status ?? "")} value={detail?.model_id ?? ""} options={modelOptions} onChange={(modelId) => void updateSession({ model_id: modelId })} /></div><div className="v5-runtime-secondary"><ComposerMenu ariaLabel="会话访问权限" label="权限" icon={<ShieldCheck size={14} />} value={detail?.permission_profile ?? "workspace"} options={permissionOptions} disabled={configBusy} onChange={(value) => void updateRuntimeSetting({ permission_profile: value as PermissionProfile })} /><ComposerMenu ariaLabel="思考强度" label="思考" icon={<Brain size={14} />} value={detail?.reasoning_effort ?? "medium"} options={effortOptions} disabled={configBusy} onChange={(value) => void updateRuntimeSetting({ reasoning_effort: value as ReasoningEffort })} /><ComposerMenu ariaLabel="会话能力包" label="能力" icon={<Sparkles size={14} />} value={detail?.skill_pack_id ?? ""} options={skillOptions} disabled={configBusy || activeStatuses.has(detail?.status ?? "")} onChange={(value) => void updateRuntimeSetting({ skill_pack_id: value || null })} /><ComposerMenu ariaLabel="运行 Profile" label="Profile" icon={<Gauge size={14} />} value={detail?.profile_id ?? ""} options={profileOptions} disabled={configBusy || activeStatuses.has(detail?.status ?? "")} onChange={(value) => void updateRuntimeSetting({ profile_id: value || null })} /></div><footer><span><Gauge size={13} />{quotaTokens.toLocaleString()} Tokens · ${quotaCost.toFixed(3)}</span><span><Clock3 size={13} />{duration(detail?.duration_ms ?? 0)}</span><span><FileDiff size={13} />{detail?.file_changes.length ?? 0} 个变更</span></footer></section>}
 
         <div className="v4-conversation-scroll" ref={scrollRef} onScroll={handleConversationScroll}>
           {loading && <div className="v4-empty compact"><RefreshCw className="spin" size={22} /><strong>正在恢复会话上下文</strong></div>}
@@ -1643,16 +1674,16 @@ export default function AgentStudio() {
                     </div>
                   </article>
                 ))}
-                {operationEvents.length > 0 && (
+                {visibleOperationEvents.length > 0 && (
                   <details className="v4-process-operations">
                     <summary>
                       <span><Code2 size={14} /></span>
-                      <div><strong>后台操作</strong><small>{operationSummary(operationEvents)}</small></div>
-                      <b>{operationEvents.length}</b>
+                      <div><strong>后台操作</strong><small>{operationSummary(visibleOperationEvents)}{runtimeNoiseCount ? ` · ${runtimeNoiseCount} 条运行时噪声已隐藏` : ""}</small></div>
+                      <b>{visibleOperationEvents.length}</b>
                       <ChevronRight className="v4-operation-chevron" size={14} />
                     </summary>
                     <div>
-                      {operationEvents.slice(-30).map((event) => (
+                      {visibleOperationEvents.slice(-30).map((event) => (
                         <article key={`${event.event_type}-${event.seq}`} className={eventTone(event)}>
                           <span className="v4-process-icon">{eventIcon(event)}</span>
                           <div>
@@ -1672,13 +1703,20 @@ export default function AgentStudio() {
               {collapsedEventCount > 0 && <footer>已自动折叠 {collapsedEventCount.toLocaleString()} 条 Token、心跳与重复底层事件</footer>}
             </section>
           )}
-          {pendingApprovals.length > 0 && <section className="v4-approval-gate"><header><ShieldCheck size={16} /><div><strong>Agent 正在等待你的审批</strong><small>选择后任务会自动继续，无需重新发送消息</small></div><b>{pendingApprovals.length}</b></header>{pendingApprovals.map((approval) => renderApproval(approval, true))}</section>}
-          {queuedTurns.length > 0 && <section className="v5-turn-queue"><header><span><Clock3 size={15} /></span><div><strong>后续指令队列</strong><small>当前工作完成后按顺序自动继续</small></div><b>{queuedTurns.length}</b></header><div>{queuedTurns.map((turn, index) => <article key={turn.id}><span>{index + 1}</span><div><strong>{turn.user_message}</strong><small>第 {turn.turn_no} 轮 · {time(turn.created_at)}</small></div><button type="button" title="移除这条排队指令" aria-label={`移除排队指令 ${turn.user_message}`} onClick={() => void removeQueuedTurn(turn)}><Trash2 size={13} /></button></article>)}</div></section>}
+          {completedTurn && !activeStatuses.has(detail?.status ?? "") && (
+            <section className="v5-completion-summary">
+              <header><span><CheckCircle2 size={18} /></span><div><strong>本轮任务已完成</strong><small>{completedTurn.final_answer ? "Agent 已提交最终结果，运行证据已保存" : "运行结束，完整过程已保存"}</small></div></header>
+              <dl><div><dt>文件变更</dt><dd>{detail?.file_changes.length ?? 0}</dd></div><div><dt>完成用时</dt><dd>{duration(completedTurn.duration_ms || detail?.duration_ms || 0)}</dd></div><div><dt>Token</dt><dd>{(completedTurn.tokens_input + completedTurn.tokens_output || quotaTokens).toLocaleString()}</dd></div><div><dt>费用</dt><dd>${(completedTurn.cost_usd || detail?.cost_usd || 0).toFixed(3)}</dd></div></dl>
+              <footer>{detail?.file_changes.length ? <button type="button" onClick={() => { setDock("changes"); setStudioLayout((current) => ({ ...current, dock: true, right: true })); }}><FileDiff size={14} />查看变更</button> : null}<button type="button" onClick={() => scrollRef.current?.parentElement?.querySelector<HTMLTextAreaElement>(".v4-composer textarea")?.focus()}><MessageSquarePlus size={14} />继续修改</button><button type="button" onClick={exportSession}><Download size={14} />导出记录</button></footer>
+            </section>
+          )}
           {error && <div className="v4-error">{error}</div>}
         </div>
         {!followingLatest && <button className="v4-return-latest" type="button" onClick={jumpToLatest}><ChevronDown size={14} />返回最新内容</button>}
 
         <form className="v4-composer" onSubmit={sendTurn}>
+          {pendingApprovals.length > 0 && <section className="v4-approval-gate v5-approval-composer-gate"><header><ShieldCheck size={16} /><div><strong>Agent 正在等待你的审批</strong><small>确认后当前任务会自动继续</small></div><b>{pendingApprovals.length}</b></header>{pendingApprovals.map((approval) => renderApproval(approval, true))}</section>}
+          {queuedTurns.length > 0 && <details className="v5-composer-queue"><summary><Clock3 size={14} /><span>后续指令队列 · {queuedTurns.length} 条等待执行</span><ChevronDown size={13} /></summary><div>{queuedTurns.map((turn, index) => <article key={turn.id}><span>{index + 1}</span><div><strong>{turn.user_message}</strong><small>第 {turn.turn_no} 轮 · {time(turn.created_at)}</small></div><button type="button" title="移除这条排队指令" aria-label={`移除排队指令 ${turn.user_message}`} onClick={() => void removeQueuedTurn(turn)}><Trash2 size={13} /></button></article>)}</div></details>}
           {(fileContextPaths.length > 0 || attachments.length > 0) && <div className="v4-composer-context">
             {fileContextPaths.map((path) => <div className="v4-context-chip" key={path}><File size={13} /><span>{path}</span><button type="button" aria-label={`移除文件上下文 ${path}`} onClick={() => { setContextFiles((current) => current.filter((item) => item !== path)); if (preview?.path === path) setPreview(null); }}><X size={12} /></button></div>)}
             {attachments.map((attachment) => <div className="v4-context-chip attachment" key={attachment.id}><Paperclip size={13} /><span>{attachment.name}<small>{fileSize(attachment.size)}</small></span><button type="button" aria-label={`移除附件 ${attachment.name}`} onClick={() => void removeAttachment(attachment)}><X size={12} /></button></div>)}
@@ -1698,43 +1736,28 @@ export default function AgentStudio() {
           {composerInspectorOpen && <section className="v5-composer-inspector"><header><div><strong>发送前检查</strong><small>{composerReady ? "运行条件完整" : "还有需要处理的项目"}</small></div><button type="button" aria-label="关闭发送前检查" onClick={() => setComposerInspectorOpen(false)}><X size={13} /></button></header><div>{composerChecks.map((check) => <article className={check.ok ? "ok" : "warning"} key={check.id}>{check.ok ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}<span><strong>{check.label}</strong><small>{check.detail}</small></span></article>)}</div></section>}
           <footer className="v4-composer-toolbar">
             <button className="v4-composer-tool" type="button" onClick={() => void attachFiles()} disabled={attachmentBusy || attachments.length >= 10} title="添加图片或文件（单个最大 50 MB）"><Upload size={14} /><span>{attachmentBusy ? "添加中" : "附件"}</span></button>
-            <button className={`v4-composer-tool v5-inspector-trigger ${composerReady ? "ready" : "warning"}`} type="button" aria-expanded={composerInspectorOpen} onClick={() => setComposerInspectorOpen((value) => !value)} title="检查项目、Agent、模型、权限与上下文"><ListChecks size={14} /><span>检查</span><i /></button>
-            <ComposerMenu ariaLabel="会话访问权限" label="权限" icon={<ShieldCheck size={14} />} value={detail?.permission_profile ?? "workspace"} options={permissionOptions} disabled={configBusy} onChange={(value) => void updateRuntimeSetting({ permission_profile: value as PermissionProfile })} />
-            <ComposerMenu ariaLabel="思考强度" label="思考" icon={<Brain size={14} />} value={detail?.reasoning_effort ?? "medium"} options={effortOptions} disabled={configBusy} onChange={(value) => void updateRuntimeSetting({ reasoning_effort: value as ReasoningEffort })} />
-            <ComposerMenu ariaLabel="会话能力包" label="能力" icon={<Sparkles size={14} />} value={detail?.skill_pack_id ?? ""} options={skillOptions} disabled={configBusy || activeStatuses.has(detail?.status ?? "")} onChange={(value) => void updateRuntimeSetting({ skill_pack_id: value || null })} />
-            <ComposerMenu ariaLabel="运行 Profile" label="Profile" icon={<Gauge size={14} />} value={detail?.profile_id ?? ""} options={profileOptions} disabled={configBusy || activeStatuses.has(detail?.status ?? "")} onChange={(value) => void updateRuntimeSetting({ profile_id: value || null })} />
-            <span className="v4-quota" title={`输入 ${(detail?.tokens_input ?? 0) + liveUsage.input} · 输出 ${(detail?.tokens_output ?? 0) + liveUsage.output} · 预计费用 $${quotaCost.toFixed(4)}`}><Gauge size={14} /><span>{quotaTokens.toLocaleString()} Tokens{activeStatuses.has(detail?.status ?? "") && (liveUsage.input + liveUsage.output > 0) ? " · LIVE" : ""}</span><b>${quotaCost.toFixed(3)}</b></span>
+            {!composerReady && <button className="v4-composer-tool v5-inspector-trigger warning" type="button" aria-expanded={composerInspectorOpen} onClick={() => setComposerInspectorOpen((value) => !value)} title="检查项目、Agent、模型、权限与上下文"><AlertTriangle size={14} /><span>需要检查</span><i /></button>}
+            <button className="v5-composer-runtime" type="button" aria-label="打开运行配置" onClick={() => setRuntimeConfigOpen(true)}><Bot size={13} /><span>{detail?.runner_name} · {detail?.model_name}</span><small>{effortLabels[detail?.reasoning_effort ?? "medium"]}思考 · {permissionLabels[detail?.permission_profile ?? "workspace"]}</small><ChevronDown size={12} /></button>
             <div className="v5-composer-actions">{activeStatuses.has(detail?.status ?? "") && <button className="cancel" type="button" onClick={() => void cancel()}><CircleStop size={16} />停止</button>}<button className={`send ${activeStatuses.has(detail?.status ?? "") ? "queue" : ""}`} type="submit" aria-label={activeStatuses.has(detail?.status ?? "") ? "加入后续指令队列" : "发送消息"} title={activeStatuses.has(detail?.status ?? "") ? "加入队列 · Enter" : "发送 · Enter"} disabled={!composerReady || sending}>{activeStatuses.has(detail?.status ?? "") ? <><Clock3 size={14} /><span>排队</span></> : <Send size={16} />}</button></div>
           </footer>
           {actionError && <div className="v4-composer-error"><AlertTriangle size={14} />{actionError}</div>}
         </form>
       </section>
 
-      {studioLayout.right && <div className="v5-studio-resizer right" role="separator" aria-label="调整上下文侧栏宽度" aria-orientation="vertical" tabIndex={0} onPointerDown={(event) => beginResize("right", event)} onKeyDown={(event) => resizeWithKeyboard("right", event.key)} />}
-
-      <aside className="v4-inspector">
-        <header><div><strong>会话上下文</strong><small>{connected ? "LIVE EVENT STREAM" : "PERSISTED EVENTS"}</small></div><span><i className={connected ? "live" : ""} /></span></header>
-        <section><label>ACTIVE AGENT</label><div className="v4-agent-profile"><span>{detail?.runner_name?.slice(0, 2).toUpperCase()}</span><div><strong>{detail?.runner_name}</strong><small>{detail?.model_name} · {detail?.runner_type}</small></div></div><div className="v4-profile-tags"><span>原生恢复</span><span>MCP</span><span>结构化事件</span></div></section>
-        <section><label>PERMISSION REQUESTS <b>{pendingApprovals.length} PENDING</b></label>{pendingApprovals.map((approval) => renderApproval(approval))}{!pendingApprovals.length && <p className="v4-inspector-empty"><Check size={15} />没有待处理操作</p>}</section>
-        <section><label>LIVE TELEMETRY</label><dl className="v4-telemetry"><div><dt>输入 Token</dt><dd>{((detail?.tokens_input ?? 0) + liveUsage.input).toLocaleString()}</dd></div><div><dt>输出 Token</dt><dd>{((detail?.tokens_output ?? 0) + liveUsage.output).toLocaleString()}</dd></div><div><dt>预计费用</dt><dd>${quotaCost.toFixed(3)}</dd></div><div><dt>累计用时</dt><dd>{duration(detail?.duration_ms ?? 0)}</dd></div></dl></section>
-        <section><label>SESSION CONTEXT</label><div className="v4-context-list"><span><FolderOpen size={14} />{detail?.project_name}</span>{detail?.profile_name && <span><Gauge size={14} />{detail.profile_name}</span>}<span><ShieldCheck size={14} />{permissionLabels[detail?.permission_profile ?? "workspace"]}</span><span><Brain size={14} />{effortLabels[detail?.reasoning_effort ?? "medium"]}思考强度</span><span><FileDiff size={14} />{detail?.file_changes.length ?? 0} 个文件变更</span></div></section>
-        <section><label>SESSION ACTIONS</label><div className="v5-session-actions"><button type="button" onClick={() => void forkSession()} disabled={!detail}><GitFork size={14} />创建分支</button><button type="button" onClick={exportSession} disabled={!detail}><Download size={14} />导出记录</button>{retryableTurn && <button type="button" onClick={() => void retryLastTurn()} disabled={sending}><RefreshCw size={14} />重试上一轮</button>}<button className="danger" type="button" onClick={() => void archiveSession()} disabled={!detail || activeStatuses.has(detail?.status ?? "")}><Archive size={14} />归档会话</button></div></section>
-      </aside>
-
-      {studioLayout.dock && !studioLayout.dockExpanded && <div className="v5-studio-resizer dock" role="separator" aria-label="调整底部面板高度" aria-orientation="horizontal" tabIndex={0} onPointerDown={(event) => beginResize("dock", event)} onKeyDown={(event) => resizeWithKeyboard("dock", event.key)} />}
+      {studioLayout.right && <div className="v5-studio-resizer right" role="separator" aria-label="调整工具工作台宽度" aria-orientation="vertical" tabIndex={0} onPointerDown={(event) => beginResize("right", event)} onKeyDown={(event) => resizeWithKeyboard("right", event.key)} />}
 
       <section className="v4-studio-dock">
         <nav>
-          <button type="button" className={studioLayout.dock && dock === "activity" ? "active" : ""} onClick={() => { setDock("activity"); setStudioLayout((current) => ({ ...current, dock: true })); }}><Activity size={14} />活动日志 <b>{processEvents.length}</b></button>
+          <button type="button" className={studioLayout.dock && dock === "activity" ? "active" : ""} onClick={() => { setDock("activity"); setStudioLayout((current) => ({ ...current, dock: true, right: true })); }}><Activity size={14} />活动详情 <b>{processEvents.length}</b></button>
           <button type="button" className={studioLayout.dock && dock === "terminal" ? "active" : ""} onClick={openTerminalPanel}><TerminalSquare size={14} />交互终端 <b>{terminals.length || ""}</b><i className={terminals.some((item) => item.running) ? "live" : ""} /></button>
           <button type="button" className={studioLayout.dock && dock === "browser" ? "active" : ""} onClick={() => void openBrowserDock()}><Globe2 size={14} />浏览器 <i className={browserStatus?.running ? "live" : ""} /></button>
-          <button type="button" className={studioLayout.dock && dock === "file" ? "active" : ""} onClick={() => { setDock("file"); setStudioLayout((current) => ({ ...current, dock: true })); }}><Code2 size={14} />文件预览</button>
-          <button type="button" className={studioLayout.dock && dock === "changes" ? "active" : ""} onClick={() => { setDock("changes"); setStudioLayout((current) => ({ ...current, dock: true })); }}><FileDiff size={14} />变更 <b>{detail?.file_changes.length ?? 0}</b></button>
+          <button type="button" className={studioLayout.dock && dock === "file" ? "active" : ""} onClick={() => { setDock("file"); setStudioLayout((current) => ({ ...current, dock: true, right: true })); }}><Code2 size={14} />文件</button>
+          <button type="button" className={studioLayout.dock && dock === "changes" ? "active" : ""} onClick={() => { setDock("changes"); setStudioLayout((current) => ({ ...current, dock: true, right: true })); }}><FileDiff size={14} />变更 <b>{detail?.file_changes.length ?? 0}</b></button>
           <span className="v4-dock-summary">{dock === "browser" && browserStatus?.running ? "VISIBLE BROWSER · 用户可随时接管" : terminal?.running ? "TERMINAL LIVE · 点击终端区域直接输入" : `${processEvents.length} 个可读步骤 · ${collapsedEventCount} 条底层事件已折叠`}</span>
           {studioLayout.dock && <button className="v4-dock-toggle icon" type="button" aria-label={studioLayout.dockExpanded ? "恢复底部面板高度" : "展开底部面板高度"} title={studioLayout.dockExpanded ? "恢复普通高度" : "展开工作区域"} onClick={() => setStudioLayout((current) => ({ ...current, dockExpanded: !current.dockExpanded }))}>{studioLayout.dockExpanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>}
-          <button className="v4-dock-toggle" type="button" aria-label={studioLayout.dock ? "隐藏底部面板" : "展开底部面板"} title={`${studioLayout.dock ? "隐藏" : "展开"}底部面板 · Ctrl J`} onClick={() => setStudioLayout((current) => ({ ...current, dock: !current.dock }))}>{studioLayout.dock ? <PanelBottomClose size={16} /> : <PanelBottomOpen size={16} />}{studioLayout.dock ? "隐藏" : "展开"}</button>
+          <button className="v4-dock-toggle" type="button" aria-label="关闭工具工作台" title="关闭工具工作台 · Ctrl J" onClick={() => setStudioLayout((current) => ({ ...current, dock: false, right: false, dockExpanded: false }))}><X size={16} />关闭</button>
         </nav>
-        {studioLayout.dock && dock === "activity" && <div className="v4-terminal"><header><span>可验证 Agent 活动</span><small>公开进度和实际操作；Token 碎片与心跳已自动合并</small></header>{processEvents.slice(-16).map((event) => <div key={event.seq}><time>{time(event.created_at)}</time><span>{eventTitle(event)}</span></div>)}{!processEvents.length && <span>等待 Agent 活动…</span>}</div>}
+        {studioLayout.dock && dock === "activity" && <div className="v5-workbench-activity"><section className="v5-workbench-session"><div className="v4-agent-profile"><span>{detail?.runner_name?.slice(0, 2).toUpperCase()}</span><div><strong>{detail?.runner_name}</strong><small>{detail?.model_name} · {statusLabels[detail?.status ?? ""]}</small></div></div><dl className="v4-telemetry"><div><dt>Token</dt><dd>{quotaTokens.toLocaleString()}</dd></div><div><dt>费用</dt><dd>${quotaCost.toFixed(3)}</dd></div><div><dt>用时</dt><dd>{duration(detail?.duration_ms ?? 0)}</dd></div><div><dt>变更</dt><dd>{detail?.file_changes.length ?? 0}</dd></div></dl></section><section className="v4-terminal"><header><span>完整活动记录</span><small>用于排错和审计；对话中只显示可读摘要</small></header>{processEvents.slice(-40).map((event) => <div key={event.seq}><time>{time(event.created_at)}</time><span>{eventTitle(event)}</span></div>)}{!processEvents.length && <span>等待 Agent 活动…</span>}</section><footer className="v5-session-actions"><button type="button" onClick={() => void forkSession()} disabled={!detail}><GitFork size={14} />创建分支</button><button type="button" onClick={exportSession} disabled={!detail}><Download size={14} />导出</button>{retryableTurn && <button type="button" onClick={() => void retryLastTurn()} disabled={sending}><RefreshCw size={14} />重试</button>}<button className="danger" type="button" onClick={() => void archiveSession()} disabled={!detail || activeStatuses.has(detail?.status ?? "")}><Archive size={14} />归档</button></footer></div>}
         {studioLayout.dock && dock === "terminal" && (terminal?.running ? <div className="v4-interactive-terminal"><header><div className="v5-terminal-tabs">{terminals.map((item) => <div className={item.id === terminal.id ? "active" : ""} key={item.id}><button type="button" onClick={() => setActiveTerminalId(item.id)}><i className={item.running ? "live" : ""} /><span>{item.title}</span></button><button type="button" aria-label={`关闭终端 ${item.title}`} onClick={() => void closeInteractiveTerminal(item.id)}><X size={11} /></button></div>)}<button className="new" type="button" title="新建终端" disabled={terminals.filter((item) => item.running).length >= 3} onClick={() => void startInteractiveTerminal()}><Plus size={13} /></button></div><span>{terminal.shell} · 点击下方区域直接输入</span></header><TerminalView key={terminal.id} content={terminalText} onData={(data) => void writeTerminalData(data)} onResize={(columns, rows) => void resizeTerminal(columns, rows)} /><form onSubmit={sendTerminalInput}><span>快速命令 ›</span><input aria-label="终端快速命令" value={terminalInput} onChange={(event) => setTerminalInput(event.target.value)} placeholder="也可在上方终端内直接输入" autoComplete="off" /><button type="submit" disabled={!terminalInput}>运行</button></form></div> : <div className="v4-terminal-empty"><TerminalSquare size={26} /><strong>{terminal ? "当前终端已退出" : "启动项目交互终端"}</strong><p>{detail?.permission_profile === "standard" || detail?.permission_profile === "full" ? "终端将在当前项目目录打开；可同时保留 3 个标签，刷新页面后自动恢复仍在运行的终端。" : "交互终端需要“标准开发”或“完全访问”权限。可在上方输入框工具栏随时切换。"}</p>{detail?.permission_profile === "standard" || detail?.permission_profile === "full" ? <button type="button" onClick={() => void startInteractiveTerminal()}><TerminalSquare size={14} />{terminal ? "新建终端" : "启动终端"}</button> : <button type="button" onClick={() => void updateRuntimeSetting({ permission_profile: "standard" })}><ShieldCheck size={14} />切换到标准开发</button>}</div>)}
         {studioLayout.dock && dock === "browser" && <div className="v5-studio-browser"><nav className="v5-browser-tabs">{browserStatus?.pages.map((page) => <div className={page.id === browserPageId ? "active" : ""} key={page.id}><button type="button" onClick={() => void switchBrowserPage(page.id)}><Globe2 size={11} /><span>{page.title || "新标签"}</span></button><button type="button" aria-label={`关闭浏览器标签 ${page.title}`} onClick={() => void closeBrowserPage(page.id)}><X size={11} /></button></div>)}<button className="new" type="button" title="新建浏览器标签" disabled={browserBusy} onClick={() => void createBrowserPage()}><Plus size={13} /></button><span>VISIBLE BROWSER · 可随时接管</span></nav><form onSubmit={navigateBrowser}><Globe2 size={14} /><input aria-label="浏览器地址" value={browserUrl} onChange={(event) => setBrowserUrl(event.target.value)} placeholder="https://example.com" /><button type="submit" disabled={browserBusy}>{browserBusy ? "加载中…" : "访问"}</button><button type="button" disabled={!browserPageId || browserBusy} onClick={() => void captureBrowser()}><RefreshCw size={13} />刷新</button><span><i className={browserStatus?.running ? "live" : ""} />{browserStatus?.running ? "可接管" : "未启动"}</span></form><div><section className="v5-studio-browser-view">{browserImage ? <img src={browserImage} alt="可见浏览器当前截图" /> : <div><Globe2 size={25} /><strong>启动可见浏览器</strong><small>浏览器会在独立窗口打开，你可以随时直接接管。</small><button type="button" onClick={() => void openBrowserDock()}>启动浏览器</button></div>}</section><section className="v5-studio-browser-controls"><header><div><strong>{browserSnapshot?.title || "页面控件"}</strong><small>{browserSnapshot?.url || "选择页面元素即可操作"}</small></div><button type="button" disabled={!browserPageId} onClick={() => void captureBrowser()}><Camera size={13} /></button></header><div className="fields"><input value={browserValue} onChange={(event) => setBrowserValue(event.target.value)} placeholder="为输入框准备填写内容" /><button type="button" disabled={!browserSelector || browserBusy} onClick={() => void interactBrowser("fill")}>填写</button><button type="button" disabled={!browserSelector || browserBusy} onClick={() => void interactBrowser("click")}>点击</button></div><div className="controls">{browserSnapshot?.controls.slice(0, 100).map((control) => <button className={browserSelector === control.selector ? "active" : ""} type="button" disabled={control.disabled} key={`${control.index}-${control.selector}`} onClick={() => setBrowserSelector(control.selector || "")}><b>{control.index + 1}</b><span><strong>{control.text || control.tag}</strong><small>{control.tag}{control.type ? ` · ${control.type}` : ""}</small></span></button>)}{browserSnapshot && !browserSnapshot.controls.length && <p>页面没有可操作控件。</p>}</div></section></div></div>}
         {studioLayout.dock && dock === "file" && <pre className="v4-file-preview">{preview ? preview.content : "从左侧项目树选择一个 UTF-8 文本文件。"}</pre>}

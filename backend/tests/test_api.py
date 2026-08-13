@@ -40,12 +40,12 @@ def test_health_and_catalog_api(settings):
     with TestClient(create_app(settings)) as client:
         health = client.get("/api/v1/health")
         assert health.status_code == 200
-        assert health.json()["version"] == "5.1.0"
+        assert health.json()["version"] == "5.2.0"
         cases = client.get("/api/v1/test-cases").json()
         # 214 existing cases plus the two built-in 2025 Math I tracks
         # (22 questions each). The API must expose the bundled paper without
         # requiring a user-side PDF import.
-        assert len(cases) == 258
+        assert len(cases) == 282
         assert {item["difficulty"] for item in cases} == {1, 2, 3, 4, 5, 6}
         assert any(item["requires_docker"] for item in cases)
         assert any(item["requires_judge"] for item in cases)

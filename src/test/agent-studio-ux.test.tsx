@@ -152,7 +152,7 @@ function installApiMock(
   });
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = String(input);
-    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.1.0" });
+    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.0" });
     if (url.endsWith("/sessions")) return json([currentSession]);
     if (url.endsWith("/sessions/session-1") && init?.method === "PATCH") return json({ ...currentDetail, ...JSON.parse(String(init.body)) });
     if (url.includes("/sessions/session-1?message_limit=")) return json(currentDetail);
@@ -251,29 +251,27 @@ describe("Agent Studio visual workspace controls", () => {
 
     expect((await screen.findAllByText("视觉体验巡查")).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "搜索" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "搜索项目文件" }), { target: { value: "read" } });
+    fireEvent.change(await screen.findByRole("textbox", { name: "搜索项目文件" }), { target: { value: "read" } });
 
     expect(await screen.findByText("README.md")).toBeInTheDocument();
     expect(screen.getByText("docs/README.md")).toBeInTheDocument();
     expect(screen.getByText(/已扫描 86 项/)).toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes("files/search?query=read"))).toBe(true);
 
-    fireEvent.keyDown(screen.getByRole("separator", { name: "调整项目侧栏宽度" }), { key: "ArrowRight" });
-    expect(container.querySelector(".v4-studio-workbench")).toHaveStyle({ "--studio-left": "266px" });
+    fireEvent.keyDown(screen.getByRole("separator", { name: "调整导航侧栏宽度" }), { key: "ArrowRight" });
+    expect(container.querySelector(".v4-studio-workbench")).toHaveStyle({ "--studio-left": "302px" });
 
-    fireEvent.click(screen.getByRole("button", { name: "收起项目侧栏" }));
-    fireEvent.click(screen.getByRole("button", { name: "收起会话侧栏" }));
-    fireEvent.click(screen.getByRole("button", { name: "隐藏底部面板" }));
+    fireEvent.click(screen.getByRole("button", { name: "收起导航侧栏" }));
 
     const workbench = container.querySelector(".v4-studio-workbench");
     expect(workbench).toHaveClass("left-collapsed", "right-collapsed", "dock-collapsed");
-    await waitFor(() => expect(JSON.parse(window.localStorage.getItem("agentbench.studio.layout.v1") ?? "{}")).toMatchObject({
+    await waitFor(() => expect(JSON.parse(window.localStorage.getItem("agentbench.studio.layout.v2") ?? "{}")).toMatchObject({
       left: false,
       right: false,
       dock: false,
       dockExpanded: false,
-      leftWidth: 266,
-      rightWidth: 310,
+      leftWidth: 302,
+      rightWidth: 520,
       dockHeight: 246,
     }));
   });
@@ -282,6 +280,7 @@ describe("Agent Studio visual workspace controls", () => {
     const fetchMock = installApiMock();
     renderStudio();
 
+    fireEvent.click(await screen.findAllByRole("button", { name: "打开运行配置" }).then((items) => items[0]));
     const agentPicker = await screen.findByRole("button", { name: "选择 Agent" });
     fireEvent.click(agentPicker);
     fireEvent.change(screen.getByPlaceholderText("搜索AGENT"), { target: { value: "Reasonix" } });
@@ -322,6 +321,7 @@ describe("Agent Studio visual workspace controls", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "仅允许一次" })[0]);
     await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/approvals/approval-1/decision"))).toBe(true));
 
+    fireEvent.click(screen.getAllByRole("button", { name: "打开运行配置" })[0]);
     fireEvent.click(screen.getByRole("button", { name: "会话访问权限" }));
     fireEvent.click(screen.getByRole("option", { name: /完全访问/ }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith("/sessions/session-1") && init?.method === "PATCH" && String(init.body).includes("permission_profile"))).toBe(true));
@@ -329,9 +329,9 @@ describe("Agent Studio visual workspace controls", () => {
     fireEvent.click(screen.getByRole("button", { name: "思考强度" }));
     fireEvent.click(screen.getByRole("option", { name: /高.*复杂任务/ }));
     expect(screen.getByRole("button", { name: /附件/ })).toBeInTheDocument();
-    expect(screen.getByText("2,000 Tokens")).toBeInTheDocument();
+    expect(document.querySelector(".v5-runtime-config-popover > footer")).toHaveTextContent("2,000 Tokens");
     expect(screen.getByRole("button", { name: /交互终端/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /活动日志/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /活动详情/ })).toBeInTheDocument();
   });
 
   it("turns streamed model output into a readable and deduplicated process timeline", async () => {
@@ -519,7 +519,7 @@ describe("Agent Studio visual workspace controls", () => {
     expect(await screen.findByText("README.md")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /README\.md/ }));
     expect(screen.getByText("docs/README.md")).toBeInTheDocument();
-    expect(screen.getByText("后续指令队列")).toBeInTheDocument();
+    expect(screen.getByText(/后续指令队列/)).toBeInTheDocument();
     expect(screen.getByText("稍后检查发布说明")).toBeInTheDocument();
 
     fireEvent.change(composer, { target: { value: "排队执行最终检查" } });
