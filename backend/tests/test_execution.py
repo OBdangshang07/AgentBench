@@ -51,6 +51,15 @@ def test_cli_install_plan_uses_only_code_owned_argv():
     assert cursor_plan["manager"] == "powershell"
     assert cursor_plan["command"] == "irm 'https://cursor.com/install?win32=true' | iex"
     assert cursor_plan["argv"][-1] == "irm 'https://cursor.com/install?win32=true' | iex"
+    harness_plan = resolve_cli_install_plan("deepseek_harness", resolver)
+    assert harness_plan["supported"] is True
+    assert harness_plan["command"] == "npm install -g @deepseek-ai/dsh"
+    assert harness_plan["argv"] == [
+        "C:/Program Files/nodejs/npm.cmd",
+        "install",
+        "-g",
+        "@deepseek-ai/dsh",
+    ]
 
 
 def test_workspace_rejects_path_escape(tmp_path):

@@ -47,7 +47,7 @@ function renderRunPage(run: RunDetail) {
     const url = String(input);
     let value: unknown = {};
     if (url.endsWith("/health")) {
-        value = { name: "AgentBench Desktop", version: "5.2.0" };
+        value = { name: "AgentBench Desktop", version: "5.2.1" };
     } else if (url.includes("/runs?experiment_id=")) {
       value = [run];
     } else if (url.includes("/runs/run-1")) {

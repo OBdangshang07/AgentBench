@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentbench-desktop-backend"
-version = "5.2.0"
+version = "5.2.1"
 description = "Local AgentBench Desktop API, agent runtime and scoring service"
 requires-python = ">=3.11,<3.15"
 dependencies = [

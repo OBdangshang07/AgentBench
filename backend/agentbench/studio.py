@@ -31,6 +31,7 @@ from .secrets import SecretStore
 
 ACTIVE_SESSION_STATUSES = {"queued", "preparing", "running", "waiting_approval"}
 TERMINAL_TURN_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
+CHAT_PROJECT_ID = "__agentbench_chat__"
 SKIPPED_TREE_DIRECTORIES = {
     ".git",
     ".idea",
@@ -77,7 +78,44 @@ class StudioService:
         self.secrets = secrets
         self.seed_skill_packs()
         self.seed_runtime_profiles()
+        self._ensure_chat_project()
         self.recover_interrupted_sessions()
+
+    def _ensure_chat_project(self) -> None:
+        """Maintain an internal root for isolated, workspace-free conversations."""
+        root = (self.settings.data_dir / "chat-sessions").resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        now = utc_now()
+        if not self.database.fetch_one("SELECT id FROM projects WHERE id=?", (CHAT_PROJECT_ID,)):
+            self.database.execute(
+                "INSERT INTO projects(id,name,description,permission_profile,settings_json,pinned,"
+                "archived,created_at,updated_at,last_opened_at) VALUES (?,?,?,'readonly',?,0,0,?,?,?)",
+                (
+                    CHAT_PROJECT_ID,
+                    "纯对话",
+                    "AgentBench internal isolated conversation root",
+                    json.dumps({"builtin_chat": True}),
+                    now,
+                    now,
+                    now,
+                ),
+            )
+        existing_root = self.database.fetch_one(
+            "SELECT id FROM project_roots WHERE project_id=? AND is_primary=1",
+            (CHAT_PROJECT_ID,),
+        )
+        if existing_root:
+            self.database.execute(
+                "UPDATE project_roots SET root_path=?,label='纯对话',access_mode='readonly' "
+                "WHERE id=?",
+                (str(root), existing_root["id"]),
+            )
+        else:
+            self.database.execute(
+                "INSERT INTO project_roots(id,project_id,root_path,label,access_mode,is_primary,created_at) "
+                "VALUES (?,?,?,'纯对话','readonly',1,?)",
+                (new_id(), CHAT_PROJECT_ID, str(root), now),
+            )
 
     def seed_skill_packs(self) -> None:
         if self.database.fetch_one("SELECT id FROM prompt_templates LIMIT 1"):
@@ -326,7 +364,7 @@ class StudioService:
         }
 
     def list_projects(self, include_archived: bool = False) -> list[dict[str, Any]]:
-        where = "" if include_archived else "WHERE p.archived=0"
+        where = "WHERE p.id<>?" if include_archived else "WHERE p.id<>? AND p.archived=0"
         rows = self.database.fetch_all(
             "SELECT p.*,pr.root_path,"
             "(SELECT COUNT(*) FROM agent_sessions s WHERE s.project_id=p.id AND s.archived=0) "
@@ -336,7 +374,8 @@ class StudioService:
             "(SELECT COUNT(*) FROM approval_requests a JOIN agent_sessions s ON s.id=a.session_id "
             "WHERE s.project_id=p.id AND a.status='pending') pending_approvals "
             "FROM projects p LEFT JOIN project_roots pr ON pr.project_id=p.id AND pr.is_primary=1 "
-            f"{where} ORDER BY p.pinned DESC,COALESCE(p.last_opened_at,p.updated_at) DESC"
+            f"{where} ORDER BY p.pinned DESC,COALESCE(p.last_opened_at,p.updated_at) DESC",
+            (CHAT_PROJECT_ID,),
         )
         return [self._project_summary(row) for row in rows]
 
@@ -556,6 +595,8 @@ class StudioService:
     def list_project_files(
         self, project_id: str, relative_path: str = ".", max_items: int = 500
     ) -> dict[str, Any]:
+        if project_id == CHAT_PROJECT_ID:
+            raise ValueError("chat_session_has_no_project_files")
         root = self._primary_root(project_id)
         target = (root / relative_path).resolve()
         if not target.is_relative_to(root):
@@ -596,6 +637,8 @@ class StudioService:
     def search_project_files(
         self, project_id: str, query: str, max_items: int = 120
     ) -> dict[str, Any]:
+        if project_id == CHAT_PROJECT_ID:
+            raise ValueError("chat_session_has_no_project_files")
         root = self._primary_root(project_id)
         needle = query.strip().casefold()
         if len(needle) < 2:
@@ -679,10 +722,12 @@ class StudioService:
 
     # Sessions
     def _session_summary(self, row: dict[str, Any]) -> dict[str, Any]:
+        session_mode = str(row.get("session_mode") or "workspace")
         return {
             "id": row["id"],
-            "project_id": row["project_id"],
-            "project_name": row.get("project_name"),
+            "project_id": None if session_mode == "chat" else row["project_id"],
+            "project_name": "纯对话" if session_mode == "chat" else row.get("project_name"),
+            "session_mode": session_mode,
             "title": row["title"],
             "runner_id": row["runner_id"],
             "runner_name": row.get("runner_name"),
@@ -827,10 +872,15 @@ class StudioService:
         self.database.insert_audit("runtime_profile.deleted", "runtime_profile", profile_id)
 
     def create_session(self, value: SessionCreate) -> dict[str, Any]:
-        project = self.get_project(value.project_id)
+        session_mode = value.session_mode
+        if session_mode == "workspace" and not value.project_id:
+            raise ValueError("workspace_session_requires_project")
+        project_id = CHAT_PROJECT_ID if session_mode == "chat" else str(value.project_id)
+        project = self.get_project(project_id)
         if project["archived"]:
             raise ValueError("project_archived")
-        profile = self.get_runtime_profile(value.profile_id) if value.profile_id else None
+        profile_id = None if session_mode == "chat" else value.profile_id
+        profile = self.get_runtime_profile(profile_id) if profile_id else None
         runner_id = value.runner_id or (profile or {}).get("runner_id") or project.get("default_runner_id")
         model_id = value.model_id or (profile or {}).get("model_id") or project.get("default_model_id")
         if not runner_id:
@@ -839,12 +889,20 @@ class StudioService:
             model_id = self._default_entity_id("models")
         self._enabled_entity("agent_runners", runner_id)
         self._enabled_entity("models", model_id)
-        skill_pack_id = value.skill_pack_id or (profile or {}).get("skill_pack_id")
+        skill_pack_id = None if session_mode == "chat" else (
+            value.skill_pack_id or (profile or {}).get("skill_pack_id")
+        )
         skill_pack = self.get_skill_pack(skill_pack_id) if skill_pack_id else None
-        root = self._primary_root(value.project_id)
         session_id = new_id()
+        root = self._primary_root(project_id)
+        if session_mode == "chat":
+            root = (root / session_id).resolve()
+            expected = (self.settings.data_dir / "chat-sessions").resolve()
+            if not root.is_relative_to(expected):
+                raise RuntimeError("invalid_chat_session_workspace")
+            root.mkdir(parents=True, exist_ok=False)
         now = utc_now()
-        permission_profile = (
+        permission_profile = "readonly" if session_mode == "chat" else (
             value.permission_profile
             or (profile or {}).get("permission_profile")
             or (skill_pack or {}).get("permission_profile")
@@ -853,18 +911,19 @@ class StudioService:
         reasoning_effort = value.reasoning_effort or (profile or {}).get("reasoning_effort") or "medium"
         with self.database.transaction() as connection:
             connection.execute(
-                "INSERT INTO agent_sessions(id,project_id,title,runner_id,model_id,status,"
+                "INSERT INTO agent_sessions(id,project_id,session_mode,title,runner_id,model_id,status,"
                 "permission_profile,reasoning_effort,profile_id,skill_pack_id,workspace_path,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,'idle',?,?,?,?,?,?,?)",
+                "VALUES (?,?,?,?,?,?,'idle',?,?,?,?,?,?,?)",
                 (
                     session_id,
-                    value.project_id,
+                    project_id,
+                    session_mode,
                     value.title.strip(),
                     runner_id,
                     model_id,
                     permission_profile,
                     reasoning_effort,
-                    value.profile_id,
+                    profile_id,
                     skill_pack_id,
                     str(root),
                     now,
@@ -873,7 +932,7 @@ class StudioService:
             )
             connection.execute(
                 "UPDATE projects SET last_opened_at=?,updated_at=? WHERE id=?",
-                (now, now, value.project_id),
+                (now, now, project_id),
             )
         self.append_event(
             session_id,
@@ -884,6 +943,7 @@ class StudioService:
                 "permission_profile": permission_profile,
                 "reasoning_effort": reasoning_effort,
                 "profile_id": value.profile_id,
+                "session_mode": session_mode,
             },
         )
         self.database.insert_audit("session.created", "session", session_id)
@@ -971,6 +1031,12 @@ class StudioService:
             "archived",
         }
         values = {key: value for key, value in changes.items() if key in allowed}
+        if session.get("session_mode") == "chat":
+            if any(key in values for key in ("profile_id", "skill_pack_id")):
+                raise ValueError("chat_session_does_not_support_project_profiles")
+            if "permission_profile" in values and values["permission_profile"] != "readonly":
+                raise ValueError("chat_session_is_always_readonly")
+            values["permission_profile"] = "readonly"
         if "profile_id" in values and values["profile_id"]:
             profile = self.get_runtime_profile(str(values["profile_id"]))
             profile_values = {
@@ -1029,7 +1095,8 @@ class StudioService:
             raise KeyError("session_message_not_found")
         created = self.create_session(
             SessionCreate(
-                project_id=source["project_id"],
+                project_id=source["project_id"] if source.get("session_mode") != "chat" else None,
+                session_mode=source.get("session_mode") or "workspace",
                 profile_id=source.get("profile_id"),
                 runner_id=source["runner_id"],
                 model_id=source["model_id"],
@@ -3123,7 +3190,7 @@ class StudioService:
     def dashboard(self) -> dict[str, Any]:
         row = self.database.fetch_one(
             "SELECT "
-            "(SELECT COUNT(*) FROM projects WHERE archived=0) project_count,"
+            "(SELECT COUNT(*) FROM projects WHERE archived=0 AND id<>?) project_count,"
             "(SELECT COUNT(*) FROM agent_sessions WHERE archived=0) session_count,"
             "(SELECT COUNT(*) FROM agent_sessions WHERE status IN "
             "('queued','preparing','running','waiting_approval')) active_sessions,"
@@ -3133,6 +3200,7 @@ class StudioService:
             "open_tasks,"
             "(SELECT COALESCE(SUM(tokens_input+tokens_output),0) FROM agent_sessions) total_tokens,"
             "(SELECT COALESCE(SUM(cost_usd),0) FROM agent_sessions) total_cost"
+            ,(CHAT_PROJECT_ID,)
         ) or {}
         active_rows = self._session_query(
             "WHERE s.archived=0 AND s.status IN "

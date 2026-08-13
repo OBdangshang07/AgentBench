@@ -25,7 +25,8 @@ export type ModelSource =
   | "aider-cli"
   | "kimi-code"
   | "qoder-cli"
-  | "cursor-cli";
+  | "cursor-cli"
+  | "deepseek-harness";
 
 export interface DiscoveredModel {
   id: string;
@@ -80,6 +81,7 @@ export interface Runner {
     | "kimi_code_cli"
     | "qoder_cli"
     | "cursor_cli"
+    | "deepseek_harness"
     | "command";
   executable?: string;
   args: string[];

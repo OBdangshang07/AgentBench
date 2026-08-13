@@ -9,7 +9,7 @@ function json(value: unknown) {
 function installApiMock() {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = String(input);
-    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.0" });
+    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.1" });
     if (url.includes("/leaderboard/exams/math-2025")) return json([]);
     if (url.includes("/leaderboard/exams/ncre")) return json([]);
     if (url.includes("/leaderboard?lane=")) return json([]);

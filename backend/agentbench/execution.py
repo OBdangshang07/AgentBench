@@ -316,6 +316,13 @@ CLI_INSTALL_RECIPES: dict[str, dict[str, Any]] = {
         "command": "irm 'https://cursor.com/install?win32=true' | iex",
         "source": "Cursor 官方 Windows 安装器 · cursor.com/install",
     },
+    "deepseek_harness": {
+        "manager": "npm",
+        "manager_candidates": ["npm.cmd", "npm"],
+        "args": ["install", "-g", "@deepseek-ai/dsh"],
+        "command": "npm install -g @deepseek-ai/dsh",
+        "source": "npm 官方包 · @deepseek-ai/dsh（Developer Preview）",
+    },
 }
 
 MANUAL_INSTALL_GUIDANCE = {
@@ -332,6 +339,7 @@ INSTALL_COMMAND_BY_EXECUTABLE = {
     "kimi": CLI_INSTALL_RECIPES["kimi_code_cli"]["command"],
     "qoderclicn": CLI_INSTALL_RECIPES["qoder_cli"]["command"],
     "agent": CLI_INSTALL_RECIPES["cursor_cli"]["command"],
+    "dsh": CLI_INSTALL_RECIPES["deepseek_harness"]["command"],
 }
 
 

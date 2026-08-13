@@ -277,6 +277,7 @@ function MarkdownMessage({ content }: { content: string }) {
 }
 
 interface SessionForm {
+  session_mode: "workspace" | "chat";
   project_id: string;
   profile_id: string;
   title: string;
@@ -525,13 +526,14 @@ export default function AgentStudio() {
     sessionId ? `/sessions/${sessionId}?message_limit=${messageLimit}` : null,
     (current) => current && activeStatuses.has(current.status) ? 750 : 2_500,
   );
+  const isChat = detail?.session_mode === "chat";
   const [treePath, setTreePath] = useState(".");
-  const { data: tree } = useApi<ProjectTree>(detail ? `/projects/${detail.project_id}/files?path=${encodeURIComponent(treePath)}` : null, 4_000);
+  const { data: tree } = useApi<ProjectTree>(detail?.project_id && !isChat ? `/projects/${detail.project_id}/files?path=${encodeURIComponent(treePath)}` : null, 4_000);
   const [railMode, setRailMode] = useState<"sessions" | "files" | "search">("sessions");
   const [fileQuery, setFileQuery] = useState("");
   const normalizedFileQuery = fileQuery.trim();
   const { data: searchResult, loading: searchLoading, error: searchError } = useApi<ProjectFileSearch>(
-    detail && railMode === "search" && normalizedFileQuery.length >= 2
+    detail?.project_id && !isChat && railMode === "search" && normalizedFileQuery.length >= 2
       ? `/projects/${detail.project_id}/files/search?query=${encodeURIComponent(normalizedFileQuery)}&limit=120`
       : null,
   );
@@ -574,7 +576,7 @@ export default function AgentStudio() {
   const [approvalBusy, setApprovalBusy] = useState<string | null>(null);
   const [configBusy, setConfigBusy] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
-  const [sessionForm, setSessionForm] = useState<SessionForm>({ project_id: "", profile_id: "", title: "新 Agent 会话", runner_id: "", model_id: "", permission_profile: "workspace", reasoning_effort: "medium", skill_pack_id: "" });
+  const [sessionForm, setSessionForm] = useState<SessionForm>({ session_mode: "workspace", project_id: "", profile_id: "", title: "新 Agent 会话", runner_id: "", model_id: "", permission_profile: "workspace", reasoning_effort: "medium", skill_pack_id: "" });
   const [studioLayout, setStudioLayout] = useState<StudioLayoutState>(initialStudioLayout);
   const [followingLatest, setFollowingLatest] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -589,11 +591,12 @@ export default function AgentStudio() {
   const terminal = useMemo(() => terminals.find((item) => item.id === activeTerminalId) ?? terminals[0] ?? null, [activeTerminalId, terminals]);
   const terminalText = terminal?.text ?? "";
   const mentionQuery = useMemo(() => {
+    if (isChat) return null;
     const match = message.match(/(?:^|\s)@([^\s@]*)$/);
     return match ? match[1].replace(/^\[/, "").trim() : null;
-  }, [message]);
+  }, [isChat, message]);
   const { data: mentionResult, loading: mentionLoading } = useApi<ProjectFileSearch>(
-    detail && mentionQuery !== null && mentionQuery.length >= 2
+    detail?.project_id && !isChat && mentionQuery !== null && mentionQuery.length >= 2
       ? `/projects/${detail.project_id}/files/search?query=${encodeURIComponent(mentionQuery)}&limit=12`
       : null,
   );
@@ -637,7 +640,7 @@ export default function AgentStudio() {
   }, [sessionId]);
 
   useEffect(() => {
-    if (!sessionId) return;
+    if (!sessionId || isChat) return;
     let cancelled = false;
     void api<Array<{ id: string; title: string; shell: string; running: boolean; cursor: number; chunks: Array<{ data: string }> }>>(`/sessions/${sessionId}/terminals`)
       .then((values) => {
@@ -648,7 +651,7 @@ export default function AgentStudio() {
       })
       .catch(() => undefined);
     return () => { cancelled = true; };
-  }, [sessionId]);
+  }, [isChat, sessionId]);
 
   useEffect(() => {
     if (!sessionId) {
@@ -852,8 +855,8 @@ export default function AgentStudio() {
     [detail?.messages, queuedTurnIds],
   );
   const fileContextPaths = useMemo(
-    () => [...new Set([...(preview ? [preview.path] : []), ...contextFiles])],
-    [contextFiles, preview],
+    () => isChat ? [] : [...new Set([...(preview ? [preview.path] : []), ...contextFiles])],
+    [contextFiles, isChat, preview],
   );
   const visibleSessions = useMemo(() => {
     const needle = sessionQuery.trim().toLowerCase();
@@ -903,14 +906,14 @@ export default function AgentStudio() {
     const runner = runners?.find((item) => item.id === detail?.runner_id);
     const model = models?.find((item) => item.id === detail?.model_id);
     return [
-      { id: "project", label: "项目工作区", ok: Boolean(detail?.project_id && detail.workspace_path), detail: detail?.project_name ?? "尚未选择项目" },
+      { id: "project", label: isChat ? "纯对话隔离" : "项目工作区", ok: isChat || Boolean(detail?.project_id && detail.workspace_path), detail: isChat ? "不访问项目、终端或浏览器" : detail?.project_name ?? "尚未选择项目" },
       { id: "runner", label: "Agent Runtime", ok: Boolean(runner?.enabled && runner.capability.installed), detail: runner ? `${runner.name}${runner.capability.version ? ` · ${runner.capability.version}` : ""}` : "Agent 不可用" },
       { id: "model", label: "模型路由", ok: Boolean(model?.enabled), detail: model ? `${model.name} · ${model.provider}` : "模型不可用" },
       { id: "permission", label: "访问范围", ok: Boolean(detail?.permission_profile), detail: permissionLabels[detail?.permission_profile ?? "workspace"] },
       { id: "request", label: activeStatuses.has(detail?.status ?? "") ? "后续指令" : "当前指令", ok: Boolean(message.trim()), detail: message.trim() ? `${message.trim().length.toLocaleString()} 字符${activeStatuses.has(detail?.status ?? "") ? " · 将加入队列" : ""}` : "请输入任务要求" },
       { id: "context", label: "上下文", ok: true, detail: `${fileContextPaths.length} 个文件 · ${attachments.length} 个附件` },
     ];
-  }, [attachments.length, detail, fileContextPaths.length, message, models, runners]);
+  }, [attachments.length, detail, fileContextPaths.length, isChat, message, models, runners]);
   const composerReady = composerChecks.every((check) => check.ok);
   const liveUsage = useMemo(() => {
     if (!activeStatuses.has(detail?.status ?? "")) return { input: 0, output: 0, cost: 0 };
@@ -1032,12 +1035,13 @@ export default function AgentStudio() {
   function openCreate() {
     const project = projects?.find((item) => item.id === ux.selectedProjectId) ?? projects?.[0];
     setSessionForm({
+      session_mode: project ? "workspace" : "chat",
       project_id: project?.id ?? "",
       profile_id: "",
       title: project ? `${project.name} Agent 会话` : "新 Agent 会话",
       runner_id: project?.default_runner_id ?? runners?.find((item) => item.enabled)?.id ?? "",
       model_id: project?.default_model_id ?? models?.find((item) => item.enabled)?.id ?? "",
-      permission_profile: project?.permission_profile ?? "workspace",
+      permission_profile: project?.permission_profile ?? "readonly",
       reasoning_effort: "medium",
       skill_pack_id: "",
     });
@@ -1050,11 +1054,17 @@ export default function AgentStudio() {
     try {
       const created = await api<AgentSession>("/sessions", {
         method: "POST",
-        body: JSON.stringify({ ...sessionForm, profile_id: sessionForm.profile_id || null, skill_pack_id: sessionForm.skill_pack_id || null }),
+        body: JSON.stringify({
+          ...sessionForm,
+          project_id: sessionForm.session_mode === "chat" ? null : sessionForm.project_id,
+          profile_id: sessionForm.session_mode === "chat" ? null : sessionForm.profile_id || null,
+          skill_pack_id: sessionForm.session_mode === "chat" ? null : sessionForm.skill_pack_id || null,
+          permission_profile: sessionForm.session_mode === "chat" ? "readonly" : sessionForm.permission_profile,
+        }),
       });
       setCreateOpen(false);
       await refreshSessions();
-      ux.notify({ kind: "success", title: "会话已创建", message: `已在 ${created.project_name} 中准备好 Agent 工作区。` });
+      ux.notify({ kind: "success", title: "会话已创建", message: created.session_mode === "chat" ? "纯对话已在应用隔离空间中准备好。" : `已在 ${created.project_name} 中准备好 Agent 工作区。` });
       navigate(`/studio/${created.id}`);
     } catch (value) {
       setActionError(value instanceof Error ? value.message : "无法创建会话");
@@ -1556,24 +1566,27 @@ export default function AgentStudio() {
     return (
       <div className="v4-studio-empty">
         <span><Sparkles size={28} /></span><h1>Agent Studio</h1><p>选择一个已授权项目，建立可持续、多轮且可审计的 Agent 会话。</p>
-        {projects?.length ? <button className="v4-button primary" type="button" onClick={openCreate}><Plus size={16} />新建 Agent 会话</button> : <Link className="v4-button primary" to="/projects"><FolderOpen size={16} />先添加项目</Link>}
+        <button className="v4-button primary" type="button" onClick={openCreate}><Plus size={16} />新建 Agent 会话</button>
+        {!projects?.length && <Link className="v4-button secondary" to="/projects"><FolderOpen size={16} />添加项目工作区</Link>}
         {createOpen && renderCreateModal()}
       </div>
     );
   }
 
   function renderCreateModal() {
+    const chatMode = sessionForm.session_mode === "chat";
     return (
       <div className="v4-modal-backdrop" onMouseDown={() => setCreateOpen(false)}>
         <form className="v4-modal small" onSubmit={createSession} onMouseDown={(event) => event.stopPropagation()}>
-          <header><div><strong>新建 Agent 会话</strong><small>选择项目、Agent、模型和权限配置</small></div><button type="button" onClick={() => setCreateOpen(false)}><X size={18} /></button></header>
+          <header><div><strong>新建 Agent 会话</strong><small>{chatMode ? "无需工作区，只使用对话与附件" : "选择项目、Agent、模型和权限配置"}</small></div><button type="button" onClick={() => setCreateOpen(false)}><X size={18} /></button></header>
           <div className="v4-form-grid">
-            <label className="full"><span>项目</span><select required value={sessionForm.project_id} onChange={(event) => {
+            <div className="v5-session-mode full"><button className={!chatMode ? "active" : ""} type="button" onClick={() => setSessionForm((current) => ({ ...current, session_mode: "workspace", project_id: current.project_id || projects?.[0]?.id || "", permission_profile: projects?.[0]?.permission_profile ?? "workspace" }))}><FolderOpen size={17} /><span><strong>项目 Agent</strong><small>在授权工作区内使用文件、终端和浏览器</small></span></button><button className={chatMode ? "active" : ""} type="button" onClick={() => setSessionForm((current) => ({ ...current, session_mode: "chat", project_id: "", profile_id: "", skill_pack_id: "", permission_profile: "readonly", title: current.title.includes("Agent 会话") ? "新纯对话" : current.title }))}><MessageSquarePlus size={17} /><span><strong>纯对话</strong><small>不选择工作区，只保留 Agent、模型与附件</small></span></button></div>
+            {!chatMode && <label className="full"><span>项目</span><select required value={sessionForm.project_id} onChange={(event) => {
               const project = projects?.find((item) => item.id === event.target.value);
               setSessionForm({ ...sessionForm, project_id: event.target.value, runner_id: project?.default_runner_id ?? sessionForm.runner_id, model_id: project?.default_model_id ?? sessionForm.model_id, permission_profile: project?.permission_profile ?? sessionForm.permission_profile });
-            }}>{projects?.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
+            }}>{projects?.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>}
             <label className="full"><span>会话标题</span><input required value={sessionForm.title} onChange={(event) => setSessionForm({ ...sessionForm, title: event.target.value })} /></label>
-            <label className="full"><span>运行 Profile</span><select value={sessionForm.profile_id} onChange={(event) => {
+            {!chatMode && <label className="full"><span>运行 Profile</span><select value={sessionForm.profile_id} onChange={(event) => {
               const profile = runtimeProfiles?.find((item) => item.id === event.target.value);
               setSessionForm({
                 ...sessionForm,
@@ -1584,12 +1597,12 @@ export default function AgentStudio() {
                 reasoning_effort: profile?.reasoning_effort ?? sessionForm.reasoning_effort,
                 skill_pack_id: profile?.skill_pack_id ?? sessionForm.skill_pack_id,
               });
-            }}><option value="">自定义配置</option>{runtimeProfiles?.map((profile) => <option key={profile.id} value={profile.id}>{profile.name} · {profile.description}</option>)}</select><small>一键复用 Agent、模型、权限、思考强度、能力包与 MCP 工具组合</small></label>
+            }}><option value="">自定义配置</option>{runtimeProfiles?.map((profile) => <option key={profile.id} value={profile.id}>{profile.name} · {profile.description}</option>)}</select><small>一键复用 Agent、模型、权限、思考强度、能力包与 MCP 工具组合</small></label>}
             <label><span>Agent</span><select required value={sessionForm.runner_id} onChange={(event) => setSessionForm({ ...sessionForm, runner_id: event.target.value })}>{runners?.filter((runner) => runner.enabled).map((runner) => <option key={runner.id} value={runner.id}>{runner.name}</option>)}</select></label>
             <label><span>模型</span><select required value={sessionForm.model_id} onChange={(event) => setSessionForm({ ...sessionForm, model_id: event.target.value })}>{models?.filter((model) => model.enabled).map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>
-            <label><span>权限</span><select value={sessionForm.permission_profile} onChange={(event) => setSessionForm({ ...sessionForm, permission_profile: event.target.value as PermissionProfile })}><option value="readonly">只读</option><option value="workspace">工作区读写</option><option value="standard">标准开发</option><option value="full">完全访问</option></select></label>
+            <label><span>权限</span><select disabled={chatMode} value={chatMode ? "readonly" : sessionForm.permission_profile} onChange={(event) => setSessionForm({ ...sessionForm, permission_profile: event.target.value as PermissionProfile })}><option value="readonly">{chatMode ? "纯对话隔离" : "只读"}</option><option value="workspace">工作区读写</option><option value="standard">标准开发</option><option value="full">完全访问</option></select></label>
             <label><span>思考强度</span><select value={sessionForm.reasoning_effort} onChange={(event) => setSessionForm({ ...sessionForm, reasoning_effort: event.target.value as ReasoningEffort })}><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="max">最大</option></select></label>
-            <label className="full"><span>能力包</span><select value={sessionForm.skill_pack_id} onChange={(event) => setSessionForm({ ...sessionForm, skill_pack_id: event.target.value })}><option value="">不使用能力包</option>{skillPacks?.map((pack) => <option key={pack.id} value={pack.id}>{pack.name} · {pack.description}</option>)}</select></label>
+            {!chatMode && <label className="full"><span>能力包</span><select value={sessionForm.skill_pack_id} onChange={(event) => setSessionForm({ ...sessionForm, skill_pack_id: event.target.value })}><option value="">不使用能力包</option>{skillPacks?.map((pack) => <option key={pack.id} value={pack.id}>{pack.name} · {pack.description}</option>)}</select></label>}
           </div>
           {actionError && <div className="v4-error">{actionError}</div>}
           <footer><button className="v4-button secondary" type="button" onClick={() => setCreateOpen(false)}>取消</button><button className="v4-button primary" type="submit"><Sparkles size={16} />创建会话</button></footer>
@@ -1599,12 +1612,12 @@ export default function AgentStudio() {
   }
 
   return (
-    <div className={`v4-studio-workbench ${studioLayout.left ? "" : "left-collapsed"} ${studioLayout.right ? "" : "right-collapsed"} ${studioLayout.dock ? "" : "dock-collapsed"} ${studioLayout.dockExpanded ? "dock-expanded" : ""} ${resizing ? `resizing-${resizing}` : ""}`} style={{ "--studio-left": studioLayout.left ? `${studioLayout.leftWidth}px` : "0px", "--studio-right": studioLayout.right ? `${studioLayout.rightWidth}px` : "0px", "--studio-dock": !studioLayout.dock ? "45px" : studioLayout.dockExpanded ? "min(54vh, 540px)" : `${studioLayout.dockHeight}px` } as CSSProperties}>
+    <div className={`v4-studio-workbench ${isChat ? "chat-mode" : ""} ${studioLayout.left ? "" : "left-collapsed"} ${studioLayout.right && !isChat ? "" : "right-collapsed"} ${studioLayout.dock && !isChat ? "" : "dock-collapsed"} ${studioLayout.dockExpanded && !isChat ? "dock-expanded" : ""} ${resizing ? `resizing-${resizing}` : ""}`} style={{ "--studio-left": studioLayout.left ? `${studioLayout.leftWidth}px` : "0px", "--studio-right": studioLayout.right && !isChat ? `${studioLayout.rightWidth}px` : "0px", "--studio-dock": !studioLayout.dock || isChat ? "45px" : studioLayout.dockExpanded ? "min(54vh, 540px)" : `${studioLayout.dockHeight}px` } as CSSProperties}>
       {draggingFiles && <div className="v5-studio-dropzone"><Upload size={28} /><strong>放下即可附加到当前会话</strong><span>图片和文件最多 10 个，单个最大 50 MB</span></div>}
       <aside className="v4-studio-rail">
-        <header>{detail ? <><span className="v4-project-logo">{detail.project_name.slice(0, 2).toUpperCase()}</span><div><strong>{detail.project_name}</strong><small title={detail.workspace_path}><GitBranch size={11} /> {detail.workspace_path}</small></div></> : <span>加载项目…</span>}</header>
+        <header>{detail ? <><span className="v4-project-logo">{detail.project_name.slice(0, 2).toUpperCase()}</span><div><strong>{detail.project_name}</strong><small title={isChat ? "无工作区" : detail.workspace_path}>{isChat ? <MessageSquarePlus size={11} /> : <GitBranch size={11} />} {isChat ? "无工作区 · 隔离对话" : detail.workspace_path}</small></div></> : <span>加载会话…</span>}</header>
         <button className="v5-new-session-primary" type="button" onClick={openCreate}><Plus size={15} />新建会话</button>
-        <div className="v4-rail-tabs v5-studio-nav-tabs"><button className={railMode === "sessions" ? "active" : ""} type="button" onClick={() => setRailMode("sessions")}><Bot size={13} />会话</button><button className={railMode === "files" ? "active" : ""} type="button" onClick={() => setRailMode("files")}><Folder size={13} />文件</button><button className={railMode === "search" ? "active" : ""} type="button" onClick={() => setRailMode("search")}><Search size={13} />搜索</button></div>
+        <div className="v4-rail-tabs v5-studio-nav-tabs"><button className={railMode === "sessions" ? "active" : ""} type="button" onClick={() => setRailMode("sessions")}><Bot size={13} />会话</button>{!isChat && <><button className={railMode === "files" ? "active" : ""} type="button" onClick={() => setRailMode("files")}><Folder size={13} />文件</button><button className={railMode === "search" ? "active" : ""} type="button" onClick={() => setRailMode("search")}><Search size={13} />搜索</button></>}</div>
         {railMode === "sessions" ? (
           <section className="v4-session-list v5-session-list-primary"><header><span>RECENT SESSIONS</span><button type="button" aria-label="新建 Agent 会话" onClick={openCreate}><Plus size={14} /></button></header><label className="v5-session-search"><Search size={13} /><input aria-label="搜索会话" value={sessionQuery} onChange={(event) => setSessionQuery(event.target.value)} placeholder="搜索会话…" />{sessionQuery && <button type="button" aria-label="清除会话搜索" onClick={() => setSessionQuery("")}><X size={12} /></button>}</label>{visibleSessions.slice(0, 40).map((session) => <button key={session.id} className={session.id === sessionId ? "active" : ""} type="button" onClick={() => navigate(`/studio/${session.id}`)}><i className={activeStatuses.has(session.status) ? "live" : ""} /><span><strong>{session.title}</strong><small>{session.project_name} · {session.runner_name}</small></span><em>{statusLabels[session.status] ?? session.status}</em></button>)}{sessionQuery && !visibleSessions.length && <div className="v5-session-none">没有匹配会话</div>}</section>
         ) : railMode === "files" ? (
@@ -1634,15 +1647,15 @@ export default function AgentStudio() {
       <section className="v4-conversation">
         <header className="v4-conversation-head">
           <button className={`v4-pane-toggle with-label ${studioLayout.left ? "active" : ""}`} type="button" aria-label={studioLayout.left ? "收起导航侧栏" : "展开导航侧栏"} title={`${studioLayout.left ? "收起" : "展开"}导航侧栏 · Ctrl B`} onClick={() => setStudioLayout((current) => ({ ...current, left: !current.left }))}>{studioLayout.left ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}<span>导航</span></button>
-          {editingTitle ? <form className="v5-session-title-edit" onSubmit={renameSession}><input autoFocus aria-label="会话名称" value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} /><button type="submit"><Check size={14} /></button><button type="button" onClick={() => setEditingTitle(false)}><X size={14} /></button></form> : <div className="v4-conversation-title"><strong>{detail?.title ?? "正在加载会话"}</strong><small title={detail?.workspace_path}>SESSION / {sessionId?.slice(0, 8)} · {detail?.workspace_path}</small></div>}
+          {editingTitle ? <form className="v5-session-title-edit" onSubmit={renameSession}><input autoFocus aria-label="会话名称" value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} /><button type="submit"><Check size={14} /></button><button type="button" onClick={() => setEditingTitle(false)}><X size={14} /></button></form> : <div className="v4-conversation-title"><strong>{detail?.title ?? "正在加载会话"}</strong><small title={isChat ? "纯对话 · 无工作区" : detail?.workspace_path}>SESSION / {sessionId?.slice(0, 8)} · {isChat ? "纯对话 · 无工作区" : detail?.workspace_path}</small></div>}
           <span className={`v4-status ${activeStatuses.has(detail?.status ?? "") ? "green" : ""}`}><i />{detail ? statusLabels[detail.status] ?? detail.status : "加载中"}</span>
           <button className="v5-runtime-summary" type="button" aria-label="打开运行配置" aria-expanded={runtimeConfigOpen} onClick={() => setRuntimeConfigOpen((current) => !current)}><Bot size={14} /><span><strong>{detail?.runner_name ?? "选择 Agent"}</strong><small>{detail?.model_name ?? "选择模型"} · {effortLabels[detail?.reasoning_effort ?? "medium"]}思考 · {permissionLabels[detail?.permission_profile ?? "workspace"]}</small></span><ChevronDown size={13} /></button>
           <button className="v4-pane-toggle" type="button" onClick={() => void refresh()} title="刷新会话"><RefreshCw className={loading ? "spin" : ""} size={16} /></button>
           <button className="v4-pane-toggle" type="button" disabled={!detail} onClick={() => { setTitleDraft(detail?.title ?? ""); setEditingTitle(true); }} title="重命名会话"><Edit3 size={15} /></button>
-          <button className={`v4-pane-toggle with-label ${studioLayout.right ? "active" : ""}`} type="button" aria-label={studioLayout.right ? "关闭工具工作台" : "打开工具工作台"} title={`${studioLayout.right ? "关闭" : "打开"}工具工作台`} onClick={() => setStudioLayout((current) => ({ ...current, right: !current.right, dock: !current.right }))}>{studioLayout.right ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}<span>工具</span></button>
+          {!isChat && <button className={`v4-pane-toggle with-label ${studioLayout.right ? "active" : ""}`} type="button" aria-label={studioLayout.right ? "关闭工具工作台" : "打开工具工作台"} title={`${studioLayout.right ? "关闭" : "打开"}工具工作台`} onClick={() => setStudioLayout((current) => ({ ...current, right: !current.right, dock: !current.right }))}>{studioLayout.right ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}<span>工具</span></button>}
         </header>
 
-        {runtimeConfigOpen && <section className="v5-runtime-config-popover"><header><div><strong>运行配置</strong><small>当前会话立即生效；运行中限制切换 Agent 与模型</small></div><button type="button" aria-label="关闭运行配置" onClick={() => setRuntimeConfigOpen(false)}><X size={14} /></button></header><div className="v5-runtime-primary"><StudioPicker ariaLabel="选择 Agent" caption="AGENT" icon={<Bot size={15} />} disabled={activeStatuses.has(detail?.status ?? "")} value={detail?.runner_id ?? ""} options={runnerOptions} onChange={(runnerId) => void updateSession({ runner_id: runnerId })} /><StudioPicker ariaLabel="选择模型" caption="MODEL" icon={<Cpu size={15} />} disabled={activeStatuses.has(detail?.status ?? "")} value={detail?.model_id ?? ""} options={modelOptions} onChange={(modelId) => void updateSession({ model_id: modelId })} /></div><div className="v5-runtime-secondary"><ComposerMenu ariaLabel="会话访问权限" label="权限" icon={<ShieldCheck size={14} />} value={detail?.permission_profile ?? "workspace"} options={permissionOptions} disabled={configBusy} onChange={(value) => void updateRuntimeSetting({ permission_profile: value as PermissionProfile })} /><ComposerMenu ariaLabel="思考强度" label="思考" icon={<Brain size={14} />} value={detail?.reasoning_effort ?? "medium"} options={effortOptions} disabled={configBusy} onChange={(value) => void updateRuntimeSetting({ reasoning_effort: value as ReasoningEffort })} /><ComposerMenu ariaLabel="会话能力包" label="能力" icon={<Sparkles size={14} />} value={detail?.skill_pack_id ?? ""} options={skillOptions} disabled={configBusy || activeStatuses.has(detail?.status ?? "")} onChange={(value) => void updateRuntimeSetting({ skill_pack_id: value || null })} /><ComposerMenu ariaLabel="运行 Profile" label="Profile" icon={<Gauge size={14} />} value={detail?.profile_id ?? ""} options={profileOptions} disabled={configBusy || activeStatuses.has(detail?.status ?? "")} onChange={(value) => void updateRuntimeSetting({ profile_id: value || null })} /></div><footer><span><Gauge size={13} />{quotaTokens.toLocaleString()} Tokens · ${quotaCost.toFixed(3)}</span><span><Clock3 size={13} />{duration(detail?.duration_ms ?? 0)}</span><span><FileDiff size={13} />{detail?.file_changes.length ?? 0} 个变更</span></footer></section>}
+        {runtimeConfigOpen && <section className="v5-runtime-config-popover"><header><div><strong>运行配置</strong><small>{isChat ? "纯对话固定隔离权限；可切换 Agent、模型与思考强度" : "当前会话立即生效；运行中限制切换 Agent 与模型"}</small></div><button type="button" aria-label="关闭运行配置" onClick={() => setRuntimeConfigOpen(false)}><X size={14} /></button></header><div className="v5-runtime-primary"><StudioPicker ariaLabel="选择 Agent" caption="AGENT" icon={<Bot size={15} />} disabled={activeStatuses.has(detail?.status ?? "")} value={detail?.runner_id ?? ""} options={runnerOptions} onChange={(runnerId) => void updateSession({ runner_id: runnerId })} /><StudioPicker ariaLabel="选择模型" caption="MODEL" icon={<Cpu size={15} />} disabled={activeStatuses.has(detail?.status ?? "")} value={detail?.model_id ?? ""} options={modelOptions} onChange={(modelId) => void updateSession({ model_id: modelId })} /></div><div className="v5-runtime-secondary"><ComposerMenu ariaLabel="会话访问权限" label="权限" icon={<ShieldCheck size={14} />} value={detail?.permission_profile ?? "workspace"} options={permissionOptions} disabled={configBusy || isChat} onChange={(value) => void updateRuntimeSetting({ permission_profile: value as PermissionProfile })} /><ComposerMenu ariaLabel="思考强度" label="思考" icon={<Brain size={14} />} value={detail?.reasoning_effort ?? "medium"} options={effortOptions} disabled={configBusy} onChange={(value) => void updateRuntimeSetting({ reasoning_effort: value as ReasoningEffort })} />{!isChat && <><ComposerMenu ariaLabel="会话能力包" label="能力" icon={<Sparkles size={14} />} value={detail?.skill_pack_id ?? ""} options={skillOptions} disabled={configBusy || activeStatuses.has(detail?.status ?? "")} onChange={(value) => void updateRuntimeSetting({ skill_pack_id: value || null })} /><ComposerMenu ariaLabel="运行 Profile" label="Profile" icon={<Gauge size={14} />} value={detail?.profile_id ?? ""} options={profileOptions} disabled={configBusy || activeStatuses.has(detail?.status ?? "")} onChange={(value) => void updateRuntimeSetting({ profile_id: value || null })} /></>}</div><footer><span><Gauge size={13} />{quotaTokens.toLocaleString()} Tokens · ${quotaCost.toFixed(3)}</span><span><Clock3 size={13} />{duration(detail?.duration_ms ?? 0)}</span>{!isChat && <span><FileDiff size={13} />{detail?.file_changes.length ?? 0} 个变更</span>}</footer></section>}
 
         <div className="v4-conversation-scroll" ref={scrollRef} onScroll={handleConversationScroll}>
           {loading && <div className="v4-empty compact"><RefreshCw className="spin" size={22} /><strong>正在恢复会话上下文</strong></div>}
@@ -1706,8 +1719,8 @@ export default function AgentStudio() {
           {completedTurn && !activeStatuses.has(detail?.status ?? "") && (
             <section className="v5-completion-summary">
               <header><span><CheckCircle2 size={18} /></span><div><strong>本轮任务已完成</strong><small>{completedTurn.final_answer ? "Agent 已提交最终结果，运行证据已保存" : "运行结束，完整过程已保存"}</small></div></header>
-              <dl><div><dt>文件变更</dt><dd>{detail?.file_changes.length ?? 0}</dd></div><div><dt>完成用时</dt><dd>{duration(completedTurn.duration_ms || detail?.duration_ms || 0)}</dd></div><div><dt>Token</dt><dd>{(completedTurn.tokens_input + completedTurn.tokens_output || quotaTokens).toLocaleString()}</dd></div><div><dt>费用</dt><dd>${(completedTurn.cost_usd || detail?.cost_usd || 0).toFixed(3)}</dd></div></dl>
-              <footer>{detail?.file_changes.length ? <button type="button" onClick={() => { setDock("changes"); setStudioLayout((current) => ({ ...current, dock: true, right: true })); }}><FileDiff size={14} />查看变更</button> : null}<button type="button" onClick={() => scrollRef.current?.parentElement?.querySelector<HTMLTextAreaElement>(".v4-composer textarea")?.focus()}><MessageSquarePlus size={14} />继续修改</button><button type="button" onClick={exportSession}><Download size={14} />导出记录</button></footer>
+              <dl>{!isChat && <div><dt>文件变更</dt><dd>{detail?.file_changes.length ?? 0}</dd></div>}<div><dt>完成用时</dt><dd>{duration(completedTurn.duration_ms || detail?.duration_ms || 0)}</dd></div><div><dt>Token</dt><dd>{(completedTurn.tokens_input + completedTurn.tokens_output || quotaTokens).toLocaleString()}</dd></div><div><dt>费用</dt><dd>${(completedTurn.cost_usd || detail?.cost_usd || 0).toFixed(3)}</dd></div></dl>
+              <footer>{!isChat && detail?.file_changes.length ? <button type="button" onClick={() => { setDock("changes"); setStudioLayout((current) => ({ ...current, dock: true, right: true })); }}><FileDiff size={14} />查看变更</button> : null}<button type="button" onClick={() => scrollRef.current?.parentElement?.querySelector<HTMLTextAreaElement>(".v4-composer textarea")?.focus()}><MessageSquarePlus size={14} />{isChat ? "继续对话" : "继续修改"}</button><button type="button" onClick={exportSession}><Download size={14} />导出记录</button></footer>
             </section>
           )}
           {error && <div className="v4-error">{error}</div>}
@@ -1731,7 +1744,7 @@ export default function AgentStudio() {
                 event.currentTarget.form?.requestSubmit();
               }
             }}
-            placeholder={activeStatuses.has(detail?.status ?? "") ? "输入后续要求并按 Enter 加入队列；输入 @ 可添加项目文件" : "继续告诉 Agent 要做什么… 输入 @ 添加文件，Enter 发送"}
+            placeholder={isChat ? "和 Agent 对话… Enter 发送，可通过附件按钮添加图片或文件" : activeStatuses.has(detail?.status ?? "") ? "输入后续要求并按 Enter 加入队列；输入 @ 可添加项目文件" : "继续告诉 Agent 要做什么… 输入 @ 添加文件，Enter 发送"}
           />
           {composerInspectorOpen && <section className="v5-composer-inspector"><header><div><strong>发送前检查</strong><small>{composerReady ? "运行条件完整" : "还有需要处理的项目"}</small></div><button type="button" aria-label="关闭发送前检查" onClick={() => setComposerInspectorOpen(false)}><X size={13} /></button></header><div>{composerChecks.map((check) => <article className={check.ok ? "ok" : "warning"} key={check.id}>{check.ok ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}<span><strong>{check.label}</strong><small>{check.detail}</small></span></article>)}</div></section>}
           <footer className="v4-composer-toolbar">
@@ -1744,9 +1757,9 @@ export default function AgentStudio() {
         </form>
       </section>
 
-      {studioLayout.right && <div className="v5-studio-resizer right" role="separator" aria-label="调整工具工作台宽度" aria-orientation="vertical" tabIndex={0} onPointerDown={(event) => beginResize("right", event)} onKeyDown={(event) => resizeWithKeyboard("right", event.key)} />}
+      {studioLayout.right && !isChat && <div className="v5-studio-resizer right" role="separator" aria-label="调整工具工作台宽度" aria-orientation="vertical" tabIndex={0} onPointerDown={(event) => beginResize("right", event)} onKeyDown={(event) => resizeWithKeyboard("right", event.key)} />}
 
-      <section className="v4-studio-dock">
+      {!isChat && <section className="v4-studio-dock">
         <nav>
           <button type="button" className={studioLayout.dock && dock === "activity" ? "active" : ""} onClick={() => { setDock("activity"); setStudioLayout((current) => ({ ...current, dock: true, right: true })); }}><Activity size={14} />活动详情 <b>{processEvents.length}</b></button>
           <button type="button" className={studioLayout.dock && dock === "terminal" ? "active" : ""} onClick={openTerminalPanel}><TerminalSquare size={14} />交互终端 <b>{terminals.length || ""}</b><i className={terminals.some((item) => item.running) ? "live" : ""} /></button>
@@ -1762,7 +1775,7 @@ export default function AgentStudio() {
         {studioLayout.dock && dock === "browser" && <div className="v5-studio-browser"><nav className="v5-browser-tabs">{browserStatus?.pages.map((page) => <div className={page.id === browserPageId ? "active" : ""} key={page.id}><button type="button" onClick={() => void switchBrowserPage(page.id)}><Globe2 size={11} /><span>{page.title || "新标签"}</span></button><button type="button" aria-label={`关闭浏览器标签 ${page.title}`} onClick={() => void closeBrowserPage(page.id)}><X size={11} /></button></div>)}<button className="new" type="button" title="新建浏览器标签" disabled={browserBusy} onClick={() => void createBrowserPage()}><Plus size={13} /></button><span>VISIBLE BROWSER · 可随时接管</span></nav><form onSubmit={navigateBrowser}><Globe2 size={14} /><input aria-label="浏览器地址" value={browserUrl} onChange={(event) => setBrowserUrl(event.target.value)} placeholder="https://example.com" /><button type="submit" disabled={browserBusy}>{browserBusy ? "加载中…" : "访问"}</button><button type="button" disabled={!browserPageId || browserBusy} onClick={() => void captureBrowser()}><RefreshCw size={13} />刷新</button><span><i className={browserStatus?.running ? "live" : ""} />{browserStatus?.running ? "可接管" : "未启动"}</span></form><div><section className="v5-studio-browser-view">{browserImage ? <img src={browserImage} alt="可见浏览器当前截图" /> : <div><Globe2 size={25} /><strong>启动可见浏览器</strong><small>浏览器会在独立窗口打开，你可以随时直接接管。</small><button type="button" onClick={() => void openBrowserDock()}>启动浏览器</button></div>}</section><section className="v5-studio-browser-controls"><header><div><strong>{browserSnapshot?.title || "页面控件"}</strong><small>{browserSnapshot?.url || "选择页面元素即可操作"}</small></div><button type="button" disabled={!browserPageId} onClick={() => void captureBrowser()}><Camera size={13} /></button></header><div className="fields"><input value={browserValue} onChange={(event) => setBrowserValue(event.target.value)} placeholder="为输入框准备填写内容" /><button type="button" disabled={!browserSelector || browserBusy} onClick={() => void interactBrowser("fill")}>填写</button><button type="button" disabled={!browserSelector || browserBusy} onClick={() => void interactBrowser("click")}>点击</button></div><div className="controls">{browserSnapshot?.controls.slice(0, 100).map((control) => <button className={browserSelector === control.selector ? "active" : ""} type="button" disabled={control.disabled} key={`${control.index}-${control.selector}`} onClick={() => setBrowserSelector(control.selector || "")}><b>{control.index + 1}</b><span><strong>{control.text || control.tag}</strong><small>{control.tag}{control.type ? ` · ${control.type}` : ""}</small></span></button>)}{browserSnapshot && !browserSnapshot.controls.length && <p>页面没有可操作控件。</p>}</div></section></div></div>}
         {studioLayout.dock && dock === "file" && <pre className="v4-file-preview">{preview ? preview.content : "从左侧项目树选择一个 UTF-8 文本文件。"}</pre>}
         {studioLayout.dock && dock === "changes" && <div className="v4-change-review"><div className="v4-change-list">{detail?.file_changes.map((change) => <button className={change.id === changePreview?.id ? "active" : ""} type="button" key={change.id} onClick={() => void openChange(change)}><span className={change.change_type}>{change.change_type.slice(0, 1).toUpperCase()}</span><code>{change.path}</code><small>{change.status} · {change.size_delta >= 0 ? "+" : ""}{change.size_delta} B</small></button>)}{!detail?.file_changes.length && <span>本会话尚未修改文件。</span>}</div>{changePreview && <section className="v4-diff-review"><header><strong>{changePreview.path}</strong><span>{changePreview.status}</span><div><button type="button" onClick={() => void reviewChange("reject")} disabled={!changePreview.can_restore || changePreview.status !== "observed"}>拒绝并还原</button><button type="button" onClick={() => void reviewChange("apply_content")} disabled={changePreview.status !== "observed"}>应用编辑内容</button><button className="accept" type="button" onClick={() => void reviewChange("accept")} disabled={changePreview.status !== "observed"}>接受变更</button></div></header><div><pre>{changePreview.diff || "此文件没有可显示的文本 Diff。"}</pre><textarea aria-label="编辑后的文件内容" value={changeEdit} onChange={(event) => setChangeEdit(event.target.value)} /></div></section>}</div>}
-      </section>
+      </section>}
       {createOpen && renderCreateModal()}
     </div>
   );

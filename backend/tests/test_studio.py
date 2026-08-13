@@ -29,6 +29,7 @@ from agentbench.schemas import (
     RuntimeProfileCreate,
     SessionAttachmentImport,
     SessionCreate,
+    SessionForkCreate,
     SessionTurnCreate,
     SkillPackCreate,
     SkillPackUpdate,
@@ -2189,5 +2190,45 @@ def test_mcp_health_and_tool_call_use_real_json_rpc_stdio(settings, tmp_path) ->
         assert updated["enabled"] is False
         service.studio.delete_mcp_server(mcp["id"])
         assert service.studio.list_mcp_servers() == []
+    finally:
+        service.close()
+
+
+def test_chat_session_requires_no_project_and_stays_isolated(settings) -> None:
+    service = EvaluationService(settings)
+    try:
+        session = service.studio.create_session(
+            SessionCreate(session_mode="chat", title="Pure conversation")
+        )
+
+        assert session["session_mode"] == "chat"
+        assert session["project_id"] is None
+        assert session["project_name"] == "纯对话"
+        assert session["permission_profile"] == "readonly"
+        assert Path(session["workspace_path"]).is_relative_to(
+            (settings.data_dir / "chat-sessions").resolve()
+        )
+        assert service._studio_session_tools(session) == []
+        assert all(project["id"] != "__agentbench_chat__" for project in service.studio.list_projects())
+        assert service.studio.dashboard()["project_count"] == 0
+
+        fork = service.studio.fork_session(session["id"], SessionForkCreate())
+        assert fork["session_mode"] == "chat"
+        assert fork["project_id"] is None
+        assert fork["permission_profile"] == "readonly"
+
+        with pytest.raises(ValueError, match="chat_session_is_always_readonly"):
+            service.studio.update_session(session["id"], {"permission_profile": "full"})
+        with pytest.raises(ValueError, match="chat_session_has_no_terminal"):
+            service.start_terminal(session["id"], TerminalCreate())
+    finally:
+        service.close()
+
+
+def test_workspace_session_still_requires_project(settings) -> None:
+    service = EvaluationService(settings)
+    try:
+        with pytest.raises(ValueError, match="workspace_session_requires_project"):
+            service.studio.create_session(SessionCreate(title="Missing project"))
     finally:
         service.close()

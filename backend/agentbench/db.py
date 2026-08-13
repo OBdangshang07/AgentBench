@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 
 def utc_now() -> str:
@@ -299,6 +299,7 @@ CREATE TABLE IF NOT EXISTS project_roots (
 CREATE TABLE IF NOT EXISTS agent_sessions (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    session_mode TEXT NOT NULL DEFAULT 'workspace',
     title TEXT NOT NULL,
     runner_id TEXT NOT NULL REFERENCES agent_runners(id),
     model_id TEXT NOT NULL REFERENCES models(id),
@@ -704,6 +705,11 @@ class Database:
                 connection.execute("ALTER TABLE agent_sessions ADD COLUMN skill_pack_id TEXT")
             if "profile_id" not in session_columns:
                 connection.execute("ALTER TABLE agent_sessions ADD COLUMN profile_id TEXT")
+            if "session_mode" not in session_columns:
+                connection.execute(
+                    "ALTER TABLE agent_sessions ADD COLUMN session_mode "
+                    "TEXT NOT NULL DEFAULT 'workspace'"
+                )
             task_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(task_items)").fetchall()

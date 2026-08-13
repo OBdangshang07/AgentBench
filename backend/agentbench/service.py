@@ -55,7 +55,7 @@ from .model_clients import (
     ModelClientError,
     OpenAICompatibleClient,
 )
-from .model_discovery import discover_models
+from .model_discovery import deepseek_harness_default_model, discover_models
 from .reports import create_backup, export_experiment, restore_backup
 from .schemas import (
     ExperimentCreate,
@@ -307,7 +307,7 @@ def runner_adapter_capabilities(runner_type: str, tools: list[str]) -> dict[str,
         ),
         "mcp": browser_bridge or "mcp" in tools,
         "visible_browser": browser_bridge,
-        "model_override": True,
+        "model_override": runner_type != "deepseek_harness",
         "approval_gate": True,
         "process_tree_cancel": True,
         "interactive_terminal": False,
@@ -1545,6 +1545,8 @@ class EvaluationService:
 
     def start_terminal(self, session_id: str, value: TerminalCreate) -> dict[str, Any]:
         session = self.studio.get_session(session_id)
+        if session.get("session_mode") == "chat":
+            raise ValueError("chat_session_has_no_terminal")
         if session["permission_profile"] not in {"standard", "full"}:
             raise ValueError("terminal_requires_standard_permission")
         with self._state_lock:
@@ -1803,6 +1805,16 @@ class EvaluationService:
                 f"\n\nACTIVE SKILL PACK · {skill['name']}:\n"
                 f"{str(skill['content'])[:20000]}"
             )
+        if session.get("session_mode") == "chat":
+            return (
+                "You are in AgentBench pure conversation mode. There is no user project or "
+                "workspace. Answer from the conversation and user-provided attachments only. "
+                "Do not use shell commands, browse the web, inspect unrelated local files, or "
+                "create/modify project files. You may read only attachment paths explicitly listed "
+                "in USER-SELECTED CONTEXT. Do not expose private chain-of-thought; provide concise "
+                "user-facing progress only when useful, then a complete final answer."
+                f"{history_block}{context}\n\nCURRENT USER REQUEST:\n{turn['user_message']}"
+            )
         return (
             "You are working in an AgentBench Studio project explicitly selected by the user. "
             "Work only inside the current project workspace. Do not expose private chain-of-thought; "
@@ -1815,6 +1827,8 @@ class EvaluationService:
         )
 
     def _studio_session_tools(self, session: dict[str, Any]) -> list[str]:
+        if session.get("session_mode") == "chat":
+            return []
         available = self._studio_tools(session["permission_profile"])
         if not session.get("skill_pack_id"):
             return available
@@ -2731,7 +2745,10 @@ class EvaluationService:
                 ).run(instruction)
             else:
                 native_denied = None
-                if session["permission_profile"] != "full":
+                if (
+                    session.get("session_mode") != "chat"
+                    and session["permission_profile"] != "full"
+                ):
                     native_denied = self._wait_for_studio_approval(
                         session,
                         turn_id,
@@ -3193,6 +3210,7 @@ class EvaluationService:
             "kimi-code": "kimi_code_cli",
             "qoder-cli": "qoder_cli",
             "cursor-cli": "cursor_cli",
+            "deepseek-harness": "deepseek_harness",
         }
         runner_type = cli_runners.get(model["provider"])
         if runner_type:
@@ -4250,6 +4268,7 @@ class EvaluationService:
                 "{model_name}",
                 "{prompt}",
             ),
+            "deepseek_harness": ("--profile", "headless", "{prompt}"),
             "command": ("{prompt}",),
         }.get(runner_type, ())
 
@@ -5361,8 +5380,34 @@ class EvaluationService:
         definition_limits = definition.get("limits") or {}
         args = _json(runner.get("args_json"), [])
         native_environment = _json(runner.get("env_json"), {})
-        native_bridge_root: Path | None = None
         model_settings = _json(model.get("settings_json"), {})
+        if runner["runner_type"] == "deepseek_harness":
+            configured_provider, configured_model = deepseek_harness_default_model()
+            requested_provider = str(model_settings.get("agent_provider") or configured_provider)
+            if (
+                str(model.get("provider") or "") != "deepseek-harness"
+                or str(model.get("model_name") or "") != configured_model
+                or requested_provider != configured_provider
+            ):
+                return AgentResult(
+                    False,
+                    "",
+                    0,
+                    self._empty_usage(),
+                    0,
+                    "harness_model_not_active",
+                    "DeepSeek Harness headless 模式只使用 settings.yaml 的默认模型。"
+                    f"当前默认是 {configured_provider}/{configured_model}；请添加对应的 Harness 模型，"
+                    "或先在 dsh web 中切换默认模型。",
+                )
+            permission = str(metadata.get("permission_profile") or "workspace")
+            native_environment["DSH_PERMISSION_MODE"] = {
+                "readonly": "read-only",
+                "workspace": "workspace-write",
+                "standard": "workspace-write",
+                "full": "danger-full-access",
+            }.get(permission, "workspace-write")
+        native_bridge_root: Path | None = None
         native_session_id = str(metadata.get("native_session_id") or "").strip()
         if metadata.get("studio_session"):
             args = self._studio_native_resume_options(
@@ -5651,6 +5696,12 @@ class EvaluationService:
         try:
             item = json.loads(line)
         except json.JSONDecodeError:
+            if runner_type == "deepseek_harness" and stream_name == "stdout":
+                return "live.message", {
+                    **base,
+                    "text": _redact_viewer_text(line, 6000),
+                    "status": "completed",
+                }
             lower = line.lower()
             if any(marker in lower for marker in ("pytest", "vitest", "jest", "cargo test")):
                 return "live.test", {
@@ -5904,6 +5955,9 @@ class EvaluationService:
     def _parse_native_output(
         runner_type: str, output: str, event_sink=None
     ) -> tuple[str, int, int, float | None, int]:
+        if runner_type == "deepseek_harness":
+            final = output.strip()
+            return final, 0, 0, None, 1 if final else 0
         final = ""
         input_tokens = 0
         output_tokens = 0

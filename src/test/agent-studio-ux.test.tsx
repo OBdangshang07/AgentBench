@@ -40,6 +40,7 @@ const session: AgentSession = {
   id: "session-1",
   project_id: "project-1",
   project_name: "AgentBench",
+  session_mode: "workspace",
   title: "视觉体验巡查",
   runner_id: "runner-1",
   runner_name: "Codex",
@@ -152,7 +153,7 @@ function installApiMock(
   });
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = String(input);
-    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.0" });
+    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.1" });
     if (url.endsWith("/sessions")) return json([currentSession]);
     if (url.endsWith("/sessions/session-1") && init?.method === "PATCH") return json({ ...currentDetail, ...JSON.parse(String(init.body)) });
     if (url.includes("/sessions/session-1?message_limit=")) return json(currentDetail);
@@ -332,6 +333,30 @@ describe("Agent Studio visual workspace controls", () => {
     expect(document.querySelector(".v5-runtime-config-popover > footer")).toHaveTextContent("2,000 Tokens");
     expect(screen.getByRole("button", { name: /交互终端/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /活动详情/ })).toBeInTheDocument();
+  });
+
+  it("keeps pure chat isolated from workspace-only controls", async () => {
+    const chatSession: AgentSession = {
+      ...session,
+      project_id: null,
+      project_name: "纯对话",
+      session_mode: "chat",
+      permission_profile: "readonly",
+      workspace_path: "D:/AgentBench/chat-sessions/session-1",
+    };
+    installApiMock({ ...detail, ...chatSession }, chatSession);
+    renderStudio();
+
+    expect((await screen.findAllByText("纯对话")).length).toBeGreaterThan(0);
+    expect(screen.getByText(/无工作区 · 隔离对话/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "搜索" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /交互终端/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /打开工具工作台/ })).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/和 Agent 对话/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "打开运行配置" })[0]);
+    expect(screen.getByRole("button", { name: "会话访问权限" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "会话能力包" })).not.toBeInTheDocument();
   });
 
   it("turns streamed model output into a readable and deduplicated process timeline", async () => {

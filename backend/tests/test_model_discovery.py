@@ -23,6 +23,68 @@ def _installed_cli(executable: str | None) -> dict[str, object]:
     }
 
 
+def test_deepseek_harness_discovery_reads_default_and_provider_catalog(tmp_path, monkeypatch):
+    dsh_home = tmp_path / "dsh-home"
+    dsh_home.mkdir()
+    (dsh_home / "settings.yaml").write_text(
+        """
+agent-default-model:
+  provider: deepseek-official
+  model: deepseek-v4-pro
+llm-deepseek:
+  models:
+    - id: deepseek-v4-flash
+      name: DeepSeek V4 Flash
+    - id: deepseek-v4-pro
+      name: DeepSeek V4 Pro
+llm-pi-ai:
+  providers:
+    third-party:
+      displayName: Third Party
+      apiKey: DO-NOT-EXPOSE
+      models:
+        - id: fable-5
+          name: Fable 5
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DSH_HOME", str(dsh_home))
+    monkeypatch.setattr("agentbench.model_discovery.native_cli_status", _installed_cli)
+
+    result = discover_models(source="deepseek-harness")
+    by_key = {(item["provider_id"], item["id"]): item for item in result["models"]}
+
+    assert by_key[("deepseek-official", "deepseek-v4-pro")]["is_default"] is True
+    assert ("deepseek-official", "deepseek-v4-flash") in by_key
+    assert ("third-party", "fable-5") in by_key
+    assert "DO-NOT-EXPOSE" not in json.dumps(result)
+    assert any("Developer Preview" in warning for warning in result["warnings"])
+
+
+def test_deepseek_harness_discovery_survives_malformed_yaml(tmp_path, monkeypatch):
+    dsh_home = tmp_path / "dsh-home"
+    dsh_home.mkdir()
+    (dsh_home / "settings.yaml").write_text("models: [", encoding="utf-8")
+    monkeypatch.setenv("DSH_HOME", str(dsh_home))
+    monkeypatch.setattr("agentbench.model_discovery.native_cli_status", _installed_cli)
+
+    result = discover_models(source="deepseek-harness")
+
+    assert any(item["id"] == "deepseek-v4-flash" for item in result["models"])
+    assert any("settings.yaml" in warning for warning in result["warnings"])
+
+
+def test_deepseek_harness_plain_text_output_is_final_answer():
+    output = "正在整理最终回答。\n\n这是 Harness 的最终结果。"
+
+    final, input_tokens, output_tokens, cost, count = EvaluationService._parse_native_output(
+        "deepseek_harness", output
+    )
+
+    assert final == output
+    assert (input_tokens, output_tokens, cost, count) == (0, 0, None, 1)
+
+
 def test_codex_discovery_reads_visible_cache_and_configured_providers(tmp_path, monkeypatch):
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()

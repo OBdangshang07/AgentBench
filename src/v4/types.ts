@@ -218,8 +218,9 @@ export interface ApprovalRequest {
 
 export interface AgentSession {
   id: string;
-  project_id: string;
+  project_id: string | null;
   project_name: string;
+  session_mode: "workspace" | "chat";
   title: string;
   runner_id: string;
   runner_name: string;

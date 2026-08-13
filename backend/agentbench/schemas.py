@@ -33,6 +33,7 @@ class ModelDiscoveryRequest(BaseModel):
         "kimi-code",
         "qoder-cli",
         "cursor-cli",
+        "deepseek-harness",
     ] = "api"
     provider: str = Field(default="openai-compatible", min_length=1, max_length=100)
     base_url: HttpUrl | None = None
@@ -64,6 +65,7 @@ class RunnerCreate(BaseModel):
         "kimi_code_cli",
         "qoder_cli",
         "cursor_cli",
+        "deepseek_harness",
         "command",
     ]
     executable: str | None = None
@@ -197,7 +199,8 @@ class ProjectRootCreate(BaseModel):
 class SessionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    project_id: str
+    project_id: str | None = None
+    session_mode: Literal["workspace", "chat"] = "workspace"
     profile_id: str | None = None
     runner_id: str | None = None
     model_id: str | None = None

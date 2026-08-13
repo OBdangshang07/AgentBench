@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+import yaml
 
 from .execution import native_cli_status
 
@@ -26,6 +27,7 @@ SOURCE_META: dict[str, tuple[str, str | None]] = {
     "kimi-code": ("Kimi Code", "kimi"),
     "qoder-cli": ("Qoder", "qoderclicn"),
     "cursor-cli": ("Cursor Agent", "agent"),
+    "deepseek-harness": ("DeepSeek Harness", "dsh"),
 }
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -50,6 +52,125 @@ def _read_toml(path: Path) -> dict[str, Any]:
         return value if isinstance(value, dict) else {}
     except (OSError, ValueError, tomllib.TOMLDecodeError):
         return {}
+
+
+def _dsh_home() -> Path:
+    configured = os.getenv("DSH_HOME", "").strip()
+    return Path(configured).expanduser() if configured else Path.home() / ".dsh"
+
+
+def _read_yaml(path: Path) -> tuple[dict[str, Any], str | None]:
+    try:
+        if not path.is_file():
+            return {}, None
+        if path.stat().st_size > _MAX_CONFIG_BYTES:
+            return {}, "Harness settings.yaml 超过 5 MB，已拒绝读取"
+        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+        return (value if isinstance(value, dict) else {}), None
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        return {}, f"无法解析 Harness settings.yaml：{exc}"
+
+
+def _harness_model_entries(value: Any) -> list[tuple[str, str]]:
+    if isinstance(value, dict):
+        value = value.get("models") or []
+    if not isinstance(value, list):
+        return []
+    output: list[tuple[str, str]] = []
+    for item in value:
+        if isinstance(item, dict):
+            model_id = str(item.get("id") or item.get("model") or item.get("name") or "").strip()
+            label = str(item.get("name") or item.get("label") or model_id).strip()
+        else:
+            model_id = str(item).strip()
+            label = model_id
+        if model_id:
+            output.append((model_id, label or model_id))
+    return output
+
+
+def _discover_deepseek_harness() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    settings_path = _dsh_home() / "settings.yaml"
+    settings, error = _read_yaml(settings_path)
+    warnings: list[str] = [error] if error else []
+    default = settings.get("agent-default-model")
+    default = default if isinstance(default, dict) else {}
+    default_provider = str(default.get("provider") or "deepseek-official").strip()
+    default_model = str(default.get("model") or "deepseek-v4-flash").strip()
+    provider_labels: dict[str, str] = {
+        "deepseek-official": "DeepSeek Official",
+    }
+    candidates: list[tuple[str, str, str, str]] = []
+
+    for model_id, label in _harness_model_entries(settings.get("llm-deepseek")):
+        candidates.append(("deepseek-official", provider_labels["deepseek-official"], model_id, label))
+
+    pi_ai = settings.get("llm-pi-ai")
+    pi_providers = pi_ai.get("providers") if isinstance(pi_ai, dict) else {}
+    if isinstance(pi_providers, dict):
+        for provider_id, provider_value in pi_providers.items():
+            if not isinstance(provider_value, dict):
+                continue
+            provider_key = str(provider_id).strip()
+            provider_label = str(
+                provider_value.get("displayName") or provider_value.get("display_name") or provider_key
+            ).strip()
+            provider_labels[provider_key] = provider_label
+            for model_id, label in _harness_model_entries(provider_value):
+                candidates.append((provider_key, provider_label, model_id, label))
+
+    provider_labels.setdefault(default_provider, default_provider or "DeepSeek Harness")
+    candidates.insert(
+        0,
+        (default_provider, provider_labels[default_provider], default_model, default_model),
+    )
+    if not settings:
+        candidates.extend(
+            [
+                ("deepseek-official", "DeepSeek Official", "deepseek-v4-flash", "DeepSeek V4 Flash"),
+                ("deepseek-official", "DeepSeek Official", "deepseek-v4-pro", "DeepSeek V4 Pro"),
+            ]
+        )
+        if not error:
+            warnings.append(
+                "尚未找到 Harness settings.yaml；当前列出官方默认目录。运行 dsh web 后可在设置中选择实际默认模型。"
+            )
+
+    models = [
+        _model_option(
+            model_id,
+            label=label,
+            provider_id=provider_id,
+            provider_label=provider_label,
+            source="DeepSeek Harness settings.yaml",
+            configured=provider_id == default_provider and model_id == default_model,
+            is_default=provider_id == default_provider and model_id == default_model,
+        )
+        for provider_id, provider_label, model_id, label in candidates
+    ]
+    providers = [
+        {
+            "id": provider_id,
+            "label": provider_label,
+            "is_default": provider_id == default_provider,
+        }
+        for provider_id, provider_label in provider_labels.items()
+    ]
+    warnings.append(
+        "Harness 为 Developer Preview；headless 运行使用 settings.yaml 中的默认模型，不支持单次 CLI 模型覆盖。"
+    )
+    return models, providers, warnings
+
+
+def deepseek_harness_default_model() -> tuple[str, str]:
+    """Return the model identity Harness will actually use for a headless run."""
+    settings, _ = _read_yaml(_dsh_home() / "settings.yaml")
+    default = settings.get("agent-default-model")
+    default = default if isinstance(default, dict) else {}
+    return (
+        str(default.get("provider") or "deepseek-official").strip(),
+        str(default.get("model") or "deepseek-v4-flash").strip(),
+    )
 
 
 def _model_option(
@@ -791,6 +912,8 @@ def discover_models(
         )
     elif source == "cursor-cli":
         models, warnings = _discover_cursor(capability.get("executable"))
+    elif source == "deepseek-harness":
+        models, providers, warnings = _discover_deepseek_harness()
     else:
         models = []
         warnings = [f"{source_label} 当前未提供稳定的模型目录命令，请手动输入模型 ID"]
