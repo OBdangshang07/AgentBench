@@ -57,5 +57,8 @@ class Settings:
             self.artifacts_dir,
             self.workspaces_dir,
             self.backups_dir,
+            self.data_dir / "frontend-portfolios",
+            self.data_dir / "review-evidence",
+            self.data_dir / "chat-sessions",
         ):
             path.mkdir(parents=True, exist_ok=True)

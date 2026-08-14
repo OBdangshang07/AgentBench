@@ -1,10 +1,75 @@
 # AgentBench Desktop
 
-AgentBench Desktop 是一个 Windows 优先的本地 AI Agent 能力评测客户端。它将不同模型放入统一的 Agent Harness，在隔离工作区中执行同一批任务，并结合确定性验证器、匿名 AI 裁判和运行成本指标生成可追溯的评分。
+## V5.2.3：可审计的思考强度与 Harness 公平性
 
-## V3.1.1 能力
+- 正式测评新增 HIGH 标准、MAX 极限、Agent 原生和自定义四种思考策略；Ultra 默认 MAX，参测者与匿名裁判分别固化实际档位。
+- 每次运行记录 Agent 版本、模型 Provider、模型名、Agent 内部 Provider 路由、请求/实际思考档位及映射验证状态。
+- DeepSeek Harness 使用工作区写权限及工作区内 TEMP/TMP，隔离配置不修改全局 Harness 设置；Reasonix 与 Harness 即使显示名相似，也按实际路由区分。
+- Ultra 安全反馈可识别隐藏执行超时和 `payload` 数据契约错误，但不泄露隐藏实例；失败区分能力、超时、运行环境、验证器环境和权限不一致。
+- Token 未上报显示 N/A；HIGH 标准榜、MAX 极限榜、非标准榜和历史榜互不混排。
+- NCRE Office 题目、验证器与评分逻辑保持不变。
 
-- 本次迭代要点：结构级本地评测工作站 UI、套件优先测试库、Viewer-safe 实验/任务直播页、考研数学完整导入与发布工作流
+完整变更见 [`docs/releases/V5.2.3.md`](docs/releases/V5.2.3.md)。
+
+## V5.2.0：离线固化的真实前端工程套件
+
+- 将获许可的 `Xnmk029/Xnmk_Library` 当前版本固化为 24 个本地前端工程题，不在客户端运行时访问或同步远程仓库。
+- 提供完整套件，以及 UI 与视觉交互、网页游戏与状态系统、3D/WebGL/Shader、专家级浏览器工程四个子套件；难度按 AgentBench D3–D5/Ultra 重新定位。
+- 每题在独立工作区执行，完整套件默认并发 1；失败不会阻塞后续项目，运行中可暂停、恢复或跳过项目。
+- 实验结束后提供前端作品集画廊，可打开全部作品目录、单题工作区或安全的本地静态预览。
+- 5.2.0 前端题只使用人工评分：逐项 Rubric、验收清单、严重缺陷上限、评语与截图证据均写入本机审计；未评审项目不记作 0 分。
+- 评分完成后按难度加权生成套件成绩；时间、Token 和费用仅旁列展示，不改变人工质量分。
+- 不自动执行未知项目的 npm 脚本；预览服务器只绑定 `127.0.0.1`，所有作品路径都受前端作品集目录边界约束。
+- NCRE Office 题库、素材和评分逻辑未修改。
+
+完整变更见 [`docs/releases/V5.2.0.md`](docs/releases/V5.2.0.md)，使用方法见 [`docs/V5-GUIDE.md`](docs/V5-GUIDE.md)。
+
+## V5.1.1：对话优先的 Studio 与四个独立榜单
+
+- Agent Studio 改为更符合日常使用顺序的“会话导航 + 中央对话 + 按需工具工作台”；会话默认可见，文件树与搜索按标签切换，输入区固定在对话底部。
+- Agent、模型、权限、思考强度、能力包与 Runtime Profile 统一收进运行配置；审批紧邻输入框，终端、浏览器、文件与 Diff 在需要时打开。
+- 公开进度保持主要层级，工具调用默认折叠；缓存、虚拟环境等运行噪声默认隐藏，任务结束后显示用时、Token、费用和文件变更摘要。
+- 排行榜扩展为四个互不混排的榜单：统一 Agent 模型榜、原生 Agent 系统榜、2025 考研数学（一）榜、NCRE 二级榜。
+- 考研榜只统计同一实验、模型、Runner、重复轮次下完整的 22 题试卷，闭卷与工具增强分开排名；按官方 150 分结构计算纯卷面分。
+- NCRE 二级榜只统计同一套试卷完整的选择题、Word、Excel、PowerPoint 四部分，按 20 / 30 / 30 / 20 合成 100 分。
+- 两个考试榜均不将未完成试卷外推；时间、Token 与费用只作旁列效率指标，不污染考试卷面成绩。
+
+完整变更见 [`docs/releases/V5.1.1.md`](docs/releases/V5.1.1.md)，工作台使用方法见 [`docs/V5-GUIDE.md`](docs/V5-GUIDE.md)。
+
+## V5.1.0：把全 Agent 工作台真正连成一体
+
+- 新增可复用 Runtime Profile，将 Agent、模型、权限、思考强度、能力包与 MCP Server 作为一套运行配置复用于 Studio 和 Flow。
+- Studio 支持后续指令队列与草稿恢复、最多三个独立终端、多个真实可见浏览器标签、附件上下文和可恢复的原生 Agent 会话。
+- 任务中心新增验收标准、证据状态、生命周期时间线、详情页和批量处理；控制中心统一展示 Session、Task 与 Flow 活动。
+- Flow 新增模板、结构化端口绑定、节点级失败策略、独立重试、单节点测试和更完整的运行历史。
+- MCP 工具采用 JSON Schema 表单，并通过一次性本地桥接安全提供给受支持的原生 CLI；桥接令牌在单轮任务结束后销毁。
+- Kimi Code 与 Qoder 补齐权限、思考模式、MCP 和原生会话续接；Qoder 的模型下拉选择会真实传入 CLI。
+- 新增 Cursor Agent：支持官方 Windows 快捷安装、可靠 CLI 检测、模型目录与下拉、附件、权限映射、流式进度和原生会话续接。
+- 2025 考研数学（一）按官方 150 分结构计分；卷面分只由答案质量决定，时间、Token 与费用作为独立效率指标，未完成试卷不再外推。
+- 非测评区域继续使用深色、克制、酸绿色点缀的界面语言，通过渐进披露适配 1280×720 到 4K，不缩小正文换取空间。
+- Benchmarks、Ultra 和 NCRE Office 保持兼容；NCRE Office 题库与评分逻辑未作改动。
+
+完整变更见 [`docs/releases/V5.1.0.md`](docs/releases/V5.1.0.md)，工作台使用方法见 [`docs/V5-GUIDE.md`](docs/V5-GUIDE.md)。
+
+AgentBench Desktop 是一个 Windows 优先、本地运行的全 Agent 可视化工作台，同时保留完整的 AI 模型能力评测系统。它既能在图形界面中管理项目、长期会话、任务、Flow、MCP、终端与浏览器，也能将不同模型放入统一 Agent Harness，通过确定性验证器、匿名 AI 裁判和成本指标生成可追溯评分。
+
+## V5.0.0：从“能用”到“好用”
+
+- 新增首次使用向导、真实全局搜索、全局审批入口，以及包含运行环境健康和最近失败的控制中心。
+- Agent Studio 支持服务端长会话分页、原生文件拖放、停止自动滚动、流式公开进度、折叠工具调用、附件、权限/思考强度切换、Token/费用、Diff、ConPTY 终端和可接管浏览器。
+- Agent Flow 新增自动保存、Undo/Redo、缩放/平移/小地图、静态验证、无副作用 Dry Run、自动版本快照、运行历史、版本恢复和失败节点局部重试。
+- 项目与任务中心补齐项目健康检查、详情页、前置依赖阻塞、依赖环防护、审批状态同步和明确的下一步操作。
+- MCP 工具页提供常用模板、标准 JSON 导入、结构化密钥编辑、离线诊断和真实工具调用测试台。
+- 模型与 Agent 配置明确区分模型身份和运行时，并在 Studio、Flow 与测评之间复用；设置页支持无密钥、无提示词的一键诊断报告。
+- 路由按需拆包，核心前端包从约 739 KB 降至约 248 KB；高频轮询不再反复传输完整长会话。
+- SQLite Schema v10 保留旧项目、会话和全部测评历史，迁移前自动备份，并补充重启恢复、路径越界、符号链接和附件边界回归。
+- 测评区及 NCRE Office 题库和评分逻辑保持不变；录屏界面仍只展示公开进度和可验证操作，不展示模型私有思维链。
+
+完整变更见 [`docs/releases/V5.0.0.md`](docs/releases/V5.0.0.md)，基础使用方法见 [`docs/V4-GUIDE.md`](docs/V4-GUIDE.md)。
+
+### 评测能力
+
+- 延续 V3.1.1 的结构级本地评测工作站 UI、套件优先测试库、Viewer-safe 实验/任务直播页、考研数学完整导入与发布工作流
 - Tauri 2 + React 桌面界面，FastAPI 本地 Sidecar
 - SQLite 本地数据，不需要服务器、Redis 或云存储
 - OpenAI-compatible 模型适配器和可离线演示的 Mock 模型
@@ -56,7 +121,7 @@ pnpm dev
 
 正式代码执行任务要求 Docker Desktop。没有 Docker 时，文本推理、结构化输出和受限文件任务仍可运行；Shell 验证会明确标记为环境不可用，绝不会静默回退到宿主机执行。
 
-详细设计见 [`docs/PRODUCT.md`](docs/PRODUCT.md)、[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 和 [`docs/SECURITY.md`](docs/SECURITY.md)。
+详细设计见 [`docs/PRODUCT.md`](docs/PRODUCT.md)、[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)、[`docs/SECURITY.md`](docs/SECURITY.md) 和 [`docs/V4-GUIDE.md`](docs/V4-GUIDE.md)。
 
 ## 分发给其他人
 

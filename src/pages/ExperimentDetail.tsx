@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowLeft, BarChart3, CheckCircle2, Download, Gauge, Play, RefreshCw, RotateCcw, Square } from "lucide-react";
+import { AlertTriangle, ArrowLeft, BarChart3, CheckCircle2, Download, FolderOpen, Gauge, Pause, Play, RefreshCw, RotateCcw, Square } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, downloadUrl } from "../lib/api";
@@ -9,9 +9,12 @@ import type { Experiment, RunDetail, RunSummary } from "../types";
 import { Button, Card, ErrorBlock, LoadingBlock, Score, StatusBadge } from "../components/ui";
 import { ExperimentLiveFocus } from "../components/LiveRunView";
 import { BroadcastFrame } from "../components/BroadcastFrame";
+import { useOpenFolder } from "../lib/useOpenFolder";
 
 const ACTIVE_RUN_STATUSES = new Set(["queued", "preparing", "running", "validating", "judging"]);
 const RUN_STATUS_PRIORITY: Record<string, number> = { running: 0, validating: 1, judging: 2, preparing: 3, queued: 4 };
+const reasoningPolicyNames: Record<string, string> = { standard: "HIGH 标准条件", maximum: "MAX 极限条件", native: "Agent 原生条件", custom: "自定义条件", historical: "历史未固化条件" };
+const failureClassNames: Record<string, string> = { agent_solution_failure: "能力未通过", agent_timeout: "Agent 执行超时", runtime_environment_failure: "运行环境故障", validator_infrastructure_failure: "验证器环境故障", permission_mismatch: "权限条件不一致" };
 
 function questionNumber(run: RunSummary) {
   const match = run.test_title.match(/第\s*(\d+)\s*题/);
@@ -30,6 +33,7 @@ export default function ExperimentDetail() {
   const { experimentId = "" } = useParams();
   const experiment = useApi<Experiment>(`/experiments/${experimentId}`, 2_000);
   const runs = useApi<RunSummary[]>(`/runs?experiment_id=${experimentId}&limit=1000`, 2_000);
+  const openWorkspace = useOpenFolder();
   const [actionError, setActionError] = useState("");
   const [rejudgeBusy, setRejudgeBusy] = useState(false);
   const [actionMessage, setActionMessage] = useState("");
@@ -64,11 +68,20 @@ export default function ExperimentDetail() {
       setActionError(value instanceof Error ? value.message : "批量复判失败");
     } finally { setRejudgeBusy(false); }
   }
+  async function openPortfolioFolder() {
+    setActionError("");
+    try {
+      const portfolio = await api<{ root_path: string }>(`/experiments/${experimentId}/frontend-portfolio`);
+      await openWorkspace(portfolio.root_path, "作品目录");
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "无法读取作品目录");
+    }
+  }
   if (experiment.loading) return <LoadingBlock />;
   if (experiment.error || !experiment.data) return <ErrorBlock message={experiment.error ?? "实验不存在"} retry={() => void experiment.refresh()} />;
   const item = experiment.data;
   const summary = item.summary;
-  if (item.status === "running") return <ExperimentBroadcast item={item} runs={runs.data ?? []} actionError={actionError} onCancel={() => void action("cancel")} />;
+  if (item.status === "running") return <ExperimentBroadcast item={item} runs={runs.data ?? []} actionError={actionError} onCancel={() => void action("cancel")} onPause={item.suite_metadata?.kind === "frontend" ? async () => { await api(`/experiments/${item.id}/pause`, { method: "POST" }); await Promise.all([experiment.refresh(), runs.refresh()]); } : undefined} onSkip={item.suite_metadata?.kind === "frontend" ? async (runId) => { setActionError(""); try { await api(`/runs/${runId}/skip`, { method: "POST" }); await runs.refresh(); } catch (value) { setActionError(value instanceof Error ? value.message : "跳过项目失败"); } } : undefined} />;
   const finished = (summary?.completed ?? 0) + (summary?.failed ?? 0) + (summary?.blocked ?? 0);
   const progress = summary?.total ? Math.round((finished / summary.total) * 100) : 0;
   const completedRuns = runs.data?.filter((run) => run.score != null) ?? [];
@@ -100,16 +113,16 @@ export default function ExperimentDetail() {
   return (
     <div className="ab-view ab-experiment-detail-view">
       <header className="ab-view-header">
-        <div className="ab-view-title"><span className="ab-view-index">03 / COMPOSITION</span><div><h1>{item.name}</h1><p>{item.suite_name} · {formatDate(item.created_at)} · {item.participants.length} 个参测组合 · 重复 {item.repetitions} 次</p></div></div>
-        <div className="ab-header-meta"><Link to="/experiments?history=1" className="ab-ghost-button"><ArrowLeft size={13} />实验账本</Link><a className="ab-ghost-button" href={downloadUrl(`/experiments/${item.id}/export?format=html`)}><Download size={13} />导出报告</a>{item.status === "completed" && <Button variant="ghost" busy={rejudgeBusy} onClick={() => void rejudge()}><RefreshCw size={13} />复判结构化答案</Button>}{["draft", "interrupted"].includes(item.status) && <button className="ab-run-button" type="button" onClick={() => void action("start")}><Play size={13} />启动评测</button>}{item.status === "running" && <Button variant="danger" onClick={() => void action("cancel")}><Square size={15} /> 停止</Button>}</div>
+        <div className="ab-view-title"><span className="ab-view-index">03 / COMPOSITION</span><div><h1>{item.name}</h1><p>{item.suite_name} · {formatDate(item.created_at)} · {item.participants.length} 个参测组合 · {reasoningPolicyNames[item.reasoning_policy ?? "historical"]}</p></div></div>
+        <div className="ab-header-meta"><Link to="/experiments?history=1" className="ab-ghost-button"><ArrowLeft size={13} />实验账本</Link>{item.suite_metadata?.kind === "frontend" && <><Link className="ab-ghost-button" to={`/experiments/${item.id}/portfolio`}><FolderOpen size={13} />作品集</Link><button className="ab-ghost-button" type="button" onClick={() => void openPortfolioFolder()}><FolderOpen size={13} />打开全部作品</button></>}<a className="ab-ghost-button" href={downloadUrl(`/experiments/${item.id}/export?format=html`)}><Download size={13} />导出报告</a>{item.status === "completed" && item.suite_metadata?.kind !== "frontend" && <Button variant="ghost" busy={rejudgeBusy} onClick={() => void rejudge()}><RefreshCw size={13} />复判结构化答案</Button>}{["draft", "interrupted"].includes(item.status) && <button className="ab-run-button" type="button" onClick={() => void action("start")}><Play size={13} />{item.status === "interrupted" ? "继续套件" : "启动评测"}</button>}{item.status === "running" && <Button variant="danger" onClick={() => void action("cancel")}><Square size={15} /> 停止</Button>}</div>
       </header>
       <div className="ab-experiment-detail-scroll" ref={scrollRef}>
       {actionError && <div className="error-banner preflight-error"><strong>启动检查未通过</strong><span>{actionError}</span></div>}
       {actionMessage && <div className="ab-rejudge-success"><CheckCircle2 size={15} /><span>{actionMessage}</span></div>}
-      <div className="balanced-score-strip"><Gauge size={18} /><div><strong>平衡评分</strong><span>质量 94% · 完成时间 3% · Agent 步数 2% · Token 1%</span></div><small>新运行支持连续部分分，旧记录保持原始评分</small></div>
+      <div className="balanced-score-strip"><Gauge size={18} /><div><strong>{item.suite_metadata?.kind === "frontend" ? "纯人工评分" : summary?.exam_total ? "卷面与效率分离" : `${reasoningPolicyNames[item.reasoning_policy ?? "historical"]} · 平衡评分`}</strong><span>{item.suite_metadata?.kind === "frontend" ? `已评 ${summary?.reviewed_runs ?? 0} / ${summary?.total ?? 0} · 未评分不会记为 0 分 · 正式总分按 D2–Ultra 难度加权` : summary?.exam_total ? "考研卷面仅按答案质量计分 · 时间、步骤与 Token 独立展示" : `质量 94% · 完成时间 3% · Agent 步数 2% · Token 1% · ${item.strict_fairness ? "严格公平" : "非标准条件"}`}</span></div><small>{item.suite_metadata?.kind === "frontend" ? `题库 ${item.suite_metadata.suite_revision} · ${item.suite_metadata.source_commit?.slice(0, 12)}` : summary?.exam_total ? "满分 150 · 解答题按 10 + 12×5 计 70 分" : `参测 ${item.reasoning_effort?.toUpperCase() ?? "AGENT DEFAULT"} · 裁判 ${item.judge_reasoning_effort?.toUpperCase() ?? "未固化"}`}</small></div>
       <div className="run-overview">
         <Card><span>状态</span><StatusBadge status={item.status} /><div className="progress-line large"><i style={{ width: `${progress}%` }} /></div><small>{finished} / {summary?.total ?? 0} · {progress}%</small></Card>
-        <Card><span>{summary?.exam_total ? "卷面得分" : "平均得分"}</span>{summary?.exam_total ? <strong>{summary.exam_score?.toFixed(1) ?? "—"}<small> / {summary.exam_total.toFixed(0)}</small></strong> : <Score value={summary?.avg_score} large />}<small>{summary?.exam_total ? `按每题官方分值加权 · 百分制 ${summary.avg_score?.toFixed(1) ?? "—"}` : summary?.avg_objective_score != null ? `客观质量 ${summary.avg_objective_score.toFixed(1)} · 时效 ${summary.avg_time_score?.toFixed(1) ?? "—"}` : "仅统计完成且成功评分的运行"}</small></Card>
+        <Card><span>{item.suite_metadata?.kind === "frontend" ? "人工加权分" : summary?.exam_total ? "卷面得分" : "平均得分"}</span>{item.suite_metadata?.kind === "frontend" ? <Score value={summary?.frontend_weighted_score ?? summary?.reviewed_weighted_score} large /> : summary?.exam_total ? <strong>{summary.exam_score?.toFixed(1) ?? "—"}<small> / {summary.exam_total.toFixed(0)}</small></strong> : <Score value={summary?.avg_score} large />}<small>{item.suite_metadata?.kind === "frontend" ? summary?.frontend_weighted_score != null ? "全部项目完成评审，正式分已生成" : `当前为已评分部分 · 进度 ${summary?.review_progress ?? 0}%` : summary?.exam_total ? `按每题官方分值加权 · 百分制 ${summary.avg_score?.toFixed(1) ?? "—"}` : summary?.avg_objective_score != null ? `客观质量 ${summary.avg_objective_score.toFixed(1)} · 时效 ${summary.avg_time_score?.toFixed(1) ?? "—"}` : "仅统计完成且成功评分的运行"}</small></Card>
         <Card><span>总 Token</span><strong>{formatNumber(summary?.tokens)}</strong><small>输入与输出合计</small></Card>
         <Card><span>累计费用</span><strong>${Number(summary?.cost_usd ?? 0).toFixed(4)}</strong><small>{summary?.unpriced_runs ? `${summary.unpriced_runs} 次运行缺少单价，当前合计不完整` : "实际上报或按模型单价估算"}</small></Card>
       </div>
@@ -133,7 +146,7 @@ export default function ExperimentDetail() {
       <Card>
         <div className="card-header"><div><span className="section-kicker">RUN MATRIX</span><h2>运行任务</h2></div><button className="icon-button" onClick={() => void runs.refresh()}><RotateCcw size={16} /></button></div>
         {runs.loading ? <LoadingBlock /> : runs.error || !runs.data ? <ErrorBlock message={runs.error ?? "运行列表读取失败"} /> : (
-          <div className="table-wrap run-table"><table><thead><tr><th>测试任务</th><th>参测组合</th><th>赛道</th><th>重复 / 轮次</th><th>耗时</th><th>Token</th><th>综合 / 分项</th><th>状态 / 原因</th></tr></thead><tbody>{runs.data.map((run) => <tr key={run.id}><td><Link to={`/runs/${run.id}`} state={{ from: `/experiments/${item.id}` }}><strong>{run.test_title}</strong></Link><small>{run.category}</small></td><td><strong>{run.model_name}</strong><small>{run.runner_name}</small></td><td><span className={`lane lane-${run.lane}`}>{run.lane === "unified" ? "统一" : "原生"}</span></td><td>#{run.repetition}<small>{run.attempt_count > 1 ? `${run.attempt_count} 轮挑战` : "单轮"}</small></td><td>{formatDuration(run.duration_ms)}</td><td>{formatNumber(run.tokens_input + run.tokens_output)}</td><td><Score value={run.score} />{run.objective_score != null && <small className="score-subline">质量 {run.objective_score.toFixed(1)} · 时效 {run.time_score?.toFixed(1) ?? "—"} · T效 {run.token_score?.toFixed(1) ?? "—"}</small>}</td><td><StatusBadge status={run.status} />{run.status === "completed" && run.passed === false && <small className="run-error-preview">能力未及格</small>}{run.error_message && <small className="run-error-preview" title={run.error_message}>{run.error_code ? `${run.error_code} · ` : ""}{run.error_message}</small>}</td></tr>)}</tbody></table></div>
+          <div className="table-wrap run-table"><table><thead><tr><th>测试任务</th><th>参测组合</th><th>条件</th><th>重复 / 轮次</th><th>耗时</th><th>Token</th><th>综合 / 分项</th><th>状态 / 原因</th></tr></thead><tbody>{runs.data.map((run) => <tr key={run.id}><td><Link to={`/runs/${run.id}`} state={{ from: `/experiments/${item.id}` }}><strong>{run.test_title}</strong></Link><small>{run.category}</small></td><td><strong>{run.model_name}</strong><small>{run.runner_name}</small></td><td><span className={`lane lane-${run.effort_verified ? "unified" : "native"}`}>{run.effective_reasoning_effort?.toUpperCase() ?? "DEFAULT"}</span><small>{run.effort_verified ? "已验证" : "未验证映射"}</small></td><td>#{run.repetition}<small>{run.attempt_count > 1 ? `${run.attempt_count} 轮挑战` : "单轮"}</small></td><td>{formatDuration(run.duration_ms)}</td><td>{run.telemetry_status === "unavailable" ? "N/A" : formatNumber(run.tokens_input + run.tokens_output)}</td><td><Score value={run.score} />{run.objective_score != null && <small className="score-subline">质量 {run.objective_score.toFixed(1)} · 时效 {run.time_score?.toFixed(1) ?? "—"} · T效 {run.token_score?.toFixed(1) ?? "—"}</small>}</td><td><StatusBadge status={run.status} />{run.failure_class && <small className="run-error-preview">{failureClassNames[run.failure_class] ?? run.failure_class}</small>}{run.error_message && <small className="run-error-preview" title={run.error_message}>{run.error_code ? `${run.error_code} · ` : ""}{run.error_message}</small>}</td></tr>)}</tbody></table></div>
         )}
       </Card>
       </div>
@@ -141,7 +154,7 @@ export default function ExperimentDetail() {
   );
 }
 
-function ExperimentBroadcast({ item, runs, actionError, onCancel }: { item: Experiment; runs: RunSummary[]; actionError: string; onCancel: () => void }) {
+function ExperimentBroadcast({ item, runs, actionError, onCancel, onPause, onSkip }: { item: Experiment; runs: RunSummary[]; actionError: string; onCancel: () => void; onPause?: () => Promise<void>; onSkip?: (runId: string) => Promise<void> }) {
   const [queueView, setQueueView] = useState<"follow" | "all">("follow");
   const [autoFollow, setAutoFollow] = useState(true);
   const [focusRunId, setFocusRunId] = useState("");
@@ -162,7 +175,7 @@ function ExperimentBroadcast({ item, runs, actionError, onCancel }: { item: Expe
   const runningCount = runs.filter((run) => ["preparing", "running"].includes(run.status)).length;
   const verifyingCount = runs.filter((run) => ["validating", "judging"].includes(run.status)).length;
   return <BroadcastFrame><div className="experiment-broadcast-page">
-    <header className="broadcast-page-head"><div className="broadcast-page-title"><span>LIVE 01 / EXPERIMENT</span><div><h1>{item.name}</h1><p>{item.suite_name} · {item.participants.length} 个参测组合 · 并发 {item.concurrency}</p></div></div><div className="broadcast-head-meta"><span className="broadcast-record-badge"><i />REC / 16:9 SAFE</span><span className="broadcast-clock">{finished} / {runs.length} COMPLETED</span><Button variant="danger" onClick={onCancel}><Square size={15} /> 停止评测</Button></div></header>
+    <header className="broadcast-page-head"><div className="broadcast-page-title"><span>LIVE 01 / EXPERIMENT</span><div><h1>{item.name}</h1><p>{item.suite_name} · {item.participants.length} 个参测组合 · 并发 {item.concurrency}</p></div></div><div className="broadcast-head-meta"><span className="broadcast-record-badge"><i />REC / 16:9 SAFE</span><span className="broadcast-clock">{finished} / {runs.length} COMPLETED</span>{onPause && <Button variant="ghost" onClick={() => void onPause()}><Pause size={15} /> 暂停套件</Button>}<Button variant="danger" onClick={onCancel}><Square size={15} /> 停止评测</Button></div></header>
     {actionError && <div className="error-banner"><strong>操作失败</strong><span>{actionError}</span></div>}
     {focus.loading || !focus.data ? <Card className="broadcast-loading"><LoadingBlock /></Card> : <ExperimentLiveFocus run={focus.data} events={live.events} streamState={live.streamState} />}
     <section className={`live-race-board live-race-board-${queueView}`}>
@@ -172,7 +185,8 @@ function ExperimentBroadcast({ item, runs, actionError, onCancel }: { item: Expe
         const isLive = ACTIVE_RUN_STATUSES.has(run.status);
         const stage = run.status === "queued" ? 3 : run.status === "preparing" ? 16 : run.status === "running" ? 52 : run.status === "validating" ? 74 : run.status === "judging" ? 88 : 100;
         const focused = focusSummary?.id === run.id;
-        return <article className={`${isLive ? "live" : ""}${focused ? " focused" : ""}`} key={run.id}><button className="live-race-focus" type="button" onClick={() => { setAutoFollow(false); setFocusRunId(run.id); }}><strong>{run.test_title}</strong><small>{run.model_name} × {run.runner_name} · ROUND {Math.max(1, run.attempt_count)}</small></button><span><i /> {run.status}</span><div className="live-race-track"><i style={{ left: `${stage}%` }} /></div><code>{formatDuration(run.duration_ms)}</code><div className="live-race-result"><Score value={run.score} /><Link to={`/runs/${run.id}`} state={{ from: `/experiments/${item.id}` }}>详情</Link></div></article>;
+        const skippable = onSkip && ["queued", "preparing", "running"].includes(run.status);
+        return <article className={`${isLive ? "live" : ""}${focused ? " focused" : ""}`} key={run.id}><button className="live-race-focus" type="button" onClick={() => { setAutoFollow(false); setFocusRunId(run.id); }}><strong>{run.test_title}</strong><small>{run.model_name} × {run.runner_name} · ROUND {Math.max(1, run.attempt_count)}</small></button><span><i /> {run.status}</span><div className="live-race-track"><i style={{ left: `${stage}%` }} /></div><code>{formatDuration(run.duration_ms)}</code><div className="live-race-result"><Score value={run.score} />{skippable && <button type="button" title="停止当前项目或从队列中移除未开始项目" onClick={() => void onSkip(run.id)}>跳过</button>}<Link to={`/runs/${run.id}`} state={{ from: `/experiments/${item.id}` }}>详情</Link></div></article>;
       })}</div>
       {!runs.length && <div className="live-race-empty">任务正在编排，运行队列即将出现。</div>}
       <footer><span>总进度</span><div className="progress-line"><i style={{ width: `${progress}%` }} /></div><strong>{progress}%</strong></footer>

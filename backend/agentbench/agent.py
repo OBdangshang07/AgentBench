@@ -10,6 +10,8 @@ from .execution import DockerExecutor, Workspace, WorkspaceViolation
 from .model_clients import ModelClient, ModelClientError, ModelUsage
 
 EventSink = Callable[[str, dict[str, Any]], None]
+ToolAuthorizer = Callable[[str, dict[str, Any]], dict[str, Any] | None]
+ToolExecutor = Callable[[str, dict[str, Any]], dict[str, Any] | None]
 
 
 TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
@@ -65,6 +67,58 @@ TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
+    "browser_navigate": {
+        "name": "browser_navigate",
+        "description": "Open or navigate the visible AgentBench browser to an HTTP(S) URL.",
+        "parameters": {
+            "type": "object",
+            "required": ["url"],
+            "properties": {"url": {"type": "string"}, "page_id": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "browser_snapshot": {
+        "name": "browser_snapshot",
+        "description": "Read the current page text, links and interactive controls.",
+        "parameters": {
+            "type": "object",
+            "properties": {"page_id": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "browser_click": {
+        "name": "browser_click",
+        "description": "Click an element in the visible browser using a CSS selector.",
+        "parameters": {
+            "type": "object",
+            "required": ["selector"],
+            "properties": {"selector": {"type": "string"}, "page_id": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    "browser_fill": {
+        "name": "browser_fill",
+        "description": "Fill an input in the visible browser using a CSS selector.",
+        "parameters": {
+            "type": "object",
+            "required": ["selector", "value"],
+            "properties": {
+                "selector": {"type": "string"},
+                "value": {"type": "string"},
+                "page_id": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "browser_screenshot": {
+        "name": "browser_screenshot",
+        "description": "Capture the visible browser viewport as a PNG artifact.",
+        "parameters": {
+            "type": "object",
+            "properties": {"page_id": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
 }
 
 
@@ -77,6 +131,7 @@ class AgentResult:
     duration_ms: int
     error_code: str | None = None
     error_message: str | None = None
+    native_session_id: str | None = None
 
 
 class AgentHarness:
@@ -90,6 +145,10 @@ class AgentHarness:
         limits: dict[str, Any],
         system_prompt: str,
         event_sink: EventSink,
+        cancellation_check: Callable[[], bool] | None = None,
+        tool_authorizer: ToolAuthorizer | None = None,
+        tool_executor: ToolExecutor | None = None,
+        additional_tools: list[dict[str, Any]] | None = None,
     ):
         self.client = client
         self.workspace = workspace
@@ -98,16 +157,42 @@ class AgentHarness:
         self.limits = limits
         self.system_prompt = system_prompt
         self.event_sink = event_sink
+        self.cancellation_check = cancellation_check or (lambda: False)
+        self.tool_authorizer = tool_authorizer
+        self.tool_executor = tool_executor
+        self.additional_tools = list(additional_tools or [])
 
     def _tools(self) -> list[dict[str, Any]]:
         names: list[str] = []
-        if "filesystem" in self.allowed_capabilities:
-            names.extend(["read_file", "list_files", "write_file"])
+        if {
+            "filesystem",
+            "filesystem_read",
+        } & self.allowed_capabilities:
+            names.extend(["read_file", "list_files"])
+        if {"filesystem", "filesystem_write"} & self.allowed_capabilities:
+            names.append("write_file")
         if "search" in self.allowed_capabilities:
             names.append("search_text")
         if "shell" in self.allowed_capabilities:
             names.append("run_command")
-        return [TOOL_DEFINITIONS[name] for name in dict.fromkeys(names)]
+        if "browser" in self.allowed_capabilities:
+            names.extend(
+                [
+                    "browser_navigate",
+                    "browser_snapshot",
+                    "browser_click",
+                    "browser_fill",
+                    "browser_screenshot",
+                ]
+            )
+        builtin = [TOOL_DEFINITIONS[name] for name in dict.fromkeys(names)]
+        builtin_names = {str(item.get("name") or "") for item in builtin}
+        external = [
+            item
+            for item in self.additional_tools
+            if str(item.get("name") or "") not in builtin_names
+        ]
+        return [*builtin, *external]
 
     def run(self, instruction: str) -> AgentResult:
         started = time.perf_counter()
@@ -129,6 +214,16 @@ class AgentHarness:
         usage = ModelUsage()
         tools = self._tools()
         for step in range(1, max_steps + 1):
+            if self.cancellation_check():
+                return AgentResult(
+                    False,
+                    "",
+                    step - 1,
+                    usage,
+                    int((time.perf_counter() - started) * 1000),
+                    "user_cancelled",
+                    "The user cancelled this Agent turn",
+                )
             if max_runtime_seconds > 0 and time.perf_counter() - started > max_runtime_seconds:
                 return AgentResult(
                     False,
@@ -153,6 +248,16 @@ class AgentHarness:
                     str(exc),
                 )
             usage.add(decision.usage)
+            if self.cancellation_check():
+                return AgentResult(
+                    False,
+                    "",
+                    step,
+                    usage,
+                    int((time.perf_counter() - started) * 1000),
+                    "user_cancelled",
+                    "The user cancelled this Agent turn",
+                )
             self.event_sink(
                 "model.responded",
                 {
@@ -229,9 +334,23 @@ class AgentHarness:
 
     def _execute_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         try:
-            if name == "read_file" and "filesystem" in self.allowed_capabilities:
+            if self.tool_authorizer is not None:
+                denied = self.tool_authorizer(name, arguments)
+                if denied is not None:
+                    return denied
+            if self.tool_executor is not None:
+                executed = self.tool_executor(name, arguments)
+                if executed is not None:
+                    return executed
+            if name == "read_file" and {
+                "filesystem",
+                "filesystem_read",
+            } & self.allowed_capabilities:
                 return {"ok": True, "content": self.workspace.read_file(str(arguments["path"]))}
-            if name == "list_files" and "filesystem" in self.allowed_capabilities:
+            if name == "list_files" and {
+                "filesystem",
+                "filesystem_read",
+            } & self.allowed_capabilities:
                 return {
                     "ok": True,
                     "files": self.workspace.list_files(str(arguments.get("path", "."))),
@@ -243,7 +362,10 @@ class AgentHarness:
                         str(arguments["query"]), str(arguments.get("path", "."))
                     ),
                 }
-            if name == "write_file" and "filesystem" in self.allowed_capabilities:
+            if name == "write_file" and {
+                "filesystem",
+                "filesystem_write",
+            } & self.allowed_capabilities:
                 return {
                     "ok": True,
                     **self.workspace.write_file(str(arguments["path"]), str(arguments["content"])),

@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from agentbench.api import create_app
 from agentbench.execution import CommandResult, Workspace
-from agentbench.model_discovery import discover_models
+from agentbench.model_discovery import deepseek_harness_default_selection, discover_models
 from agentbench.schemas import ModelCreate
 from agentbench.service import EvaluationService
 
@@ -21,6 +21,75 @@ def _installed_cli(executable: str | None) -> dict[str, object]:
         "version": "test-cli 1.0",
         "error": None,
     }
+
+
+def test_deepseek_harness_discovery_reads_default_and_provider_catalog(tmp_path, monkeypatch):
+    dsh_home = tmp_path / "dsh-home"
+    dsh_home.mkdir()
+    (dsh_home / "settings.yaml").write_text(
+        """
+agent-default-model:
+  provider: deepseek-official
+  model: deepseek-v4-pro
+  reasoningEffort: max
+llm-deepseek:
+  models:
+    - id: deepseek-v4-flash
+      name: DeepSeek V4 Flash
+    - id: deepseek-v4-pro
+      name: DeepSeek V4 Pro
+llm-pi-ai:
+  providers:
+    third-party:
+      displayName: Third Party
+      apiKey: DO-NOT-EXPOSE
+      models:
+        - id: fable-5
+          name: Fable 5
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DSH_HOME", str(dsh_home))
+    monkeypatch.setattr("agentbench.model_discovery.native_cli_status", _installed_cli)
+
+    result = discover_models(source="deepseek-harness")
+    by_key = {(item["provider_id"], item["id"]): item for item in result["models"]}
+
+    assert by_key[("deepseek-official", "deepseek-v4-pro")]["is_default"] is True
+    assert ("deepseek-official", "deepseek-v4-flash") in by_key
+    assert ("third-party", "fable-5") in by_key
+    assert "DO-NOT-EXPOSE" not in json.dumps(result)
+    assert any("Developer Preview" in warning for warning in result["warnings"])
+    assert any("极限（MAX）" in warning for warning in result["warnings"])
+    assert deepseek_harness_default_selection() == (
+        "deepseek-official",
+        "deepseek-v4-pro",
+        "max",
+    )
+
+
+def test_deepseek_harness_discovery_survives_malformed_yaml(tmp_path, monkeypatch):
+    dsh_home = tmp_path / "dsh-home"
+    dsh_home.mkdir()
+    (dsh_home / "settings.yaml").write_text("models: [", encoding="utf-8")
+    monkeypatch.setenv("DSH_HOME", str(dsh_home))
+    monkeypatch.setattr("agentbench.model_discovery.native_cli_status", _installed_cli)
+
+    result = discover_models(source="deepseek-harness")
+
+    assert any(item["id"] == "deepseek-v4-flash" for item in result["models"])
+    assert any("settings.yaml" in warning for warning in result["warnings"])
+
+
+def test_deepseek_harness_plain_text_output_is_final_answer():
+    output = "正在整理最终回答。\n\n这是 Harness 的最终结果。"
+
+    final, input_tokens, output_tokens, cost, count = EvaluationService._parse_native_output(
+        "deepseek_harness", output
+    )
+
+    assert final == output
+    assert (input_tokens, output_tokens, cost, count) == (0, 0, None, 2)
 
 
 def test_codex_discovery_reads_visible_cache_and_configured_providers(tmp_path, monkeypatch):
@@ -218,6 +287,33 @@ def test_native_output_parser_prefers_cli_reported_cost():
     assert reported_cost == 0.03125
 
 
+def test_reasonix_stream_output_keeps_live_text_final_usage_and_cost():
+    output = "\n".join(
+        [
+            json.dumps({"kind": "text", "text": "STREAM"}),
+            json.dumps({"kind": "message", "text": "STREAM_OK"}),
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "result": "STREAM_OK",
+                    "total_cost_usd": 0.000043,
+                    "usage": {"input_tokens": 13220, "output_tokens": 7},
+                }
+            ),
+        ]
+    )
+
+    final, input_tokens, output_tokens, reported_cost, event_count = (
+        EvaluationService._parse_native_output("reasonix_cli", output, lambda *_args: None)
+    )
+
+    assert final == "STREAM_OK"
+    assert (input_tokens, output_tokens) == (13220, 7)
+    assert reported_cost == 0.000043
+    assert event_count == 3
+
+
 def test_kimi_discovery_uses_cli_catalog(monkeypatch):
     monkeypatch.setattr("agentbench.model_discovery.native_cli_status", _installed_cli)
     monkeypatch.setattr(
@@ -248,6 +344,76 @@ def test_qoder_discovery_falls_back_to_current_login(monkeypatch):
     assert result["models"][0]["id"] == "auto"
     assert "当前登录配置" in result["models"][0]["label"]
     assert result["warnings"]
+
+
+def test_cursor_discovery_uses_account_model_catalog(monkeypatch):
+    monkeypatch.setattr("agentbench.model_discovery.native_cli_status", _installed_cli)
+    monkeypatch.setattr(
+        "agentbench.model_discovery.subprocess.run",
+        lambda args, **_kwargs: CompletedProcess(
+            args,
+            0,
+            json.dumps({"models": [{"id": "auto", "label": "Auto"}, {"id": "composer-1", "label": "Composer 1"}]}),
+            "",
+        ),
+    )
+
+    result = discover_models(source="cursor-cli")
+
+    assert result["source_label"] == "Cursor Agent"
+    assert [model["id"] for model in result["models"]] == ["auto", "composer-1"]
+    assert result["models"][0]["configured"] is True
+
+
+def test_cursor_discovery_parses_human_readable_model_catalog(monkeypatch):
+    monkeypatch.setattr("agentbench.model_discovery.native_cli_status", _installed_cli)
+    monkeypatch.setattr(
+        "agentbench.model_discovery.subprocess.run",
+        lambda args, **_kwargs: CompletedProcess(
+            args,
+            0,
+            "Available models:\n* auto  Auto (recommended)\n  composer-1  Composer 1\n  claude-4.5-sonnet - Claude 4.5 Sonnet\n",
+            "",
+        ),
+    )
+
+    result = discover_models(source="cursor-cli")
+
+    assert [model["id"] for model in result["models"]] == [
+        "auto",
+        "claude-4.5-sonnet",
+        "composer-1",
+    ]
+    assert result["models"][0]["label"] == "Auto (recommended)"
+
+
+def test_cursor_stream_parser_accumulates_partial_assistant_output():
+    output = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp_ms": 1,
+                    "message": {"content": [{"type": "text", "text": "答"}]},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp_ms": 2,
+                    "message": {"content": [{"type": "text", "text": "案"}]},
+                }
+            ),
+            json.dumps({"type": "result", "duration_ms": 10}),
+        ]
+    )
+
+    final, _input, _output, _cost, count = EvaluationService._parse_native_output(
+        "cursor_cli", output
+    )
+
+    assert final == "答案"
+    assert count == 3
 
 
 def test_discovery_rejects_link_local_metadata_address(monkeypatch):

@@ -41,6 +41,25 @@ def test_cli_install_plan_uses_only_code_owned_argv():
         "-g",
         "@qodercn-ai/qoderclicn",
     ]
+    cursor_plan = resolve_cli_install_plan(
+        "cursor_cli",
+        lambda candidate: "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+        if candidate == "powershell.exe"
+        else None,
+    )
+    assert cursor_plan["supported"] is True
+    assert cursor_plan["manager"] == "powershell"
+    assert cursor_plan["command"] == "irm 'https://cursor.com/install?win32=true' | iex"
+    assert cursor_plan["argv"][-1] == "irm 'https://cursor.com/install?win32=true' | iex"
+    harness_plan = resolve_cli_install_plan("deepseek_harness", resolver)
+    assert harness_plan["supported"] is True
+    assert harness_plan["command"] == "npm install -g @deepseek-ai/dsh"
+    assert harness_plan["argv"] == [
+        "C:/Program Files/nodejs/npm.cmd",
+        "install",
+        "-g",
+        "@deepseek-ai/dsh",
+    ]
 
 
 def test_workspace_rejects_path_escape(tmp_path):
@@ -71,6 +90,27 @@ def test_custom_native_cli_is_started_without_shell_interpolation(tmp_path):
     )
     assert result.ok is True
     assert '"result": "OK"' in result.stdout
+
+
+def test_native_cli_preserves_required_windows_system_paths(monkeypatch, tmp_path):
+    monkeypatch.setenv("SYSTEMDRIVE", "Q:")
+    monkeypatch.setenv("PROGRAMDATA", "Q:\\ProgramData")
+    workspace = Workspace(tmp_path / "windows-env-run")
+
+    result = run_native_cli(
+        executable=sys.executable,
+        args=[
+            "-c",
+            "import os; print(os.environ.get('SYSTEMDRIVE')); print(os.environ.get('PROGRAMDATA'))",
+        ],
+        workspace=workspace,
+        placeholders={},
+        extra_env={},
+        timeout=10,
+    )
+
+    assert result.ok is True
+    assert result.stdout.splitlines() == ["Q:", "Q:\\ProgramData"]
 
 
 def test_run_native_cli_delivers_long_stdin_text_without_argv(tmp_path):
@@ -165,6 +205,45 @@ def test_native_cli_status_skips_an_unlaunchable_path_alias(monkeypatch):
         "version": "working-cli 2.0.0",
         "error": None,
     }
+
+
+def test_cursor_status_rejects_an_unrelated_agent_command(monkeypatch):
+    monkeypatch.setattr(
+        "agentbench.execution._native_cli_candidates", lambda _name: ["unrelated-agent.exe"]
+    )
+
+    def fake_run(args, **_kwargs):
+        output = "generic-agent 1.0\n" if args[1] == "--version" else "Generic automation agent\n"
+        return CompletedProcess(args, 0, output, "")
+
+    monkeypatch.setattr("agentbench.execution.subprocess.run", fake_run)
+
+    status = native_cli_status("agent")
+
+    assert status["installed"] is False
+    assert "不是 Cursor Agent CLI" in status["error"]
+    assert "cursor.com/install" in status["install_command"]
+
+
+def test_cursor_status_accepts_cursor_agent_help_signature(monkeypatch):
+    monkeypatch.setattr(
+        "agentbench.execution._native_cli_candidates", lambda _name: ["agent.exe"]
+    )
+
+    def fake_run(args, **_kwargs):
+        output = (
+            "2026.08.1\n"
+            if args[1] == "--version"
+            else "Cursor Agent\nCommands: models create-chat install-shell-integration\n"
+        )
+        return CompletedProcess(args, 0, output, "")
+
+    monkeypatch.setattr("agentbench.execution.subprocess.run", fake_run)
+
+    status = native_cli_status("agent")
+
+    assert status["installed"] is True
+    assert status["executable"] == "agent.exe"
 
 
 def test_npm_codex_shim_resolves_to_native_binary(tmp_path):

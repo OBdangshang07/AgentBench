@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+import yaml
 
 from .execution import native_cli_status
 
@@ -25,6 +26,8 @@ SOURCE_META: dict[str, tuple[str, str | None]] = {
     "aider-cli": ("Aider", "aider"),
     "kimi-code": ("Kimi Code", "kimi"),
     "qoder-cli": ("Qoder", "qoderclicn"),
+    "cursor-cli": ("Cursor Agent", "agent"),
+    "deepseek-harness": ("DeepSeek Harness", "dsh"),
 }
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -49,6 +52,142 @@ def _read_toml(path: Path) -> dict[str, Any]:
         return value if isinstance(value, dict) else {}
     except (OSError, ValueError, tomllib.TOMLDecodeError):
         return {}
+
+
+def _dsh_home() -> Path:
+    configured = os.getenv("DSH_HOME", "").strip()
+    return Path(configured).expanduser() if configured else Path.home() / ".dsh"
+
+
+def _read_yaml(path: Path) -> tuple[dict[str, Any], str | None]:
+    try:
+        if not path.is_file():
+            return {}, None
+        if path.stat().st_size > _MAX_CONFIG_BYTES:
+            return {}, "Harness settings.yaml 超过 5 MB，已拒绝读取"
+        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+        return (value if isinstance(value, dict) else {}), None
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        return {}, f"无法解析 Harness settings.yaml：{exc}"
+
+
+def _harness_model_entries(value: Any) -> list[tuple[str, str]]:
+    if isinstance(value, dict):
+        value = value.get("models") or []
+    if not isinstance(value, list):
+        return []
+    output: list[tuple[str, str]] = []
+    for item in value:
+        if isinstance(item, dict):
+            model_id = str(item.get("id") or item.get("model") or item.get("name") or "").strip()
+            label = str(item.get("name") or item.get("label") or model_id).strip()
+        else:
+            model_id = str(item).strip()
+            label = model_id
+        if model_id:
+            output.append((model_id, label or model_id))
+    return output
+
+
+def _discover_deepseek_harness() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    settings_path = _dsh_home() / "settings.yaml"
+    settings, error = _read_yaml(settings_path)
+    warnings: list[str] = [error] if error else []
+    default = settings.get("agent-default-model")
+    default = default if isinstance(default, dict) else {}
+    default_provider = str(default.get("provider") or "deepseek-official").strip()
+    default_model = str(default.get("model") or "deepseek-v4-flash").strip()
+    default_effort = str(default.get("reasoningEffort") or "high").strip().lower()
+    if default_effort not in {"off", "high", "max"}:
+        default_effort = "high"
+    provider_labels: dict[str, str] = {
+        "deepseek-official": "DeepSeek Official",
+    }
+    candidates: list[tuple[str, str, str, str]] = []
+
+    for model_id, label in _harness_model_entries(settings.get("llm-deepseek")):
+        candidates.append(("deepseek-official", provider_labels["deepseek-official"], model_id, label))
+
+    pi_ai = settings.get("llm-pi-ai")
+    pi_providers = pi_ai.get("providers") if isinstance(pi_ai, dict) else {}
+    if isinstance(pi_providers, dict):
+        for provider_id, provider_value in pi_providers.items():
+            if not isinstance(provider_value, dict):
+                continue
+            provider_key = str(provider_id).strip()
+            provider_label = str(
+                provider_value.get("displayName") or provider_value.get("display_name") or provider_key
+            ).strip()
+            provider_labels[provider_key] = provider_label
+            for model_id, label in _harness_model_entries(provider_value):
+                candidates.append((provider_key, provider_label, model_id, label))
+
+    provider_labels.setdefault(default_provider, default_provider or "DeepSeek Harness")
+    candidates.insert(
+        0,
+        (default_provider, provider_labels[default_provider], default_model, default_model),
+    )
+    if not settings:
+        candidates.extend(
+            [
+                ("deepseek-official", "DeepSeek Official", "deepseek-v4-flash", "DeepSeek V4 Flash"),
+                ("deepseek-official", "DeepSeek Official", "deepseek-v4-pro", "DeepSeek V4 Pro"),
+            ]
+        )
+        if not error:
+            warnings.append(
+                "尚未找到 Harness settings.yaml；当前列出官方默认目录。运行 dsh web 后可在设置中选择实际默认模型。"
+            )
+
+    models = [
+        _model_option(
+            model_id,
+            label=label,
+            provider_id=provider_id,
+            provider_label=provider_label,
+            source="DeepSeek Harness settings.yaml",
+            configured=provider_id == default_provider and model_id == default_model,
+            is_default=provider_id == default_provider and model_id == default_model,
+        )
+        for provider_id, provider_label, model_id, label in candidates
+    ]
+    providers = [
+        {
+            "id": provider_id,
+            "label": provider_label,
+            "is_default": provider_id == default_provider,
+        }
+        for provider_id, provider_label in provider_labels.items()
+    ]
+    effort_label = {"off": "快速", "high": "标准", "max": "极限"}[default_effort]
+    warnings.append(
+        "Harness 为 Developer Preview；headless 运行使用 settings.yaml 中的默认模型，"
+        f"全局推理档位为 {effort_label}（{default_effort.upper()}）。"
+        "AgentBench 运行时可通过隔离配置按任务覆盖推理档位，不会改写全局设置；"
+        "模型身份仍以 Harness 当前默认项为准。"
+    )
+    return models, providers, warnings
+
+
+def deepseek_harness_default_selection() -> tuple[str, str, str]:
+    """Return Harness' default provider, model and normalized reasoning effort."""
+    settings, _ = _read_yaml(_dsh_home() / "settings.yaml")
+    default = settings.get("agent-default-model")
+    default = default if isinstance(default, dict) else {}
+    effort = str(default.get("reasoningEffort") or "high").strip().lower()
+    if effort not in {"off", "high", "max"}:
+        effort = "high"
+    return (
+        str(default.get("provider") or "deepseek-official").strip(),
+        str(default.get("model") or "deepseek-v4-flash").strip(),
+        effort,
+    )
+
+
+def deepseek_harness_default_model() -> tuple[str, str]:
+    """Compatibility wrapper returning the model identity used by headless runs."""
+    provider, model, _effort = deepseek_harness_default_selection()
+    return provider, model
 
 
 def _model_option(
@@ -636,6 +775,105 @@ def _discover_headless_agent(
     ], [f"{label} 未返回稳定模型目录；选择“当前登录配置”时由 Agent 自身决定模型"]
 
 
+def _cursor_text_models(text: str) -> list[tuple[str, str]]:
+    """Parse Cursor's human-readable ``agent models`` output defensively."""
+    ignored = {
+        "available",
+        "available model",
+        "available models",
+        "current",
+        "default",
+        "id",
+        "model",
+        "models",
+        "name",
+    }
+    parsed: list[tuple[str, str]] = []
+    for raw_line in _ANSI_ESCAPE.sub("", text).splitlines():
+        line = raw_line.strip().strip("│|")
+        line = re.sub(r"^[*+>✓✔•●○\-]+\s*", "", line).strip()
+        if not line or line.lower().rstrip(":") in ignored:
+            continue
+        match = re.match(
+            r"^(?P<id>[A-Za-z0-9][A-Za-z0-9._:/+-]*)"
+            r"(?:\s*(?:\||\t|\s+-\s+|\s{2,})\s*(?P<label>.+))?$",
+            line,
+        )
+        if not match:
+            continue
+        model_id = match.group("id").strip()
+        label = (match.group("label") or model_id).strip().strip("│|")
+        if model_id.lower() in ignored or label.lower().rstrip(":") in ignored:
+            continue
+        parsed.append((model_id, label))
+    return parsed
+
+
+def _discover_cursor(executable: str | None) -> tuple[list[dict[str, Any]], list[str]]:
+    models: list[dict[str, Any]] = []
+    if executable:
+        try:
+            result = subprocess.run(
+                [executable, "models"],
+                capture_output=True,
+                text=True,
+                timeout=12,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            result = None
+        if result is not None and result.returncode == 0:
+            text = _ANSI_ESCAPE.sub("", result.stdout or "").strip()
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                payload = None
+            items = (
+                payload.get("models") or payload.get("data") or []
+                if isinstance(payload, dict)
+                else payload
+                if isinstance(payload, list)
+                else []
+            )
+            parsed: list[tuple[str, str]] = []
+            for item in items:
+                if isinstance(item, dict):
+                    model_id = str(item.get("id") or item.get("name") or "").strip()
+                    label = str(item.get("label") or item.get("name") or model_id).strip()
+                else:
+                    model_id = str(item).strip()
+                    label = model_id
+                if model_id:
+                    parsed.append((model_id, label))
+            if not parsed:
+                parsed = _cursor_text_models(text)
+            for model_id, model_label in parsed:
+                models.append(
+                    _model_option(
+                        model_id,
+                        label=model_label,
+                        provider_id="default",
+                        provider_label="Cursor Agent",
+                        source="Cursor Agent CLI · 账号模型目录",
+                        configured=True,
+                        is_default=model_id.lower() == "auto" or not models,
+                    )
+                )
+    if models:
+        return models, []
+    return [
+        _model_option(
+            "auto",
+            label="Cursor 当前账号自动模型",
+            provider_id="default",
+            provider_label="Cursor Agent",
+            source="Cursor Agent CLI · 自动选择",
+            configured=bool(executable),
+            is_default=True,
+        )
+    ], ["Cursor Agent 未返回账号模型目录；选择“自动模型”时由 Cursor 自行决定模型"]
+
+
 def discover_models(
     *,
     source: str,
@@ -689,6 +927,10 @@ def discover_models(
         models, warnings = _discover_headless_agent(
             capability.get("executable"), label="Qoder", source="Qoder CLI"
         )
+    elif source == "cursor-cli":
+        models, warnings = _discover_cursor(capability.get("executable"))
+    elif source == "deepseek-harness":
+        models, providers, warnings = _discover_deepseek_harness()
     else:
         models = []
         warnings = [f"{source_label} 当前未提供稳定的模型目录命令，请手动输入模型 ID"]

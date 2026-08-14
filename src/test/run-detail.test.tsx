@@ -1,7 +1,8 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import RunDetailPage from "../pages/RunDetail";
+import { WorkspaceUxProvider } from "../components/WorkspaceUx";
 import type { RunDetail } from "../types";
 
 function makeRun(overrides: Partial<RunDetail> = {}): RunDetail {
@@ -47,7 +48,7 @@ function renderRunPage(run: RunDetail) {
     const url = String(input);
     let value: unknown = {};
     if (url.endsWith("/health")) {
-      value = { name: "AgentBench Desktop", version: "3.1.1" };
+        value = { name: "AgentBench Desktop", version: "5.2.3" };
     } else if (url.includes("/runs?experiment_id=")) {
       value = [run];
     } else if (url.includes("/runs/run-1")) {
@@ -64,6 +65,22 @@ function renderRunPage(run: RunDetail) {
     </MemoryRouter>,
   );
   return fetchMock;
+}
+
+function renderRunPageWithNotifications(run: RunDetail) {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    const value = url.includes("/runs?experiment_id=") ? [run] : url.includes("/runs/run-1") ? run : { name: "AgentBench Desktop", version: "5.2.3" };
+    return { ok: true, status: 200, json: async () => value } as Response;
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  render(
+    <WorkspaceUxProvider>
+      <MemoryRouter initialEntries={["/runs/run-1"]}>
+        <Routes><Route path="/runs/:runId" element={<RunDetailPage />} /></Routes>
+      </MemoryRouter>
+    </WorkspaceUxProvider>,
+  );
 }
 
 describe("RunDetail exam question card", () => {
@@ -103,6 +120,13 @@ describe("RunDetail exam question card", () => {
     expect(screen.queryByText("题目")).not.toBeInTheDocument();
   });
 
+  it("shows a clear message when a workspace cannot be opened", async () => {
+    renderRunPageWithNotifications(makeRun());
+    fireEvent.click(await screen.findByRole("button", { name: /打开工作区/ }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法打开工作区");
+    expect(screen.getByRole("alert")).toHaveTextContent("只能在 AgentBench 桌面客户端中打开本地工作区");
+  });
+
   it("always exposes a return-to-experiment link", async () => {
     renderRunPage(makeRun());
 
@@ -116,5 +140,27 @@ describe("RunDetail exam question card", () => {
 
     expect(await screen.findByRole("link", { name: /返回实验/ })).toHaveAttribute("href", "/experiments/exp-1");
     expect(screen.getByText("单任务追踪")).toBeInTheDocument();
+  });
+
+  it("shows the frozen runtime condition and treats missing telemetry as N/A", async () => {
+    renderRunPage(makeRun({
+      requested_reasoning_effort: "max",
+      effective_reasoning_effort: "high",
+      effort_source: "mapped",
+      effort_verified: true,
+      telemetry_status: "unavailable",
+      tokens_input: 0,
+      tokens_output: 0,
+      runtime_identity: {
+        agent_provider: "deepseek-pro",
+        model_name: "deepseek-pro",
+        runner_version: "1.2.3",
+      },
+    }));
+
+    expect(await screen.findByText("MAX → HIGH")).toBeInTheDocument();
+    expect(screen.getByText("deepseek-pro / deepseek-pro")).toBeInTheDocument();
+    expect(screen.getByText(/Agent 未上报/)).toBeInTheDocument();
+    expect(screen.getAllByText("N/A").length).toBeGreaterThan(0);
   });
 });

@@ -5,6 +5,7 @@ import fnmatch
 import hashlib
 import os
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -222,7 +223,9 @@ SAFE_ENV_KEYS = {
     "PATH",
     "PATHEXT",
     "SYSTEMROOT",
+    "SYSTEMDRIVE",
     "WINDIR",
+    "PROGRAMDATA",
     "TEMP",
     "TMP",
     "USERPROFILE",
@@ -300,6 +303,26 @@ CLI_INSTALL_RECIPES: dict[str, dict[str, Any]] = {
         "command": "uv tool install --python 3.13 kimi-cli",
         "source": "PyPI · kimi-cli（由 uv tool 隔离安装）",
     },
+    "cursor_cli": {
+        "manager": "powershell",
+        "manager_candidates": ["powershell.exe", "powershell"],
+        "args": [
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "irm 'https://cursor.com/install?win32=true' | iex",
+        ],
+        "command": "irm 'https://cursor.com/install?win32=true' | iex",
+        "source": "Cursor 官方 Windows 安装器 · cursor.com/install",
+    },
+    "deepseek_harness": {
+        "manager": "npm",
+        "manager_candidates": ["npm.cmd", "npm"],
+        "args": ["install", "-g", "@deepseek-ai/dsh"],
+        "command": "npm install -g @deepseek-ai/dsh",
+        "source": "npm 官方包 · @deepseek-ai/dsh（Developer Preview）",
+    },
 }
 
 MANUAL_INSTALL_GUIDANCE = {
@@ -315,6 +338,8 @@ INSTALL_COMMAND_BY_EXECUTABLE = {
     "aider": CLI_INSTALL_RECIPES["aider_cli"]["command"],
     "kimi": CLI_INSTALL_RECIPES["kimi_code_cli"]["command"],
     "qoderclicn": CLI_INSTALL_RECIPES["qoder_cli"]["command"],
+    "agent": CLI_INSTALL_RECIPES["cursor_cli"]["command"],
+    "dsh": CLI_INSTALL_RECIPES["deepseek_harness"]["command"],
 }
 
 
@@ -404,6 +429,27 @@ def _qoder_desktop_path() -> Path | None:
     return next((item for item in candidates if item and item.is_file()), None)
 
 
+def _codex_desktop_context(result: dict[str, Any]) -> dict[str, Any]:
+    """Explain the common Windows Desktop-alias/standalone-CLI split honestly."""
+    configured_home = os.getenv("CODEX_HOME")
+    codex_home = Path(configured_home).expanduser() if configured_home else Path.home() / ".codex"
+    config_path = codex_home / "config.toml"
+    executable = str(result.get("executable") or "")
+    windows_alias = "windowsapps" in executable.lower()
+    if windows_alias:
+        result["desktop_installed"] = True
+        result["desktop_executable"] = executable
+    if config_path.is_file():
+        result["desktop_configured"] = True
+        result["config_path"] = str(config_path)
+    if windows_alias or config_path.is_file():
+        result["note"] = (
+            "检测到 Codex Desktop/配置，但当前没有可由 AgentBench 调用的独立 Codex CLI；"
+            "请安装 @openai/codex，安装后重启 AgentBench 以刷新 PATH"
+        )
+    return result
+
+
 def _npm_native_binary(shim: str, executable: str | None) -> str | None:
     """Resolve known npm .cmd shims to binaries that preserve multiline arguments."""
     shim_path = Path(shim)
@@ -465,6 +511,20 @@ def _native_cli_candidates(executable: str | None) -> list[str]:
             if key not in seen:
                 seen.add(key)
                 candidates.append(resolved)
+    if not explicit_path and _executable_name(executable) == "agent":
+        # Cursor's official Windows installer updates the user PATH, which a
+        # running desktop process may not inherit until restart. Probe its
+        # documented install directory as a portable fallback.
+        local_app_data = os.getenv("LOCALAPPDATA")
+        if local_app_data:
+            cursor_root = Path(local_app_data) / "cursor-agent"
+            for filename in ("agent.exe", "cursor-agent.exe", "agent.cmd"):
+                resolved = cursor_root / filename
+                if resolved.is_file():
+                    key = os.path.normcase(os.path.abspath(resolved))
+                    if key not in seen:
+                        seen.add(key)
+                        candidates.append(str(resolved))
     expanded: list[str] = []
     expanded_seen: set[str] = set()
     for candidate in candidates:
@@ -491,6 +551,8 @@ def native_cli_status(executable: str | None) -> dict[str, Any]:
         }
         if name in INSTALL_COMMAND_BY_EXECUTABLE:
             result["install_command"] = INSTALL_COMMAND_BY_EXECUTABLE[name]
+        if name == "codex":
+            result = _codex_desktop_context(result)
         if name == "opencode":
             desktop_path = _opencode_desktop_path()
             if desktop_path:
@@ -544,6 +606,33 @@ def native_cli_status(executable: str | None) -> dict[str, Any]:
         version_text = (result.stdout or result.stderr).strip()
         version = version_text.splitlines()[0][:200] if version_text else None
         if result.returncode == 0:
+            if _executable_name(executable) == "agent":
+                cursor_identity = "cursor" in (version_text + " " + resolved).lower()
+                if not cursor_identity:
+                    try:
+                        help_result = subprocess.run(
+                            [resolved, "--help"],
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                            check=False,
+                        )
+                        help_text = (help_result.stdout or help_result.stderr).lower()
+                        cursor_identity = "cursor agent" in help_text or all(
+                            marker in help_text
+                            for marker in ("create-chat", "install-shell-integration", "models")
+                        )
+                    except (OSError, subprocess.TimeoutExpired):
+                        cursor_identity = False
+                if not cursor_identity:
+                    last_failure = {
+                        "installed": False,
+                        "executable": resolved,
+                        "version": version or None,
+                        "error": "检测到同名 agent 命令，但它不是 Cursor Agent CLI",
+                        "install_command": INSTALL_COMMAND_BY_EXECUTABLE["agent"],
+                    }
+                    continue
             status = {
                 "installed": True,
                 "executable": resolved,
@@ -566,7 +655,11 @@ def native_cli_status(executable: str | None) -> dict[str, Any]:
             "error": f"Version check exited {result.returncode}",
         }
 
-    return last_failure or {"installed": False, "executable": executable, "version": None}
+    result = last_failure or {"installed": False, "executable": executable, "version": None}
+    if _executable_name(executable) == "codex":
+        result = _codex_desktop_context(result)
+        result.setdefault("install_command", INSTALL_COMMAND_BY_EXECUTABLE["codex"])
+    return result
 
 
 def run_native_cli(
@@ -599,6 +692,11 @@ def run_native_cli(
     start = time.perf_counter()
     process: subprocess.Popen[str] | None = None
     last_start_error: OSError | None = None
+    popen_options: dict[str, Any] = {}
+    if os.name == "nt":
+        popen_options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        popen_options["start_new_session"] = True
     for resolved in candidates:
         try:
             process = subprocess.Popen(
@@ -613,6 +711,7 @@ def run_native_cli(
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                **popen_options,
             )
             break
         except OSError as exc:
@@ -664,15 +763,11 @@ def run_native_cli(
         now = time.monotonic()
         if cancel_event and cancel_event.is_set():
             error_code = "cancelled"
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
+            _terminate_process_tree(process)
             break
         if deadline is not None and now > deadline:
             error_code = "runtime_safety_limit"
-            process.kill()
+            _terminate_process_tree(process)
             break
         if heartbeat_callback is not None and now >= next_heartbeat:
             with suppress(Exception):
@@ -707,3 +802,31 @@ def run_native_cli(
         int((time.perf_counter() - start) * 1000),
         None if process.returncode == 0 else "cli_failed",
     )
+
+
+def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
+    """Stop a CLI and every helper it spawned without targeting unrelated processes."""
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        with suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+    else:
+        with suppress(OSError):
+            os.killpg(process.pid, signal.SIGTERM)
+    if process.poll() is None:
+        with suppress(OSError):
+            process.terminate()
+        with suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=3)
+    if process.poll() is None:
+        with suppress(OSError):
+            process.kill()

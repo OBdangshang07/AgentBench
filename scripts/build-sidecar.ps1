@@ -21,7 +21,9 @@ if ($LASTEXITCODE -ne 0) {
   --name $sidecarName `
   --collect-all keyring `
   --collect-all uvicorn `
+  --collect-all winpty `
   --add-data "backend\agentbench\ncre_assets;agentbench\ncre_assets" `
+  --add-data "backend\agentbench\frontend_suite_assets;agentbench\frontend_suite_assets" `
   ".\backend\agentbench_entry.py"
 if ($LASTEXITCODE -ne 0) {
   throw "PyInstaller failed with exit code $LASTEXITCODE"

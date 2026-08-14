@@ -1,5 +1,5 @@
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:43765/api/v1";
-export const APP_VERSION = "3.1.1";
+export const APP_VERSION = "5.2.3";
 
 let compatibleBackend = false;
 let compatibilityCheck: Promise<void> | null = null;

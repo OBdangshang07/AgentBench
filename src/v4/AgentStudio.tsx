@@ -1,0 +1,1798 @@
+import {
+  Activity,
+  AlertTriangle,
+  Archive,
+  AtSign,
+  Bot,
+  Brain,
+  Camera,
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  CircleStop,
+  Clock3,
+  Code2,
+  Copy,
+  Cpu,
+  File,
+  FileCode2,
+  FileDiff,
+  FileSearch,
+  Folder,
+  FolderOpen,
+  Gauge,
+  GitBranch,
+  GitFork,
+  Globe2,
+  Download,
+  Edit3,
+  Maximize2,
+  MessageSquarePlus,
+  Minimize2,
+  ListChecks,
+  Paperclip,
+  PanelBottomClose,
+  PanelBottomOpen,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
+  Play,
+  Plus,
+  RefreshCw,
+  Search,
+  Send,
+  ShieldCheck,
+  Sparkles,
+  TerminalSquare,
+  Trash2,
+  Upload,
+  User,
+  X,
+} from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { isTauri } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { api, downloadUrl } from "../lib/api";
+import { copyText } from "../lib/clipboard";
+import { useApi } from "../lib/useApi";
+import { useWorkspaceUx } from "../components/WorkspaceUx";
+import type { ModelConfig, Runner } from "../types";
+import type {
+  AgentSession,
+  AgentSessionDetail,
+  ApprovalRequest,
+  BrowserSnapshot,
+  BrowserStatus,
+  FileChange,
+  PermissionProfile,
+  Project,
+  ProjectFileSearch,
+  ProjectTree,
+  RuntimeProfile,
+  ReasoningEffort,
+  SessionAttachment,
+  SkillPack,
+  StudioEvent,
+  StudioTurn,
+} from "./types";
+import { useSessionStream } from "./useSessionStream";
+import { TerminalView } from "./TerminalView";
+
+const activeStatuses = new Set(["queued", "preparing", "running", "waiting_approval"]);
+
+function time(value: string) {
+  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+}
+
+function duration(ms: number) {
+  if (!ms) return "0s";
+  if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))}s`;
+  return `${Math.floor(ms / 60_000)}m ${Math.round(ms % 60_000 / 1000)}s`;
+}
+
+function fileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+const permissionLabels: Record<PermissionProfile, string> = {
+  readonly: "只读",
+  workspace: "工作区",
+  standard: "标准开发",
+  full: "完全访问",
+};
+
+const effortLabels: Record<ReasoningEffort, string> = {
+  low: "低",
+  medium: "中",
+  high: "高",
+  xhigh: "极高",
+  max: "最大",
+};
+
+const permissionOptions: ComposerMenuOption[] = [
+  { value: "readonly", label: "只读", description: "仅查看和分析，不写入项目" },
+  { value: "workspace", label: "工作区", description: "仅修改当前已授权项目" },
+  { value: "standard", label: "标准开发", description: "允许命令、测试和开发工具" },
+  { value: "full", label: "完全访问", description: "跳过 Agent 沙箱与逐项审批" },
+];
+
+const effortOptions: ComposerMenuOption[] = [
+  { value: "low", label: "低", description: "更快响应，适合简单操作" },
+  { value: "medium", label: "中", description: "速度与分析深度均衡" },
+  { value: "high", label: "高", description: "复杂任务使用更多推理资源" },
+  { value: "xhigh", label: "极高", description: "深度分析高难任务" },
+  { value: "max", label: "最大", description: "使用 Agent 支持的最高强度" },
+];
+
+const statusLabels: Record<string, string> = {
+  idle: "就绪",
+  queued: "排队中",
+  preparing: "准备中",
+  running: "执行中",
+  waiting_approval: "等待审批",
+  completed: "已完成",
+  failed: "失败",
+  cancelled: "已停止",
+  interrupted: "已中断",
+};
+
+function eventTitle(event: StudioEvent) {
+  const payload = event.payload;
+  switch (event.event_type) {
+    case "turn.queued": return "任务已进入 Agent 队列";
+    case "turn.started": return "Agent 开始执行本轮任务";
+    case "native_cli.started": return "已启动原生 Agent 运行时";
+    case "live.phase": return String(payload.summary ?? "Agent 正在推进任务");
+    case "live.heartbeat": return String(payload.summary ?? "Agent 正在持续运行");
+    case "live.message": return payload.status === "streaming" ? "Agent 正在说明进度" : "Agent 进度说明";
+    case "live.tool": return `${payload.status === "completed" ? "工具完成" : payload.status === "preparing" ? "准备调用工具" : "正在调用工具"} · ${String(payload.tool ?? "tool")}`;
+    case "live.command": return "正在执行命令";
+    case "live.test": return payload.status === "completed" ? "测试执行完成" : "正在运行验证测试";
+    case "live.file_change": return `${String(payload.change ?? "修改")}文件 · ${String(payload.path ?? "工作区文件")}`;
+    case "tool.requested": return `调用工具 · ${String(payload.name ?? "tool")}`;
+    case "tool.completed": return `工具完成 · ${String(payload.name ?? "tool")}`;
+    case "file.changed": return `${String(payload.change_type ?? "修改")}文件 · ${String(payload.path ?? "")}`;
+    case "native_cli.event": return String(payload.summary ?? "原生 Agent 产生新活动");
+    case "assistant.message": return "Agent 已提交结果";
+    case "turn.completed": return "本轮任务已完成";
+    case "turn.cancelled": return "本轮任务已取消";
+    case "turn.failed": return `执行失败 · ${String(payload.error_code ?? "runtime_error")}`;
+    case "approval.requested": return `等待审批 · ${String(payload.title ?? "受保护操作")}`;
+    case "usage.updated": return "额度消耗已更新";
+    default: return event.event_type.replaceAll(".", " · ");
+  }
+}
+
+function eventDetail(event: StudioEvent) {
+  const payload = event.payload;
+  if (event.event_type === "live.message") return String(payload.text ?? "");
+  if (event.event_type === "live.tool") return String(payload.detail ?? "");
+  if (event.event_type === "live.command") return [payload.command, payload.detail].filter(Boolean).join("\n");
+  if (event.event_type === "live.test") return [payload.command, payload.detail].filter(Boolean).join("\n");
+  if (event.event_type === "live.phase") return String(payload.detail ?? "");
+  if (event.event_type === "live.heartbeat" && payload.phase) return `阶段：${String(payload.phase)}`;
+  if (event.event_type === "live.file_change" && payload.size_delta !== undefined) return `${Number(payload.size_delta) >= 0 ? "+" : ""}${String(payload.size_delta)} B`;
+  if (event.event_type === "tool.requested") return JSON.stringify(payload.arguments ?? {}, null, 2);
+  if (event.event_type === "tool.completed") return JSON.stringify(payload.result ?? {}, null, 2);
+  if (event.event_type === "turn.completed") return `${String(payload.steps ?? 0)} steps · ${duration(Number(payload.duration_ms ?? 0))}`;
+  if (event.event_type === "turn.failed" || event.event_type === "turn.cancelled") return String(payload.message ?? "");
+  return "";
+}
+
+function eventCategory(event: StudioEvent) {
+  if (event.event_type === "live.message") return "公开说明";
+  if (event.event_type.includes("tool")) return "工具";
+  if (event.event_type.includes("command")) return "命令";
+  if (event.event_type.includes("test")) return "验证";
+  if (event.event_type.includes("file")) return "文件";
+  if (event.event_type.includes("approval")) return "审批";
+  if (event.event_type === "live.heartbeat") return "状态";
+  return "进度";
+}
+
+function eventTone(event: StudioEvent) {
+  if (event.event_type.includes("failed") || event.event_type.includes("cancelled")) return "failed";
+  if (event.payload.status === "completed" || event.event_type.includes("completed")) return "done";
+  if (event.event_type === "live.message") return "message";
+  if (event.event_type.includes("tool") || event.event_type.includes("command") || event.event_type.includes("test")) return "action";
+  return "running";
+}
+
+function eventIcon(event: StudioEvent) {
+  if (event.event_type === "live.message") return <Sparkles size={15} />;
+  if (event.event_type.includes("command") || event.event_type.includes("test")) return <TerminalSquare size={15} />;
+  if (event.event_type.includes("file")) return <FileDiff size={15} />;
+  if (event.event_type.includes("approval")) return <ShieldCheck size={15} />;
+  if (event.event_type.includes("tool")) return <Code2 size={15} />;
+  if (eventTone(event) === "done") return <Check size={15} />;
+  return <Brain size={15} />;
+}
+
+function isSecondaryOperation(event: StudioEvent) {
+  if (["live.tool", "live.command", "live.test", "live.file_change", "tool.requested", "tool.completed", "file.changed"].includes(event.event_type)) {
+    return eventTone(event) !== "failed";
+  }
+  return false;
+}
+
+function operationSummary(events: StudioEvent[]) {
+  const tools = events.filter((event) => event.event_type.includes("tool")).length;
+  const commands = events.filter((event) => event.event_type.includes("command")).length;
+  const tests = events.filter((event) => event.event_type.includes("test")).length;
+  const files = events.filter((event) => event.event_type.includes("file")).length;
+  return [
+    tools ? `${tools} 个工具` : "",
+    commands ? `${commands} 条命令` : "",
+    tests ? `${tests} 次验证` : "",
+    files ? `${files} 项文件变更` : "",
+  ].filter(Boolean).join(" · ");
+}
+
+function isRuntimeNoise(event: StudioEvent) {
+  const path = String(event.payload.path ?? event.payload.detail ?? "").replaceAll("\\", "/").toLowerCase();
+  return [
+    "/node_modules/", "/.git/", "/__pycache__/", "/.venv/", "/.packaging-venv/",
+    "/browser-profile/", "/guide-browser-profile/", "/cache/", "/code cache/",
+    "/gpu cache/", "/session storage/", "/safe browsing/", "/gcm store/",
+  ].some((fragment) => path.includes(fragment));
+}
+
+function MarkdownMessage({ content }: { content: string }) {
+  const [copied, setCopied] = useState<string | null>(null);
+
+  async function copyCode(value: string) {
+    if (!await copyText(value)) return;
+    setCopied(value);
+    window.setTimeout(() => setCopied((current) => current === value ? null : current), 1600);
+  }
+
+  return (
+    <div className="v5-markdown">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          pre: ({ children }) => <>{children}</>,
+          code: ({ className, children, ...props }) => {
+            const value = String(children).replace(/\n$/, "");
+            const block = Boolean(className) || value.includes("\n");
+            if (!block) return <code className={className} {...props}>{children}</code>;
+            const language = className?.replace("language-", "") || "text";
+            return (
+              <section className="v5-code-block">
+                <header><span>{language}</span><button type="button" onClick={() => void copyCode(value)}>{copied === value ? <Check size={13} /> : <Copy size={13} />}{copied === value ? "已复制" : "复制"}</button></header>
+                <pre><code className={className} {...props}>{children}</code></pre>
+              </section>
+            );
+          },
+          a: ({ href, children }) => <a href={href} target={href?.startsWith("http") ? "_blank" : undefined} rel="noreferrer">{children}</a>,
+        }}
+      >{content}</ReactMarkdown>
+    </div>
+  );
+}
+
+interface SessionForm {
+  session_mode: "workspace" | "chat";
+  project_id: string;
+  profile_id: string;
+  title: string;
+  runner_id: string;
+  model_id: string;
+  permission_profile: PermissionProfile;
+  reasoning_effort: ReasoningEffort;
+  skill_pack_id: string;
+}
+
+interface TerminalTab {
+  id: string;
+  title: string;
+  shell: string;
+  running: boolean;
+  cursor: number;
+  text: string;
+}
+
+interface StudioPickerOption {
+  value: string;
+  label: string;
+  description: string;
+  disabled?: boolean;
+}
+
+interface ComposerMenuOption {
+  value: string;
+  label: string;
+  description: string;
+}
+
+interface StudioLayoutState {
+  left: boolean;
+  right: boolean;
+  dock: boolean;
+  dockExpanded: boolean;
+  leftWidth: number;
+  rightWidth: number;
+  dockHeight: number;
+}
+
+const studioLayoutKey = "agentbench.studio.layout.v2";
+
+function initialStudioLayout(): StudioLayoutState {
+  const defaults = { left: true, right: false, dock: false, dockExpanded: false, leftWidth: 286, rightWidth: 520, dockHeight: 246 };
+  try {
+    const stored = window.localStorage.getItem(studioLayoutKey);
+    if (stored) {
+      const value = { ...defaults, ...JSON.parse(stored) };
+      return {
+        ...value,
+        leftWidth: Math.max(210, Math.min(420, Number(value.leftWidth) || defaults.leftWidth)),
+        rightWidth: Math.max(380, Math.min(760, Number(value.rightWidth) || defaults.rightWidth)),
+        dockHeight: Math.max(180, Math.min(520, Number(value.dockHeight) || defaults.dockHeight)),
+      };
+    }
+  } catch {
+    // A locked-down WebView may deny storage; the defaults remain fully usable.
+  }
+  return defaults;
+}
+
+function StudioPicker({
+  ariaLabel,
+  caption,
+  icon,
+  value,
+  options,
+  disabled = false,
+  onChange,
+}: {
+  ariaLabel: string;
+  caption: string;
+  icon: ReactNode;
+  value: string;
+  options: StudioPickerOption[];
+  disabled?: boolean;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const rootRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const selected = options.find((option) => option.value === value);
+  const needle = query.trim().toLowerCase();
+  const visibleOptions = options.filter((option) => (
+    !needle || `${option.label} ${option.description}`.toLowerCase().includes(needle)
+  ));
+
+  useEffect(() => {
+    if (!open) return;
+    setQuery("");
+    const focusTimer = window.setTimeout(() => searchRef.current?.focus(), 0);
+    function dismiss(event: MouseEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", dismiss);
+    window.addEventListener("keydown", handleEscape);
+    return () => {
+      window.clearTimeout(focusTimer);
+      document.removeEventListener("mousedown", dismiss);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [open]);
+
+  return (
+    <div className={`v4-studio-picker ${open ? "open" : ""}`} ref={rootRef}>
+      <button
+        className="v4-studio-picker-trigger"
+        type="button"
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        disabled={disabled}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="v4-picker-icon">{icon}</span>
+        <span className="v4-picker-value"><small>{caption}</small><strong>{selected?.label ?? "请选择"}</strong></span>
+        <ChevronDown size={14} />
+      </button>
+      {open && (
+        <div className="v4-studio-picker-menu">
+          <header><span>{caption}</span><b>{options.length} 项</b></header>
+          {options.length > 6 && (
+            <label><Search size={14} /><input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`搜索${caption}`} /></label>
+          )}
+          <div role="listbox" aria-label={ariaLabel}>
+            {visibleOptions.map((option) => (
+              <button
+                type="button"
+                role="option"
+                aria-selected={option.value === value}
+                key={option.value}
+                disabled={option.disabled}
+                onClick={() => {
+                  onChange(option.value);
+                  setOpen(false);
+                }}
+              >
+                <span className="v4-picker-radio">{option.value === value && <Check size={12} />}</span>
+                <span><strong>{option.label}</strong><small>{option.disabled ? "未安装 · " : ""}{option.description}</small></span>
+                {!option.disabled && <i />}
+              </button>
+            ))}
+            {!visibleOptions.length && <p>没有匹配项</p>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ComposerMenu({
+  ariaLabel,
+  label,
+  icon,
+  value,
+  options,
+  disabled = false,
+  onChange,
+}: {
+  ariaLabel: string;
+  label: string;
+  icon: ReactNode;
+  value: string;
+  options: ComposerMenuOption[];
+  disabled?: boolean;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const selected = options.find((option) => option.value === value) ?? options[0];
+
+  useEffect(() => {
+    if (!open) return;
+    function dismiss(event: MouseEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", dismiss);
+    window.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", dismiss);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [open]);
+
+  return (
+    <div className={`v4-composer-menu ${open ? "open" : ""}`} ref={rootRef}>
+      <button
+        type="button"
+        className="v4-composer-menu-trigger"
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        disabled={disabled}
+        onClick={() => setOpen((current) => !current)}
+      >
+        {icon}<span>{label}</span><strong>{selected?.label}</strong><ChevronDown size={13} />
+      </button>
+      {open && (
+        <div className="v4-composer-menu-popover" role="listbox" aria-label={ariaLabel}>
+          <header><span>{label}</span><small>本会话立即生效</small></header>
+          {options.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              role="option"
+              aria-selected={option.value === value}
+              onClick={() => {
+                onChange(option.value);
+                setOpen(false);
+              }}
+            >
+              <span className="v4-picker-radio">{option.value === value && <Check size={12} />}</span>
+              <span><strong>{option.label}</strong><small>{option.description}</small></span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function AgentStudio() {
+  const { sessionId } = useParams();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const ux = useWorkspaceUx();
+  const createRequested = searchParams.get("new") === "1";
+  const [messageLimit, setMessageLimit] = useState(120);
+  const { data: sessions, refresh: refreshSessions } = useApi<AgentSession[]>("/sessions", 3_000);
+  const { data: projects } = useApi<Project[]>("/projects");
+  const { data: runners } = useApi<Runner[]>("/runners");
+  const { data: models } = useApi<ModelConfig[]>("/models");
+  const { data: skillPacks } = useApi<SkillPack[]>("/skill-packs", 10_000);
+  const { data: runtimeProfiles } = useApi<RuntimeProfile[]>("/runtime-profiles", 10_000);
+  const { data: browserStatus, refresh: refreshBrowserStatus } = useApi<BrowserStatus>("/browser/status", 4_000);
+  const { data: detail, loading, error, refresh } = useApi<AgentSessionDetail>(
+    sessionId ? `/sessions/${sessionId}?message_limit=${messageLimit}` : null,
+    (current) => current && activeStatuses.has(current.status) ? 750 : 2_500,
+  );
+  const isChat = detail?.session_mode === "chat";
+  const [treePath, setTreePath] = useState(".");
+  const { data: tree } = useApi<ProjectTree>(detail?.project_id && !isChat ? `/projects/${detail.project_id}/files?path=${encodeURIComponent(treePath)}` : null, 4_000);
+  const [railMode, setRailMode] = useState<"sessions" | "files" | "search">("sessions");
+  const [fileQuery, setFileQuery] = useState("");
+  const normalizedFileQuery = fileQuery.trim();
+  const { data: searchResult, loading: searchLoading, error: searchError } = useApi<ProjectFileSearch>(
+    detail?.project_id && !isChat && railMode === "search" && normalizedFileQuery.length >= 2
+      ? `/projects/${detail.project_id}/files/search?query=${encodeURIComponent(normalizedFileQuery)}&limit=120`
+      : null,
+  );
+  const persistedSequence = detail?.events.at(-1)?.seq ?? 0;
+  const { events: streamedEvents, connected } = useSessionStream(
+    sessionId,
+    persistedSequence,
+    Boolean(detail),
+  );
+  const [message, setMessage] = useState("");
+  const [contextFiles, setContextFiles] = useState<string[]>([]);
+  const [draftLoadedFor, setDraftLoadedFor] = useState("");
+  const [composerInspectorOpen, setComposerInspectorOpen] = useState(false);
+  const [runtimeConfigOpen, setRuntimeConfigOpen] = useState(false);
+  const [sessionQuery, setSessionQuery] = useState("");
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<{ path: string; content: string } | null>(null);
+  const [dock, setDock] = useState<"activity" | "terminal" | "browser" | "file" | "changes">("activity");
+  const [changePreview, setChangePreview] = useState<{
+    id: string; path: string; change_type: string; status: string; diff: string;
+    current_content: string; can_restore: boolean;
+  } | null>(null);
+  const [changeEdit, setChangeEdit] = useState("");
+  const [terminals, setTerminals] = useState<TerminalTab[]>([]);
+  const [activeTerminalId, setActiveTerminalId] = useState<string>();
+  const [terminalInput, setTerminalInput] = useState("");
+  const [browserUrl, setBrowserUrl] = useState("https://example.com");
+  const [browserPageId, setBrowserPageId] = useState<string>();
+  const [browserSnapshot, setBrowserSnapshot] = useState<BrowserSnapshot | null>(null);
+  const [browserImage, setBrowserImage] = useState<string | null>(null);
+  const [browserSelector, setBrowserSelector] = useState("");
+  const [browserValue, setBrowserValue] = useState("");
+  const [browserBusy, setBrowserBusy] = useState(false);
+  const [attachments, setAttachments] = useState<SessionAttachment[]>([]);
+  const [attachmentBusy, setAttachmentBusy] = useState(false);
+  const [draggingFiles, setDraggingFiles] = useState(false);
+  const [approvalBusy, setApprovalBusy] = useState<string | null>(null);
+  const [configBusy, setConfigBusy] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [sessionForm, setSessionForm] = useState<SessionForm>({ session_mode: "workspace", project_id: "", profile_id: "", title: "新 Agent 会话", runner_id: "", model_id: "", permission_profile: "workspace", reasoning_effort: "medium", skill_pack_id: "" });
+  const [studioLayout, setStudioLayout] = useState<StudioLayoutState>(initialStudioLayout);
+  const [followingLatest, setFollowingLatest] = useState(true);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const followingLatestRef = useRef(true);
+  const lastScrollTopRef = useRef(0);
+  const prependScrollHeightRef = useRef<number | null>(null);
+  const fileSearchRef = useRef<HTMLInputElement>(null);
+  const activeProjectRef = useRef<string | null>(null);
+  const terminalWriteChainRef = useRef<Promise<void>>(Promise.resolve());
+  const resizeRef = useRef<{ kind: "left" | "right" | "dock"; x: number; y: number; value: number } | null>(null);
+  const [resizing, setResizing] = useState<"left" | "right" | "dock" | null>(null);
+  const terminal = useMemo(() => terminals.find((item) => item.id === activeTerminalId) ?? terminals[0] ?? null, [activeTerminalId, terminals]);
+  const terminalText = terminal?.text ?? "";
+  const mentionQuery = useMemo(() => {
+    if (isChat) return null;
+    const match = message.match(/(?:^|\s)@([^\s@]*)$/);
+    return match ? match[1].replace(/^\[/, "").trim() : null;
+  }, [isChat, message]);
+  const { data: mentionResult, loading: mentionLoading } = useApi<ProjectFileSearch>(
+    detail?.project_id && !isChat && mentionQuery !== null && mentionQuery.length >= 2
+      ? `/projects/${detail.project_id}/files/search?query=${encodeURIComponent(mentionQuery)}&limit=12`
+      : null,
+  );
+
+  useEffect(() => {
+    if (!sessionId && sessions?.length && !createRequested) navigate(`/studio/${sessions[0].id}`, { replace: true });
+  }, [createRequested, navigate, sessionId, sessions]);
+
+  useEffect(() => {
+    if (!createRequested || !projects) return;
+    openCreate();
+    const next = new URLSearchParams(searchParams);
+    next.delete("new");
+    setSearchParams(next, { replace: true });
+  }, [createRequested, projects]);
+
+  useEffect(() => {
+    const projectId = detail?.project_id;
+    if (!projectId) return;
+    // Do not overwrite a tab selected while the first session payload is arriving.
+    // Reset navigation only when an already-loaded Studio switches projects.
+    if (activeProjectRef.current && activeProjectRef.current !== projectId) {
+      setTreePath(".");
+      setPreview(null);
+      setRailMode("sessions");
+      setFileQuery("");
+    }
+    activeProjectRef.current = projectId;
+    ux.setSelectedProjectId(projectId);
+  }, [detail?.project_id]);
+
+  useEffect(() => {
+    setAttachments([]);
+    setTerminals([]);
+    setActiveTerminalId(undefined);
+    setTerminalInput("");
+    followingLatestRef.current = true;
+    lastScrollTopRef.current = 0;
+    setFollowingLatest(true);
+    setMessageLimit(120);
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!sessionId || isChat) return;
+    let cancelled = false;
+    void api<Array<{ id: string; title: string; shell: string; running: boolean; cursor: number; chunks: Array<{ data: string }> }>>(`/sessions/${sessionId}/terminals`)
+      .then((values) => {
+        if (cancelled) return;
+        const restored = values.map((value) => ({ ...value, text: value.chunks.map((item) => item.data).join("").slice(-300_000) }));
+        setTerminals(restored);
+        setActiveTerminalId((current) => restored.some((item) => item.id === current) ? current : restored[0]?.id);
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [isChat, sessionId]);
+
+  useEffect(() => {
+    if (!sessionId) {
+      setMessage("");
+      setContextFiles([]);
+      setDraftLoadedFor("");
+      return;
+    }
+    let nextMessage = "";
+    let nextContext: string[] = [];
+    try {
+      const stored = JSON.parse(window.localStorage.getItem(`agentbench.studio.draft.v1.${sessionId}`) ?? "null") as { message?: unknown; context_files?: unknown } | null;
+      if (stored && typeof stored.message === "string") nextMessage = stored.message;
+      if (stored && Array.isArray(stored.context_files)) nextContext = stored.context_files.filter((item): item is string => typeof item === "string").slice(0, 30);
+    } catch {
+      // A malformed optional draft must never block the session itself.
+    }
+    setMessage(nextMessage);
+    setContextFiles(nextContext);
+    setDraftLoadedFor(sessionId);
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!sessionId || draftLoadedFor !== sessionId) return;
+    const key = `agentbench.studio.draft.v1.${sessionId}`;
+    try {
+      if (message || contextFiles.length) {
+        window.localStorage.setItem(key, JSON.stringify({ message, context_files: contextFiles, updated_at: new Date().toISOString() }));
+      } else {
+        window.localStorage.removeItem(key);
+      }
+    } catch {
+      // Draft persistence is best effort; the editor remains fully usable.
+    }
+  }, [contextFiles, draftLoadedFor, message, sessionId]);
+
+  useEffect(() => {
+    if (!detail) return;
+    setAttachments(detail.artifacts
+      .filter((artifact) => artifact.kind === "attachment" && !artifact.turn_id)
+      .map((artifact) => ({
+        id: artifact.id,
+        kind: "attachment" as const,
+        name: artifact.name,
+        size: artifact.size,
+        media_type: "application/octet-stream",
+        created_at: artifact.created_at,
+      })));
+  }, [detail?.artifacts, detail?.id]);
+
+  useEffect(() => {
+    if (!sessionId || !isTauri()) return;
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void getCurrentWebview().onDragDropEvent((event) => {
+      if (disposed) return;
+      if (event.payload.type === "over") setDraggingFiles(true);
+      else if (event.payload.type === "drop") {
+        setDraggingFiles(false);
+        void importAttachmentPaths(event.payload.paths);
+      } else setDraggingFiles(false);
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else stop = unlisten;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      stop?.();
+    };
+  }, [sessionId, attachments.length, attachmentBusy]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(studioLayoutKey, JSON.stringify(studioLayout));
+    } catch {
+      // Layout persistence is a convenience, not a runtime requirement.
+    }
+  }, [studioLayout]);
+
+  useEffect(() => {
+    if (railMode !== "search") return;
+    const timer = window.setTimeout(() => fileSearchRef.current?.focus(), 0);
+    return () => window.clearTimeout(timer);
+  }, [railMode]);
+
+  useEffect(() => {
+    function handleWorkbenchShortcuts(event: KeyboardEvent) {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      if (event.shiftKey && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        setStudioLayout((current) => ({ ...current, left: true }));
+        setRailMode("search");
+      } else if (!event.shiftKey && event.key.toLowerCase() === "b") {
+        event.preventDefault();
+        setStudioLayout((current) => ({ ...current, left: !current.left }));
+      } else if (!event.shiftKey && event.key.toLowerCase() === "j") {
+        event.preventDefault();
+        setStudioLayout((current) => ({ ...current, dock: !current.dock }));
+      }
+    }
+    window.addEventListener("keydown", handleWorkbenchShortcuts);
+    return () => window.removeEventListener("keydown", handleWorkbenchShortcuts);
+  }, []);
+
+  useEffect(() => {
+    function move(event: PointerEvent) {
+      const resize = resizeRef.current;
+      if (!resize) return;
+      setStudioLayout((current) => {
+        if (resize.kind === "left") return { ...current, leftWidth: Math.max(210, Math.min(420, resize.value + event.clientX - resize.x)) };
+        if (resize.kind === "right") return { ...current, rightWidth: Math.max(380, Math.min(760, resize.value - event.clientX + resize.x)) };
+        return { ...current, dockHeight: Math.max(180, Math.min(520, resize.value - event.clientY + resize.y)), dockExpanded: false };
+      });
+    }
+    function stopResize() {
+      resizeRef.current = null;
+      setResizing(null);
+    }
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stopResize);
+    window.addEventListener("pointercancel", stopResize);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stopResize);
+      window.removeEventListener("pointercancel", stopResize);
+    };
+  }, []);
+
+  function beginResize(kind: "left" | "right" | "dock", event: ReactPointerEvent<HTMLDivElement>) {
+    const value = kind === "left" ? studioLayout.leftWidth : kind === "right" ? studioLayout.rightWidth : studioLayout.dockHeight;
+    resizeRef.current = { kind, x: event.clientX, y: event.clientY, value };
+    setResizing(kind);
+    event.preventDefault();
+  }
+
+  function resizeWithKeyboard(kind: "left" | "right" | "dock", key: string) {
+    const direction = ["ArrowRight", "ArrowDown"].includes(key) ? 1 : ["ArrowLeft", "ArrowUp"].includes(key) ? -1 : 0;
+    if (!direction) return;
+    setStudioLayout((current) => kind === "left"
+      ? { ...current, leftWidth: Math.max(210, Math.min(420, current.leftWidth + direction * 16)) }
+      : kind === "right"
+        ? { ...current, rightWidth: Math.max(380, Math.min(760, current.rightWidth - direction * 16)) }
+        : { ...current, dockHeight: Math.max(180, Math.min(520, current.dockHeight - direction * 16)), dockExpanded: false });
+  }
+
+  const events = useMemo(() => {
+    const bySequence = new Map<number, StudioEvent>();
+    detail?.events.forEach((event) => bySequence.set(event.seq, event));
+    streamedEvents.forEach((event) => bySequence.set(event.seq, event));
+    return [...bySequence.values()].sort((left, right) => left.seq - right.seq);
+  }, [detail?.events, streamedEvents]);
+  const latestHeartbeat = useMemo(
+    () => [...events].reverse().find((event) => event.event_type === "live.heartbeat"),
+    [events],
+  );
+  const processEvents = useMemo(() => {
+    const keyed = new Map<string, StudioEvent>();
+    const standalone: StudioEvent[] = [];
+    for (const event of events) {
+      if (["usage.updated", "assistant.message", "native_cli.event", "live.usage"].includes(event.event_type)) continue;
+      if (event.event_type === "live.heartbeat" && !event.payload.summary) continue;
+      if (
+        event.event_type === "live.activity"
+        && !event.payload.detail
+        && ["activity", undefined].includes(event.payload.kind as string | undefined)
+      ) continue;
+      let key = "";
+      if (event.event_type === "live.message") key = `message:${String(event.payload.stream_id ?? event.seq)}`;
+      if (event.event_type === "live.tool" && event.payload.tool_id) key = `tool:${String(event.payload.tool_id)}`;
+      if (["live.command", "live.test"].includes(event.event_type) && event.payload.tool_id) key = `action:${String(event.payload.tool_id)}`;
+      if (event.event_type === "live.file_change" && event.payload.path) key = `file:${String(event.payload.path)}`;
+      if (event.event_type === "live.heartbeat" && event.payload.phase) key = "runtime:heartbeat";
+      if (key) keyed.set(key, event);
+      else standalone.push(event);
+    }
+    return [...standalone, ...keyed.values()].sort((left, right) => left.seq - right.seq);
+  }, [events]);
+  const primaryProcessEvents = useMemo(
+    () => processEvents.filter((event) => !isSecondaryOperation(event)),
+    [processEvents],
+  );
+  const operationEvents = useMemo(
+    () => processEvents.filter(isSecondaryOperation),
+    [processEvents],
+  );
+  const visibleOperationEvents = useMemo(
+    () => operationEvents.filter((event) => !isRuntimeNoise(event)),
+    [operationEvents],
+  );
+  const runtimeNoiseCount = operationEvents.length - visibleOperationEvents.length;
+  const collapsedEventCount = Math.max(0, events.length - processEvents.length);
+  const pendingApprovals = useMemo(
+    () => detail?.approvals.filter((item) => item.status === "pending") ?? [],
+    [detail?.approvals],
+  );
+  const queuedTurns = useMemo<StudioTurn[]>(
+    () => detail?.turns.filter((turn) => turn.status === "queued") ?? [],
+    [detail?.turns],
+  );
+  const queuedTurnIds = useMemo(() => new Set(queuedTurns.map((turn) => turn.id)), [queuedTurns]);
+  const visibleMessages = useMemo(
+    () => detail?.messages.filter((item) => !item.turn_id || !queuedTurnIds.has(item.turn_id)) ?? [],
+    [detail?.messages, queuedTurnIds],
+  );
+  const fileContextPaths = useMemo(
+    () => isChat ? [] : [...new Set([...(preview ? [preview.path] : []), ...contextFiles])],
+    [contextFiles, isChat, preview],
+  );
+  const visibleSessions = useMemo(() => {
+    const needle = sessionQuery.trim().toLowerCase();
+    return (sessions ?? []).filter((session) => !needle || `${session.title} ${session.project_name} ${session.runner_name} ${session.model_name}`.toLowerCase().includes(needle));
+  }, [sessionQuery, sessions]);
+  const retryableTurn = useMemo(() => {
+    const latest = detail?.turns.at(-1);
+    return latest && ["failed", "cancelled", "interrupted"].includes(latest.status) ? latest : null;
+  }, [detail?.turns]);
+  const completedTurn = useMemo(() => {
+    const latest = detail?.turns.at(-1);
+    return latest && latest.status === "completed" ? latest : null;
+  }, [detail?.turns]);
+
+  const runnerOptions = useMemo<StudioPickerOption[]>(() => (runners ?? [])
+    .filter((runner) => runner.enabled)
+    .map((runner) => ({
+      value: runner.id,
+      label: runner.name,
+      description: runner.capability.version ?? runner.runner_type.replaceAll("_", " "),
+      disabled: !runner.capability.installed,
+    })), [runners]);
+  const modelOptions = useMemo<StudioPickerOption[]>(() => (models ?? [])
+    .filter((model) => model.enabled)
+    .map((model) => ({
+      value: model.id,
+      label: model.name,
+      description: `${model.provider} · ${model.model_name}`,
+    })), [models]);
+  const activeRunner = useMemo(
+    () => runners?.find((item) => item.id === detail?.runner_id),
+    [detail?.runner_id, runners],
+  );
+  const harnessEffort = activeRunner?.runner_type === "deepseek_harness"
+    ? (detail?.reasoning_effort === "low"
+      ? { label: "快速", actual: "OFF", note: "最短响应，适合简单任务" }
+      : detail?.reasoning_effort === "max"
+        ? { label: "极限", actual: "MAX", note: "最高推理资源，复杂任务会明显更慢" }
+        : { label: "标准", actual: "HIGH", note: "Harness 推荐的速度与能力平衡档" })
+    : null;
+  const skillOptions = useMemo<ComposerMenuOption[]>(() => [
+    { value: "", label: "无", description: "使用 Agent 默认工作方式" },
+    ...(skillPacks ?? []).map((pack) => ({
+      value: pack.id,
+      label: pack.name,
+      description: pack.description || "自定义提示词与工具组合",
+    })),
+  ], [skillPacks]);
+  const profileOptions = useMemo<ComposerMenuOption[]>(() => [
+    { value: "", label: "自定义", description: "分别设置 Agent、模型、权限与思考强度" },
+    ...(runtimeProfiles ?? []).map((profile) => ({
+      value: profile.id,
+      label: profile.name,
+      description: profile.description || `${permissionLabels[profile.permission_profile]} · ${effortLabels[profile.reasoning_effort]}思考`,
+    })),
+  ], [runtimeProfiles]);
+  const composerChecks = useMemo(() => {
+    const runner = runners?.find((item) => item.id === detail?.runner_id);
+    const model = models?.find((item) => item.id === detail?.model_id);
+    return [
+      { id: "project", label: isChat ? "纯对话隔离" : "项目工作区", ok: isChat || Boolean(detail?.project_id && detail.workspace_path), detail: isChat ? "不访问项目、终端或浏览器" : detail?.project_name ?? "尚未选择项目" },
+      { id: "runner", label: "Agent Runtime", ok: Boolean(runner?.enabled && runner.capability.installed), detail: runner ? `${runner.name}${runner.capability.version ? ` · ${runner.capability.version}` : ""}` : "Agent 不可用" },
+      { id: "model", label: "模型路由", ok: Boolean(model?.enabled), detail: model ? `${model.name} · ${model.provider}` : "模型不可用" },
+      { id: "permission", label: "访问范围", ok: Boolean(detail?.permission_profile), detail: permissionLabels[detail?.permission_profile ?? "workspace"] },
+      { id: "request", label: activeStatuses.has(detail?.status ?? "") ? "后续指令" : "当前指令", ok: Boolean(message.trim()), detail: message.trim() ? `${message.trim().length.toLocaleString()} 字符${activeStatuses.has(detail?.status ?? "") ? " · 将加入队列" : ""}` : "请输入任务要求" },
+      { id: "context", label: "上下文", ok: true, detail: `${fileContextPaths.length} 个文件 · ${attachments.length} 个附件` },
+    ];
+  }, [attachments.length, detail, fileContextPaths.length, isChat, message, models, runners]);
+  const composerReady = composerChecks.every((check) => check.ok);
+  const liveUsage = useMemo(() => {
+    if (!activeStatuses.has(detail?.status ?? "")) return { input: 0, output: 0, cost: 0 };
+    const activeTurn = [...(detail?.turns ?? [])].reverse().find((turn) => activeStatuses.has(turn.status));
+    if (!activeTurn) return { input: 0, output: 0, cost: 0 };
+    let deltaInput = 0;
+    let deltaOutput = 0;
+    let deltaCost = 0;
+    let absoluteInput = 0;
+    let absoluteOutput = 0;
+    let absoluteCost = 0;
+    for (const event of events) {
+      if (event.turn_id !== activeTurn.id || event.event_type !== "usage.updated") continue;
+      const usage = event.payload.usage as Record<string, unknown> | undefined;
+      const input = Number(usage?.input_tokens ?? 0);
+      const output = Number(usage?.output_tokens ?? 0);
+      const cost = Number(usage?.cost_usd ?? 0);
+      if (event.payload.mode === "delta") {
+        deltaInput += input;
+        deltaOutput += output;
+        deltaCost += cost;
+      } else {
+        absoluteInput = Math.max(absoluteInput, input);
+        absoluteOutput = Math.max(absoluteOutput, output);
+        absoluteCost = Math.max(absoluteCost, cost);
+      }
+    }
+    return {
+      input: Math.max(deltaInput, absoluteInput),
+      output: Math.max(deltaOutput, absoluteOutput),
+      cost: Math.max(deltaCost, absoluteCost),
+    };
+  }, [detail?.status, detail?.turns, events]);
+  const quotaTokens = (detail?.tokens_input ?? 0) + (detail?.tokens_output ?? 0) + liveUsage.input + liveUsage.output;
+  const quotaCost = useMemo(() => {
+    const selected = models?.find((model) => model.id === detail?.model_id);
+    const liveCost = selected
+      ? (liveUsage.input * selected.input_price + liveUsage.output * selected.output_price) / 1_000_000
+      : 0;
+    return (detail?.cost_usd ?? 0) + Math.max(liveCost, liveUsage.cost);
+  }, [detail?.cost_usd, detail?.model_id, liveUsage.cost, liveUsage.input, liveUsage.output, models]);
+
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (!node || !followingLatestRef.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      node.scrollTop = node.scrollHeight;
+      lastScrollTopRef.current = node.scrollTop;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [detail?.messages.length, events.length]);
+
+  function handleConversationScroll() {
+    const node = scrollRef.current;
+    if (!node) return;
+    const movedUp = node.scrollTop < lastScrollTopRef.current;
+    const atLatest = node.scrollHeight - node.scrollTop - node.clientHeight <= 24;
+    const shouldFollow = movedUp ? false : atLatest || followingLatestRef.current;
+    lastScrollTopRef.current = node.scrollTop;
+    if (shouldFollow === followingLatestRef.current) return;
+    followingLatestRef.current = shouldFollow;
+    setFollowingLatest(shouldFollow);
+  }
+
+  function jumpToLatest() {
+    const node = scrollRef.current;
+    if (!node) return;
+    followingLatestRef.current = true;
+    setFollowingLatest(true);
+    node.scrollTop = node.scrollHeight;
+    lastScrollTopRef.current = node.scrollTop;
+  }
+
+  function loadEarlierMessages() {
+    const node = scrollRef.current;
+    followingLatestRef.current = false;
+    setFollowingLatest(false);
+    prependScrollHeightRef.current = node?.scrollHeight ?? null;
+    setMessageLimit((current) => current + 120);
+  }
+
+  useEffect(() => {
+    const previousHeight = prependScrollHeightRef.current;
+    const node = scrollRef.current;
+    if (previousHeight == null || !node || loading) return;
+    prependScrollHeightRef.current = null;
+    const frame = window.requestAnimationFrame(() => {
+      node.scrollTop += node.scrollHeight - previousHeight;
+      lastScrollTopRef.current = node.scrollTop;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [detail?.messages.length, loading]);
+
+  useEffect(() => {
+    if (!sessionId || !terminal?.id || !terminal.running) return;
+    let stopped = false;
+    const timer = window.setInterval(async () => {
+      try {
+        const value = await api<{ id: string; running: boolean; cursor: number; chunks: Array<{ data: string }> }>(
+          `/sessions/${sessionId}/terminals/${terminal.id}?after=${terminal.cursor}`,
+        );
+        if (stopped) return;
+        setTerminals((current) => current.map((item) => item.id === terminal.id ? {
+          ...item,
+          running: value.running,
+          cursor: value.cursor,
+          text: (item.text + value.chunks.map((chunk) => chunk.data).join("")).slice(-300_000),
+        } : item));
+      } catch (value) {
+        if (!stopped) {
+          setTerminals((current) => current.map((item) => item.id === terminal.id ? { ...item, running: false } : item));
+          setActionError(value instanceof Error ? value.message : "终端连接已中断");
+        }
+      }
+    }, 450);
+    return () => { stopped = true; window.clearInterval(timer); };
+  }, [sessionId, terminal?.id, terminal?.running, terminal?.cursor]);
+
+  function openCreate() {
+    const project = projects?.find((item) => item.id === ux.selectedProjectId) ?? projects?.[0];
+    setSessionForm({
+      session_mode: project ? "workspace" : "chat",
+      project_id: project?.id ?? "",
+      profile_id: "",
+      title: project ? `${project.name} Agent 会话` : "新 Agent 会话",
+      runner_id: project?.default_runner_id ?? runners?.find((item) => item.enabled)?.id ?? "",
+      model_id: project?.default_model_id ?? models?.find((item) => item.enabled)?.id ?? "",
+      permission_profile: project?.permission_profile ?? "readonly",
+      reasoning_effort: "medium",
+      skill_pack_id: "",
+    });
+    setCreateOpen(true);
+  }
+
+  async function createSession(event: FormEvent) {
+    event.preventDefault();
+    setActionError(null);
+    try {
+      const created = await api<AgentSession>("/sessions", {
+        method: "POST",
+        body: JSON.stringify({
+          ...sessionForm,
+          project_id: sessionForm.session_mode === "chat" ? null : sessionForm.project_id,
+          profile_id: sessionForm.session_mode === "chat" ? null : sessionForm.profile_id || null,
+          skill_pack_id: sessionForm.session_mode === "chat" ? null : sessionForm.skill_pack_id || null,
+          permission_profile: sessionForm.session_mode === "chat" ? "readonly" : sessionForm.permission_profile,
+        }),
+      });
+      setCreateOpen(false);
+      await refreshSessions();
+      ux.notify({ kind: "success", title: "会话已创建", message: created.session_mode === "chat" ? "纯对话已在应用隔离空间中准备好。" : `已在 ${created.project_name} 中准备好 Agent 工作区。` });
+      navigate(`/studio/${created.id}`);
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "无法创建会话");
+    }
+  }
+
+  async function sendTurn(event: FormEvent) {
+    event.preventDefault();
+    if (!sessionId || !message.trim() || sending) return;
+    setSending(true);
+    setActionError(null);
+    try {
+      const context: Array<Record<string, unknown>> = [];
+      context.push(...fileContextPaths.map((path) => ({ type: "file", path })));
+      context.push(...attachments.map((item) => ({
+        type: "attachment",
+        artifact_id: item.id,
+      })));
+      const queued = await api<{ queued_behind_active?: boolean }>(`/sessions/${sessionId}/turns`, {
+        method: "POST",
+        body: JSON.stringify({ message: message.trim(), context }),
+      });
+      setMessage("");
+      setContextFiles([]);
+      setPreview(null);
+      setAttachments([]);
+      await Promise.all([refresh(), refreshSessions()]);
+      if (queued.queued_behind_active) {
+        ux.notify({ kind: "info", title: "后续指令已排队", message: "当前 Agent 完成后会按顺序自动继续。" });
+      }
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "发送失败");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  function addMentionedFile(path: string) {
+    setContextFiles((current) => current.includes(path) ? current : [...current, path].slice(-30));
+    setMessage((current) => current.replace(/(^|\s)@[^\s@]*$/, `$1@[${path}] `));
+  }
+
+  async function removeQueuedTurn(turn: StudioTurn) {
+    if (!sessionId) return;
+    setActionError(null);
+    try {
+      await api(`/sessions/${sessionId}/turns/${turn.id}`, { method: "DELETE" });
+      await Promise.all([refresh(), refreshSessions()]);
+      ux.notify({ kind: "info", title: "已移除排队指令", message: `第 ${turn.turn_no} 轮不会执行。` });
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "无法移除排队指令");
+      await refresh();
+    }
+  }
+
+  async function cancel() {
+    if (!sessionId) return;
+    await api(`/sessions/${sessionId}/cancel`, { method: "POST" });
+    await refresh();
+  }
+
+  async function updateSession(changes: Record<string, unknown>) {
+    if (!sessionId) return;
+    setActionError(null);
+    try {
+      await api(`/sessions/${sessionId}`, { method: "PATCH", body: JSON.stringify(changes) });
+      await refresh();
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "更新会话失败");
+    }
+  }
+
+  async function renameSession(event: FormEvent) {
+    event.preventDefault();
+    if (!detail || !titleDraft.trim()) return;
+    await updateSession({ title: titleDraft.trim() });
+    setEditingTitle(false);
+    await refreshSessions();
+    ux.notify({ kind: "success", title: "会话名称已保存" });
+  }
+
+  async function archiveSession() {
+    if (!detail || activeStatuses.has(detail.status)) return;
+    const approved = await ux.confirm({
+      title: "归档这个会话？",
+      message: "会话、消息、文件变更与用量记录都会保留，之后可以从归档列表恢复。",
+      confirmLabel: "归档会话",
+      detail: detail.title,
+    });
+    if (!approved) return;
+    try {
+      await api(`/sessions/${detail.id}`, { method: "PATCH", body: JSON.stringify({ archived: true }) });
+      const next = sessions?.find((item) => item.id !== detail.id);
+      await refreshSessions();
+      ux.notify({ kind: "success", title: "会话已归档", message: detail.title });
+      navigate(next ? `/studio/${next.id}` : "/studio");
+    } catch (value) {
+      ux.notify({ kind: "error", title: "无法归档会话", message: value instanceof Error ? value.message : "本地服务拒绝了操作" });
+    }
+  }
+
+  async function forkSession(throughMessageId?: string) {
+    if (!detail) return;
+    try {
+      const created = await api<AgentSessionDetail>(`/sessions/${detail.id}/fork`, {
+        method: "POST",
+        body: JSON.stringify({
+          title: `${detail.title} · 分支`,
+          through_message_id: throughMessageId ?? null,
+        }),
+      });
+      await refreshSessions();
+      ux.notify({ kind: "success", title: "会话分支已创建", message: `已复制 ${created.messages.length} 条上下文消息。` });
+      navigate(`/studio/${created.id}`);
+    } catch (value) {
+      ux.notify({ kind: "error", title: "无法创建会话分支", message: value instanceof Error ? value.message : "未知错误" });
+    }
+  }
+
+  function exportSession() {
+    if (!detail) return;
+    const body = [
+      `# ${detail.title}`,
+      "",
+      `- 项目：${detail.project_name}`,
+      `- Agent：${detail.runner_name}`,
+      `- 模型：${detail.model_name}`,
+      `- Token：${detail.tokens_input + detail.tokens_output}`,
+      `- 费用：$${detail.cost_usd.toFixed(4)}`,
+      "",
+      ...detail.messages.flatMap((item) => [
+        `## ${item.role === "user" ? "用户" : item.role === "assistant" ? detail.runner_name : "系统"} · ${new Date(item.created_at).toLocaleString()}`,
+        "",
+        item.content,
+        "",
+      ]),
+    ].join("\n");
+    const url = URL.createObjectURL(new Blob([body], { type: "text/markdown;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${detail.title.replace(/[\\/:*?"<>|]/g, "-")}.md`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    ux.notify({ kind: "success", title: "会话记录已导出", message: anchor.download });
+  }
+
+  async function retryLastTurn() {
+    if (!sessionId || !retryableTurn || activeStatuses.has(detail?.status ?? "")) return;
+    setSending(true);
+    try {
+      await api(`/sessions/${sessionId}/turns`, { method: "POST", body: JSON.stringify({ message: retryableTurn.user_message, context: [] }) });
+      await Promise.all([refresh(), refreshSessions()]);
+      ux.notify({ kind: "success", title: "失败轮次已重新排队" });
+    } catch (value) {
+      ux.notify({ kind: "error", title: "无法重试", message: value instanceof Error ? value.message : "未知错误" });
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function updateRuntimeSetting(changes: Record<string, unknown>) {
+    setConfigBusy(true);
+    try {
+      await updateSession(changes);
+    } finally {
+      setConfigBusy(false);
+    }
+  }
+
+  async function decide(approval: ApprovalRequest, decision: "allow_once" | "allow_session" | "allow_project" | "deny") {
+    setApprovalBusy(approval.id);
+    setActionError(null);
+    try {
+      await api(`/approvals/${approval.id}/decision`, { method: "POST", body: JSON.stringify({ decision, reason: "在 Agent Studio 中处理" }) });
+      await Promise.all([refresh(), refreshSessions()]);
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "无法处理审批");
+    } finally {
+      setApprovalBusy(null);
+    }
+  }
+
+  async function importAttachmentPaths(paths: string[]) {
+    if (!sessionId || attachmentBusy || attachments.length >= 10 || !paths.length) return;
+    setActionError(null);
+    setAttachmentBusy(true);
+    try {
+      const imported = await api<SessionAttachment[]>(`/sessions/${sessionId}/attachments`, {
+        method: "POST",
+        body: JSON.stringify({ paths: paths.slice(0, Math.max(0, 10 - attachments.length)) }),
+      });
+      setAttachments((current) => [...current, ...imported].slice(0, 10));
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "无法添加附件");
+    } finally {
+      setAttachmentBusy(false);
+    }
+  }
+
+  async function attachFiles() {
+    if (!sessionId || attachmentBusy || attachments.length >= 10) return;
+    setActionError(null);
+    try {
+      const selected = await open({
+        multiple: true,
+        directory: false,
+        title: "选择要发送给 Agent 的图片或文件",
+      });
+      const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
+      await importAttachmentPaths(paths);
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "无法打开文件选择器");
+    }
+  }
+
+  async function removeAttachment(attachment: SessionAttachment) {
+    if (!sessionId) return;
+    setAttachments((current) => current.filter((item) => item.id !== attachment.id));
+    try {
+      await api(`/sessions/${sessionId}/attachments/${attachment.id}`, { method: "DELETE" });
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "无法移除附件");
+    }
+  }
+
+  async function openEntry(entry: ProjectTree["entries"][number]) {
+    if (!detail) return;
+    if (entry.kind === "directory") {
+      setTreePath(entry.path);
+      return;
+    }
+    try {
+      const file = await api<{ path: string; content: string }>(`/projects/${detail.project_id}/file?path=${encodeURIComponent(entry.path)}`);
+      setPreview(file);
+      setDock("file");
+      setStudioLayout((current) => ({ ...current, dock: true, right: true }));
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "无法打开文件");
+    }
+  }
+
+  function openSearchEntry(entry: ProjectTree["entries"][number]) {
+    if (entry.kind === "directory") {
+      setTreePath(entry.path);
+      setRailMode("files");
+      return;
+    }
+    void openEntry(entry);
+  }
+
+  async function openChange(change: FileChange) {
+    if (!sessionId) return;
+    setActionError(null);
+    try {
+      const value = await api<typeof changePreview & Record<string, unknown>>(
+        `/sessions/${sessionId}/changes/${change.id}`,
+      );
+      setChangePreview(value);
+      setChangeEdit(String(value?.current_content ?? ""));
+      setDock("changes");
+      setStudioLayout((current) => ({ ...current, dock: true, right: true }));
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "无法读取变更 Diff");
+    }
+  }
+
+  async function reviewChange(action: "accept" | "reject" | "apply_content") {
+    if (!changePreview) return;
+    setActionError(null);
+    try {
+      const value = await api<typeof changePreview>(`/file-changes/${changePreview.id}/review`, {
+        method: "POST",
+        body: JSON.stringify({ action, content: action === "apply_content" ? changeEdit : null }),
+      });
+      setChangePreview(value);
+      setChangeEdit(value.current_content);
+      await refresh();
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "无法处理文件变更");
+    }
+  }
+
+  async function startInteractiveTerminal() {
+    if (!sessionId) return;
+    setActionError(null);
+    try {
+      const value = await api<{ id: string; title: string; shell: string; running: boolean; cursor: number; chunks: Array<{ data: string }> }>(`/sessions/${sessionId}/terminals`, {
+        method: "POST",
+        body: JSON.stringify({ shell: "powershell.exe", columns: 120, rows: 30 }),
+      });
+      setTerminals((current) => [...current.filter((item) => item.id !== value.id), { ...value, text: value.chunks.map((item) => item.data).join("") }]);
+      setActiveTerminalId(value.id);
+      setDock("terminal");
+      setStudioLayout((current) => ({ ...current, dock: true, right: true }));
+      if (!value.running) setActionError("终端进程未能保持运行，请点击“重新启动”重试。");
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "无法启动交互终端");
+    }
+  }
+
+  async function sendTerminalInput(event: FormEvent) {
+    event.preventDefault();
+    if (!sessionId || !terminal?.id || !terminalInput) return;
+    const data = terminalInput + "\r";
+    setTerminalInput("");
+    await writeTerminalData(data);
+  }
+
+  function writeTerminalData(data: string): Promise<void> {
+    if (!sessionId || !terminal?.id || !terminal.running || !data) return Promise.resolve();
+    const currentSessionId = sessionId;
+    const currentTerminalId = terminal.id;
+    terminalWriteChainRef.current = terminalWriteChainRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          await api(`/sessions/${currentSessionId}/terminals/${currentTerminalId}/input`, {
+            method: "POST", body: JSON.stringify({ data }),
+          });
+        } catch (value) {
+          setActionError(value instanceof Error ? value.message : "终端输入失败");
+          setTerminals((current) => current.map((item) => item.id === currentTerminalId ? { ...item, running: false } : item));
+          throw value;
+        }
+      });
+    return terminalWriteChainRef.current;
+  }
+
+  async function resizeTerminal(columns: number, rows: number) {
+    if (!sessionId || !terminal?.id || !terminal.running) return;
+    try {
+      await api(`/sessions/${sessionId}/terminals/${terminal.id}/resize`, {
+        method: "POST", body: JSON.stringify({ columns, rows }),
+      });
+    } catch {
+      // A resize failure should not interrupt typing; the next fit can retry.
+    }
+  }
+
+  function openTerminalPanel() {
+    setDock("terminal");
+    setStudioLayout((current) => ({ ...current, dock: true, right: true }));
+    if ((!terminal || !terminal.running) && (detail?.permission_profile === "standard" || detail?.permission_profile === "full")) {
+      void startInteractiveTerminal();
+    }
+  }
+
+  async function closeInteractiveTerminal(terminalId = terminal?.id) {
+    if (!sessionId || !terminalId) return;
+    await api(`/sessions/${sessionId}/terminals/${terminalId}`, { method: "DELETE" });
+    setTerminals((current) => {
+      const next = current.filter((item) => item.id !== terminalId);
+      setActiveTerminalId((active) => active === terminalId ? next[0]?.id : active);
+      return next;
+    });
+  }
+
+  async function captureBrowser(pageId = browserPageId) {
+    if (!pageId) return;
+    const [snapshot, screenshot] = await Promise.all([
+      api<BrowserSnapshot>(`/browser/snapshot?page_id=${encodeURIComponent(pageId)}`),
+      api<{ id: string }>(`/browser/screenshots?page_id=${encodeURIComponent(pageId)}`, { method: "POST" }),
+    ]);
+    setBrowserSnapshot(snapshot);
+    setBrowserImage(`${downloadUrl(`/browser/artifacts/${screenshot.id}`)}?t=${Date.now()}`);
+    setBrowserUrl(snapshot.url);
+  }
+
+  async function openBrowserDock() {
+    setDock("browser");
+    setStudioLayout((current) => ({ ...current, dock: true, right: true, dockExpanded: false }));
+    setBrowserBusy(true);
+    setActionError(null);
+    try {
+      let status = browserStatus;
+      if (!status?.running) {
+        status = await api<BrowserStatus>("/browser/launch", { method: "POST", body: JSON.stringify({ url: "about:blank" }) });
+      }
+      const pageId = browserPageId || status.pages[0]?.id;
+      setBrowserPageId(pageId);
+      await refreshBrowserStatus();
+      if (pageId) await captureBrowser(pageId);
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "浏览器启动失败");
+    } finally {
+      setBrowserBusy(false);
+    }
+  }
+
+  async function navigateBrowser(event: FormEvent) {
+    event.preventDefault();
+    setBrowserBusy(true);
+    setActionError(null);
+    try {
+      let status = browserStatus;
+      if (!status?.running) status = await api<BrowserStatus>("/browser/launch", { method: "POST", body: JSON.stringify({ url: "about:blank" }) });
+      const pageId = browserPageId || status.pages[0]?.id;
+      if (!pageId) throw new Error("浏览器没有可用页面");
+      setBrowserPageId(pageId);
+      await api<BrowserSnapshot>("/browser/navigate", { method: "POST", body: JSON.stringify({ url: browserUrl, page_id: pageId }) });
+      await captureBrowser(pageId);
+      await refreshBrowserStatus();
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "网页导航失败");
+    } finally {
+      setBrowserBusy(false);
+    }
+  }
+
+  async function createBrowserPage() {
+    setBrowserBusy(true);
+    setActionError(null);
+    try {
+      let status = browserStatus;
+      if (!status?.running) status = await api<BrowserStatus>("/browser/launch", { method: "POST", body: JSON.stringify({ url: "about:blank" }) });
+      const page = await api<{ id: string; title: string; url: string }>("/browser/pages", { method: "POST", body: JSON.stringify({ url: "about:blank" }) });
+      setBrowserPageId(page.id);
+      setBrowserUrl(page.url);
+      setBrowserSnapshot(null);
+      setBrowserImage(null);
+      await refreshBrowserStatus();
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "无法新建浏览器标签");
+    } finally {
+      setBrowserBusy(false);
+    }
+  }
+
+  async function switchBrowserPage(pageId: string) {
+    setBrowserPageId(pageId);
+    setBrowserBusy(true);
+    try {
+      await captureBrowser(pageId);
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "无法读取浏览器标签");
+    } finally {
+      setBrowserBusy(false);
+    }
+  }
+
+  async function closeBrowserPage(pageId: string) {
+    try {
+      const result = await api<{ pages: Array<{ id: string; url: string }> }>(`/browser/pages/${pageId}`, { method: "DELETE" });
+      const next = result.pages[0];
+      if (browserPageId === pageId) {
+        setBrowserPageId(next?.id);
+        setBrowserUrl(next?.url ?? "https://example.com");
+        setBrowserSnapshot(null);
+        setBrowserImage(null);
+        if (next) await captureBrowser(next.id);
+      }
+      await refreshBrowserStatus();
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "无法关闭浏览器标签");
+    }
+  }
+
+  async function interactBrowser(action: "click" | "fill") {
+    if (!browserPageId || !browserSelector) return;
+    setBrowserBusy(true);
+    setActionError(null);
+    try {
+      await api<BrowserSnapshot>("/browser/actions", { method: "POST", body: JSON.stringify({ action, selector: browserSelector, value: action === "fill" ? browserValue : null, page_id: browserPageId }) });
+      await captureBrowser(browserPageId);
+    } catch (value) {
+      setActionError(value instanceof Error ? value.message : "浏览器交互失败");
+    } finally {
+      setBrowserBusy(false);
+    }
+  }
+
+  function renderApproval(approval: ApprovalRequest, inline = false) {
+    const busy = approvalBusy === approval.id;
+    const requestText = String(
+      approval.request.command
+      ?? approval.request.path
+      ?? approval.request.runner_name
+      ?? approval.request_type,
+    );
+    return (
+      <article className={inline ? "v4-inline-approval" : "v4-inspector-approval"} key={approval.id}>
+        <AlertTriangle size={inline ? 18 : 16} />
+        <div className="v4-approval-copy">
+          <header><strong>{approval.title}</strong><span>{approval.risk_level.toUpperCase()}</span></header>
+          <p>{approval.description}</p>
+          <code title={requestText}>{requestText}</code>
+        </div>
+        <div className="v4-approval-actions">
+          <button type="button" disabled={busy} onClick={() => void decide(approval, "deny")}>拒绝</button>
+          <button type="button" disabled={busy} onClick={() => void decide(approval, "allow_once")}>仅允许一次</button>
+          <button type="button" disabled={busy} onClick={() => void decide(approval, "allow_session")}>本会话允许</button>
+          {inline && <button type="button" disabled={busy} onClick={() => void decide(approval, "allow_project")}>此项目允许</button>}
+        </div>
+      </article>
+    );
+  }
+
+  if (!sessionId && !sessions?.length) {
+    return (
+      <div className="v4-studio-empty">
+        <span><Sparkles size={28} /></span><h1>Agent Studio</h1><p>选择一个已授权项目，建立可持续、多轮且可审计的 Agent 会话。</p>
+        <button className="v4-button primary" type="button" onClick={openCreate}><Plus size={16} />新建 Agent 会话</button>
+        {!projects?.length && <Link className="v4-button secondary" to="/projects"><FolderOpen size={16} />添加项目工作区</Link>}
+        {createOpen && renderCreateModal()}
+      </div>
+    );
+  }
+
+  function renderCreateModal() {
+    const chatMode = sessionForm.session_mode === "chat";
+    return (
+      <div className="v4-modal-backdrop" onMouseDown={() => setCreateOpen(false)}>
+        <form className="v4-modal small" onSubmit={createSession} onMouseDown={(event) => event.stopPropagation()}>
+          <header><div><strong>新建 Agent 会话</strong><small>{chatMode ? "无需工作区，只使用对话与附件" : "选择项目、Agent、模型和权限配置"}</small></div><button type="button" onClick={() => setCreateOpen(false)}><X size={18} /></button></header>
+          <div className="v4-form-grid">
+            <div className="v5-session-mode full"><button className={!chatMode ? "active" : ""} type="button" onClick={() => setSessionForm((current) => ({ ...current, session_mode: "workspace", project_id: current.project_id || projects?.[0]?.id || "", permission_profile: projects?.[0]?.permission_profile ?? "workspace" }))}><FolderOpen size={17} /><span><strong>项目 Agent</strong><small>在授权工作区内使用文件、终端和浏览器</small></span></button><button className={chatMode ? "active" : ""} type="button" onClick={() => setSessionForm((current) => ({ ...current, session_mode: "chat", project_id: "", profile_id: "", skill_pack_id: "", permission_profile: "readonly", title: current.title.includes("Agent 会话") ? "新纯对话" : current.title }))}><MessageSquarePlus size={17} /><span><strong>纯对话</strong><small>不选择工作区，只保留 Agent、模型与附件</small></span></button></div>
+            {!chatMode && <label className="full"><span>项目</span><select required value={sessionForm.project_id} onChange={(event) => {
+              const project = projects?.find((item) => item.id === event.target.value);
+              setSessionForm({ ...sessionForm, project_id: event.target.value, runner_id: project?.default_runner_id ?? sessionForm.runner_id, model_id: project?.default_model_id ?? sessionForm.model_id, permission_profile: project?.permission_profile ?? sessionForm.permission_profile });
+            }}>{projects?.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>}
+            <label className="full"><span>会话标题</span><input required value={sessionForm.title} onChange={(event) => setSessionForm({ ...sessionForm, title: event.target.value })} /></label>
+            {!chatMode && <label className="full"><span>运行 Profile</span><select value={sessionForm.profile_id} onChange={(event) => {
+              const profile = runtimeProfiles?.find((item) => item.id === event.target.value);
+              setSessionForm({
+                ...sessionForm,
+                profile_id: event.target.value,
+                runner_id: profile?.runner_id ?? sessionForm.runner_id,
+                model_id: profile?.model_id ?? sessionForm.model_id,
+                permission_profile: profile?.permission_profile ?? sessionForm.permission_profile,
+                reasoning_effort: profile?.reasoning_effort ?? sessionForm.reasoning_effort,
+                skill_pack_id: profile?.skill_pack_id ?? sessionForm.skill_pack_id,
+              });
+            }}><option value="">自定义配置</option>{runtimeProfiles?.map((profile) => <option key={profile.id} value={profile.id}>{profile.name} · {profile.description}</option>)}</select><small>一键复用 Agent、模型、权限、思考强度、能力包与 MCP 工具组合</small></label>}
+            <label><span>Agent</span><select required value={sessionForm.runner_id} onChange={(event) => setSessionForm({ ...sessionForm, runner_id: event.target.value })}>{runners?.filter((runner) => runner.enabled).map((runner) => <option key={runner.id} value={runner.id}>{runner.name}</option>)}</select></label>
+            <label><span>模型</span><select required value={sessionForm.model_id} onChange={(event) => setSessionForm({ ...sessionForm, model_id: event.target.value })}>{models?.filter((model) => model.enabled).map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>
+            <label><span>权限</span><select disabled={chatMode} value={chatMode ? "readonly" : sessionForm.permission_profile} onChange={(event) => setSessionForm({ ...sessionForm, permission_profile: event.target.value as PermissionProfile })}><option value="readonly">{chatMode ? "纯对话隔离" : "只读"}</option><option value="workspace">工作区读写</option><option value="standard">标准开发</option><option value="full">完全访问</option></select></label>
+            <label><span>思考强度</span><select value={sessionForm.reasoning_effort} onChange={(event) => setSessionForm({ ...sessionForm, reasoning_effort: event.target.value as ReasoningEffort })}><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">极高</option><option value="max">最大</option></select></label>
+            {!chatMode && <label className="full"><span>能力包</span><select value={sessionForm.skill_pack_id} onChange={(event) => setSessionForm({ ...sessionForm, skill_pack_id: event.target.value })}><option value="">不使用能力包</option>{skillPacks?.map((pack) => <option key={pack.id} value={pack.id}>{pack.name} · {pack.description}</option>)}</select></label>}
+          </div>
+          {actionError && <div className="v4-error">{actionError}</div>}
+          <footer><button className="v4-button secondary" type="button" onClick={() => setCreateOpen(false)}>取消</button><button className="v4-button primary" type="submit"><Sparkles size={16} />创建会话</button></footer>
+        </form>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`v4-studio-workbench ${isChat ? "chat-mode" : ""} ${studioLayout.left ? "" : "left-collapsed"} ${studioLayout.right && !isChat ? "" : "right-collapsed"} ${studioLayout.dock && !isChat ? "" : "dock-collapsed"} ${studioLayout.dockExpanded && !isChat ? "dock-expanded" : ""} ${resizing ? `resizing-${resizing}` : ""}`} style={{ "--studio-left": studioLayout.left ? `${studioLayout.leftWidth}px` : "0px", "--studio-right": studioLayout.right && !isChat ? `${studioLayout.rightWidth}px` : "0px", "--studio-dock": !studioLayout.dock || isChat ? "45px" : studioLayout.dockExpanded ? "min(54vh, 540px)" : `${studioLayout.dockHeight}px` } as CSSProperties}>
+      {draggingFiles && <div className="v5-studio-dropzone"><Upload size={28} /><strong>放下即可附加到当前会话</strong><span>图片和文件最多 10 个，单个最大 50 MB</span></div>}
+      <aside className="v4-studio-rail">
+        <header>{detail ? <><span className="v4-project-logo">{detail.project_name.slice(0, 2).toUpperCase()}</span><div><strong>{detail.project_name}</strong><small title={isChat ? "无工作区" : detail.workspace_path}>{isChat ? <MessageSquarePlus size={11} /> : <GitBranch size={11} />} {isChat ? "无工作区 · 隔离对话" : detail.workspace_path}</small></div></> : <span>加载会话…</span>}</header>
+        <button className="v5-new-session-primary" type="button" onClick={openCreate}><Plus size={15} />新建会话</button>
+        <div className="v4-rail-tabs v5-studio-nav-tabs"><button className={railMode === "sessions" ? "active" : ""} type="button" onClick={() => setRailMode("sessions")}><Bot size={13} />会话</button>{!isChat && <><button className={railMode === "files" ? "active" : ""} type="button" onClick={() => setRailMode("files")}><Folder size={13} />文件</button><button className={railMode === "search" ? "active" : ""} type="button" onClick={() => setRailMode("search")}><Search size={13} />搜索</button></>}</div>
+        {railMode === "sessions" ? (
+          <section className="v4-session-list v5-session-list-primary"><header><span>RECENT SESSIONS</span><button type="button" aria-label="新建 Agent 会话" onClick={openCreate}><Plus size={14} /></button></header><label className="v5-session-search"><Search size={13} /><input aria-label="搜索会话" value={sessionQuery} onChange={(event) => setSessionQuery(event.target.value)} placeholder="搜索会话…" />{sessionQuery && <button type="button" aria-label="清除会话搜索" onClick={() => setSessionQuery("")}><X size={12} /></button>}</label>{visibleSessions.slice(0, 40).map((session) => <button key={session.id} className={session.id === sessionId ? "active" : ""} type="button" onClick={() => navigate(`/studio/${session.id}`)}><i className={activeStatuses.has(session.status) ? "live" : ""} /><span><strong>{session.title}</strong><small>{session.project_name} · {session.runner_name}</small></span><em>{statusLabels[session.status] ?? session.status}</em></button>)}{sessionQuery && !visibleSessions.length && <div className="v5-session-none">没有匹配会话</div>}</section>
+        ) : railMode === "files" ? (
+          <section className="v4-file-tree">
+            <button className="v4-tree-up" type="button" disabled={treePath === "."} onClick={() => setTreePath(treePath.includes("/") ? treePath.slice(0, treePath.lastIndexOf("/")) : ".")}><ChevronDown size={14} />WORKSPACE · {treePath}</button>
+            {tree?.entries.map((entry) => <button key={entry.path} title={entry.path} type="button" onClick={() => void openEntry(entry)}>{entry.kind === "directory" ? <Folder size={15} /> : <FileCode2 size={15} />}<span>{entry.name}</span>{entry.kind === "directory" && <ChevronRight size={13} />}</button>)}
+            {!tree?.entries.length && <small>目录为空或正在读取…</small>}
+          </section>
+        ) : (
+          <section className="v4-file-search">
+            <div className="v4-file-search-box"><Search size={15} /><input ref={fileSearchRef} aria-label="搜索项目文件" value={fileQuery} onChange={(event) => setFileQuery(event.target.value)} placeholder="输入文件名或路径" />{fileQuery && <button type="button" aria-label="清除文件搜索" onClick={() => setFileQuery("")}><X size={13} /></button>}</div>
+            <header><span>WORKSPACE SEARCH</span>{normalizedFileQuery.length >= 2 && <b>{searchResult?.entries.length ?? 0} 结果</b>}</header>
+            <div className="v4-file-search-results">
+              {normalizedFileQuery.length < 2 && <div className="v4-search-hint"><FileSearch size={23} /><strong>搜索整个项目</strong><p>至少输入 2 个字符，也可按 Ctrl Shift F 聚焦。</p></div>}
+              {normalizedFileQuery.length >= 2 && searchLoading && <div className="v4-search-hint"><RefreshCw className="spin" size={20} /><strong>正在扫描项目…</strong></div>}
+              {searchError && <div className="v4-search-hint error"><AlertTriangle size={20} /><strong>搜索失败</strong><p>{searchError}</p></div>}
+              {!searchLoading && normalizedFileQuery.length >= 2 && !searchError && searchResult?.entries.map((entry) => <button key={entry.path} type="button" title={entry.path} onClick={() => openSearchEntry(entry)}>{entry.kind === "directory" ? <Folder size={15} /> : <FileCode2 size={15} />}<span><strong>{entry.name}</strong><small>{entry.path}</small></span>{entry.kind === "directory" && <ChevronRight size={13} />}</button>)}
+              {!searchLoading && normalizedFileQuery.length >= 2 && !searchError && searchResult && !searchResult.entries.length && <div className="v4-search-hint"><FileSearch size={21} /><strong>没有匹配文件</strong><p>尝试缩短关键词或搜索路径片段。</p></div>}
+            </div>
+            {searchResult && <footer>已扫描 {searchResult.scanned.toLocaleString()} 项{searchResult.truncated ? " · 已达到结果上限" : ""}</footer>}
+          </section>
+        )}
+      </aside>
+
+      {studioLayout.left && <div className="v5-studio-resizer left" role="separator" aria-label="调整导航侧栏宽度" aria-orientation="vertical" tabIndex={0} onPointerDown={(event) => beginResize("left", event)} onKeyDown={(event) => resizeWithKeyboard("left", event.key)} />}
+
+      <section className="v4-conversation">
+        <header className="v4-conversation-head">
+          <button className={`v4-pane-toggle with-label ${studioLayout.left ? "active" : ""}`} type="button" aria-label={studioLayout.left ? "收起导航侧栏" : "展开导航侧栏"} title={`${studioLayout.left ? "收起" : "展开"}导航侧栏 · Ctrl B`} onClick={() => setStudioLayout((current) => ({ ...current, left: !current.left }))}>{studioLayout.left ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}<span>导航</span></button>
+          {editingTitle ? <form className="v5-session-title-edit" onSubmit={renameSession}><input autoFocus aria-label="会话名称" value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} /><button type="submit"><Check size={14} /></button><button type="button" onClick={() => setEditingTitle(false)}><X size={14} /></button></form> : <div className="v4-conversation-title"><strong>{detail?.title ?? "正在加载会话"}</strong><small title={isChat ? "纯对话 · 无工作区" : detail?.workspace_path}>SESSION / {sessionId?.slice(0, 8)} · {isChat ? "纯对话 · 无工作区" : detail?.workspace_path}</small></div>}
+          <span className={`v4-status ${activeStatuses.has(detail?.status ?? "") ? "green" : ""}`}><i />{detail ? statusLabels[detail.status] ?? detail.status : "加载中"}</span>
+          <button className="v5-runtime-summary" type="button" aria-label="打开运行配置" aria-expanded={runtimeConfigOpen} onClick={() => setRuntimeConfigOpen((current) => !current)}><Bot size={14} /><span><strong>{detail?.runner_name ?? "选择 Agent"}</strong><small>{detail?.model_name ?? "选择模型"} · {effortLabels[detail?.reasoning_effort ?? "medium"]}思考 · {permissionLabels[detail?.permission_profile ?? "workspace"]}</small></span><ChevronDown size={13} /></button>
+          <button className="v4-pane-toggle" type="button" onClick={() => void refresh()} title="刷新会话"><RefreshCw className={loading ? "spin" : ""} size={16} /></button>
+          <button className="v4-pane-toggle" type="button" disabled={!detail} onClick={() => { setTitleDraft(detail?.title ?? ""); setEditingTitle(true); }} title="重命名会话"><Edit3 size={15} /></button>
+          {!isChat && <button className={`v4-pane-toggle with-label ${studioLayout.right ? "active" : ""}`} type="button" aria-label={studioLayout.right ? "关闭工具工作台" : "打开工具工作台"} title={`${studioLayout.right ? "关闭" : "打开"}工具工作台`} onClick={() => setStudioLayout((current) => ({ ...current, right: !current.right, dock: !current.right }))}>{studioLayout.right ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}<span>工具</span></button>}
+        </header>
+
+        {runtimeConfigOpen && <section className="v5-runtime-config-popover"><header><div><strong>运行配置</strong><small>{isChat ? "纯对话固定隔离权限；可切换 Agent、模型与思考强度" : "当前会话立即生效；运行中限制切换 Agent 与模型"}</small></div><button type="button" aria-label="关闭运行配置" onClick={() => setRuntimeConfigOpen(false)}><X size={14} /></button></header><div className="v5-runtime-primary"><StudioPicker ariaLabel="选择 Agent" caption="AGENT" icon={<Bot size={15} />} disabled={activeStatuses.has(detail?.status ?? "")} value={detail?.runner_id ?? ""} options={runnerOptions} onChange={(runnerId) => void updateSession({ runner_id: runnerId })} /><StudioPicker ariaLabel="选择模型" caption="MODEL" icon={<Cpu size={15} />} disabled={activeStatuses.has(detail?.status ?? "")} value={detail?.model_id ?? ""} options={modelOptions} onChange={(modelId) => void updateSession({ model_id: modelId })} /></div><div className="v5-runtime-secondary"><ComposerMenu ariaLabel="会话访问权限" label="权限" icon={<ShieldCheck size={14} />} value={detail?.permission_profile ?? "workspace"} options={permissionOptions} disabled={configBusy || isChat} onChange={(value) => void updateRuntimeSetting({ permission_profile: value as PermissionProfile })} /><ComposerMenu ariaLabel="思考强度" label="思考" icon={<Brain size={14} />} value={detail?.reasoning_effort ?? "medium"} options={effortOptions} disabled={configBusy} onChange={(value) => void updateRuntimeSetting({ reasoning_effort: value as ReasoningEffort })} />{!isChat && <><ComposerMenu ariaLabel="会话能力包" label="能力" icon={<Sparkles size={14} />} value={detail?.skill_pack_id ?? ""} options={skillOptions} disabled={configBusy || activeStatuses.has(detail?.status ?? "")} onChange={(value) => void updateRuntimeSetting({ skill_pack_id: value || null })} /><ComposerMenu ariaLabel="运行 Profile" label="Profile" icon={<Gauge size={14} />} value={detail?.profile_id ?? ""} options={profileOptions} disabled={configBusy || activeStatuses.has(detail?.status ?? "")} onChange={(value) => void updateRuntimeSetting({ profile_id: value || null })} /></>}</div>{harnessEffort && <div className="v5-harness-effort-note"><Brain size={14} /><span><strong>Harness 实际生效：{harnessEffort.actual} · {harnessEffort.label}</strong><small>{harnessEffort.note}；本次使用隔离配置，不修改 dsh 全局设置</small></span></div>}<footer><span><Gauge size={13} />{quotaTokens.toLocaleString()} Tokens · ${quotaCost.toFixed(3)}</span><span><Clock3 size={13} />{duration(detail?.duration_ms ?? 0)}</span>{!isChat && <span><FileDiff size={13} />{detail?.file_changes.length ?? 0} 个变更</span>}</footer></section>}
+
+        <div className="v4-conversation-scroll" ref={scrollRef} onScroll={handleConversationScroll}>
+          {loading && <div className="v4-empty compact"><RefreshCw className="spin" size={22} /><strong>正在恢复会话上下文</strong></div>}
+          {detail?.messages_truncated && <button className="v5-load-earlier" type="button" onClick={loadEarlierMessages}>加载更早的 {Math.min(120, detail.message_count - detail.messages.length)} 条消息</button>}
+          {visibleMessages.map((item) => <article key={item.id} className={`v4-message ${item.role}`}><span>{item.role === "user" ? <User size={16} /> : <Sparkles size={16} />}</span><div><header><strong>{item.role === "user" ? "你" : detail?.runner_name}</strong><time>{time(item.created_at)}</time><button className="v5-message-action" type="button" title="从这里创建会话分支" aria-label="从这条消息创建会话分支" onClick={() => void forkSession(item.id)}><GitFork size={13} /></button></header><MarkdownMessage content={item.content} />{item.metadata.context?.length ? <footer><Paperclip size={13} />已附加 {item.metadata.context.length} 项上下文</footer> : null}</div></article>)}
+          {!!events.length && (
+            <section className="v4-inline-activity">
+              <header>
+                <span className="v4-process-mark"><Activity size={16} /></span>
+                <div><strong>Agent 执行过程</strong><small>公开进度、工具调用与可验证操作</small></div>
+                {latestHeartbeat && (
+                  <div className="v4-process-telemetry">
+                    <span><Clock3 size={12} />{duration(Number(latestHeartbeat.payload.elapsed_ms ?? 0))}</span>
+                    <span>{latestHeartbeat.payload.summary ? String(latestHeartbeat.payload.summary) : `${Number(latestHeartbeat.payload.line_count ?? 0).toLocaleString()} 流事件`}</span>
+                  </div>
+                )}
+                <b className={connected ? "live" : ""}><i />{connected ? "实时" : "已保存"}</b>
+              </header>
+              <div className="v4-process-list">
+                {primaryProcessEvents.slice(-8).map((event, index, visible) => (
+                  <article key={`${event.event_type}-${event.seq}`} className={eventTone(event)}>
+                    <span className="v4-process-icon">{eventIcon(event)}</span>
+                    <div>
+                      <header><strong>{eventTitle(event)}</strong><em>{eventCategory(event)}</em></header>
+                      {eventDetail(event) && (event.event_type === "live.message"
+                        ? <p>{eventDetail(event)}</p>
+                        : <pre>{eventDetail(event)}</pre>)}
+                      <small>{time(event.created_at)} · 公开进度 {Math.max(1, primaryProcessEvents.length - visible.length + index + 1)}</small>
+                    </div>
+                  </article>
+                ))}
+                {visibleOperationEvents.length > 0 && (
+                  <details className="v4-process-operations">
+                    <summary>
+                      <span><Code2 size={14} /></span>
+                      <div><strong>后台操作</strong><small>{operationSummary(visibleOperationEvents)}{runtimeNoiseCount ? ` · ${runtimeNoiseCount} 条运行时噪声已隐藏` : ""}</small></div>
+                      <b>{visibleOperationEvents.length}</b>
+                      <ChevronRight className="v4-operation-chevron" size={14} />
+                    </summary>
+                    <div>
+                      {visibleOperationEvents.slice(-30).map((event) => (
+                        <article key={`${event.event_type}-${event.seq}`} className={eventTone(event)}>
+                          <span className="v4-process-icon">{eventIcon(event)}</span>
+                          <div>
+                            <header><strong>{eventTitle(event)}</strong><em>{eventCategory(event)}</em></header>
+                            {eventDetail(event) && <pre>{eventDetail(event)}</pre>}
+                            <small>{time(event.created_at)} · 操作 {event.seq}</small>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  </details>
+                )}
+                {!processEvents.length && (
+                  <div className="v4-process-waiting"><Brain size={18} /><span><strong>Agent 正在处理</strong><small>等待下一条可公开的进度说明或工具活动…</small></span></div>
+                )}
+              </div>
+              {collapsedEventCount > 0 && <footer>已自动折叠 {collapsedEventCount.toLocaleString()} 条 Token、心跳与重复底层事件</footer>}
+            </section>
+          )}
+          {completedTurn && !activeStatuses.has(detail?.status ?? "") && (
+            <section className="v5-completion-summary">
+              <header><span><CheckCircle2 size={18} /></span><div><strong>本轮任务已完成</strong><small>{completedTurn.final_answer ? "Agent 已提交最终结果，运行证据已保存" : "运行结束，完整过程已保存"}</small></div></header>
+              <dl>{!isChat && <div><dt>文件变更</dt><dd>{detail?.file_changes.length ?? 0}</dd></div>}<div><dt>完成用时</dt><dd>{duration(completedTurn.duration_ms || detail?.duration_ms || 0)}</dd></div><div><dt>Token</dt><dd>{(completedTurn.tokens_input + completedTurn.tokens_output || quotaTokens).toLocaleString()}</dd></div><div><dt>费用</dt><dd>${(completedTurn.cost_usd || detail?.cost_usd || 0).toFixed(3)}</dd></div></dl>
+              <footer>{!isChat && detail?.file_changes.length ? <button type="button" onClick={() => { setDock("changes"); setStudioLayout((current) => ({ ...current, dock: true, right: true })); }}><FileDiff size={14} />查看变更</button> : null}<button type="button" onClick={() => scrollRef.current?.parentElement?.querySelector<HTMLTextAreaElement>(".v4-composer textarea")?.focus()}><MessageSquarePlus size={14} />{isChat ? "继续对话" : "继续修改"}</button><button type="button" onClick={exportSession}><Download size={14} />导出记录</button></footer>
+            </section>
+          )}
+          {error && <div className="v4-error">{error}</div>}
+        </div>
+        {!followingLatest && <button className="v4-return-latest" type="button" onClick={jumpToLatest}><ChevronDown size={14} />返回最新内容</button>}
+
+        <form className="v4-composer" onSubmit={sendTurn}>
+          {pendingApprovals.length > 0 && <section className="v4-approval-gate v5-approval-composer-gate"><header><ShieldCheck size={16} /><div><strong>Agent 正在等待你的审批</strong><small>确认后当前任务会自动继续</small></div><b>{pendingApprovals.length}</b></header>{pendingApprovals.map((approval) => renderApproval(approval, true))}</section>}
+          {queuedTurns.length > 0 && <details className="v5-composer-queue"><summary><Clock3 size={14} /><span>后续指令队列 · {queuedTurns.length} 条等待执行</span><ChevronDown size={13} /></summary><div>{queuedTurns.map((turn, index) => <article key={turn.id}><span>{index + 1}</span><div><strong>{turn.user_message}</strong><small>第 {turn.turn_no} 轮 · {time(turn.created_at)}</small></div><button type="button" title="移除这条排队指令" aria-label={`移除排队指令 ${turn.user_message}`} onClick={() => void removeQueuedTurn(turn)}><Trash2 size={13} /></button></article>)}</div></details>}
+          {(fileContextPaths.length > 0 || attachments.length > 0) && <div className="v4-composer-context">
+            {fileContextPaths.map((path) => <div className="v4-context-chip" key={path}><File size={13} /><span>{path}</span><button type="button" aria-label={`移除文件上下文 ${path}`} onClick={() => { setContextFiles((current) => current.filter((item) => item !== path)); if (preview?.path === path) setPreview(null); }}><X size={12} /></button></div>)}
+            {attachments.map((attachment) => <div className="v4-context-chip attachment" key={attachment.id}><Paperclip size={13} /><span>{attachment.name}<small>{fileSize(attachment.size)}</small></span><button type="button" aria-label={`移除附件 ${attachment.name}`} onClick={() => void removeAttachment(attachment)}><X size={12} /></button></div>)}
+          </div>}
+          {mentionQuery !== null && <section className="v5-mention-popover"><header><AtSign size={14} /><div><strong>添加项目文件</strong><small>文件将作为可验证上下文交给 Agent</small></div></header>{mentionQuery.length < 2 ? <p>继续输入至少 2 个字符搜索项目文件</p> : mentionLoading ? <p><RefreshCw className="spin" size={13} />正在搜索…</p> : mentionResult?.entries.length ? <div>{mentionResult.entries.filter((entry) => entry.kind === "file").map((entry) => <button type="button" key={entry.path} onMouseDown={(event) => event.preventDefault()} onClick={() => addMentionedFile(entry.path)}><FileCode2 size={14} /><span><strong>{entry.name}</strong><small>{entry.path}</small></span></button>)}</div> : <p>没有找到匹配文件</p>}</section>}
+          <textarea
+            value={message}
+            onChange={(event) => setMessage(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                event.currentTarget.form?.requestSubmit();
+              }
+            }}
+            placeholder={isChat ? "和 Agent 对话… Enter 发送，可通过附件按钮添加图片或文件" : activeStatuses.has(detail?.status ?? "") ? "输入后续要求并按 Enter 加入队列；输入 @ 可添加项目文件" : "继续告诉 Agent 要做什么… 输入 @ 添加文件，Enter 发送"}
+          />
+          {composerInspectorOpen && <section className="v5-composer-inspector"><header><div><strong>发送前检查</strong><small>{composerReady ? "运行条件完整" : "还有需要处理的项目"}</small></div><button type="button" aria-label="关闭发送前检查" onClick={() => setComposerInspectorOpen(false)}><X size={13} /></button></header><div>{composerChecks.map((check) => <article className={check.ok ? "ok" : "warning"} key={check.id}>{check.ok ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}<span><strong>{check.label}</strong><small>{check.detail}</small></span></article>)}</div></section>}
+          <footer className="v4-composer-toolbar">
+            <button className="v4-composer-tool" type="button" onClick={() => void attachFiles()} disabled={attachmentBusy || attachments.length >= 10} title="添加图片或文件（单个最大 50 MB）"><Upload size={14} /><span>{attachmentBusy ? "添加中" : "附件"}</span></button>
+            {!composerReady && <button className="v4-composer-tool v5-inspector-trigger warning" type="button" aria-expanded={composerInspectorOpen} onClick={() => setComposerInspectorOpen((value) => !value)} title="检查项目、Agent、模型、权限与上下文"><AlertTriangle size={14} /><span>需要检查</span><i /></button>}
+            <button className="v5-composer-runtime" type="button" aria-label="打开运行配置" onClick={() => setRuntimeConfigOpen(true)}><Bot size={13} /><span>{detail?.runner_name} · {detail?.model_name}</span><small>{effortLabels[detail?.reasoning_effort ?? "medium"]}思考 · {permissionLabels[detail?.permission_profile ?? "workspace"]}</small><ChevronDown size={12} /></button>
+            <div className="v5-composer-actions">{activeStatuses.has(detail?.status ?? "") && <button className="cancel" type="button" onClick={() => void cancel()}><CircleStop size={16} />停止</button>}<button className={`send ${activeStatuses.has(detail?.status ?? "") ? "queue" : ""}`} type="submit" aria-label={activeStatuses.has(detail?.status ?? "") ? "加入后续指令队列" : "发送消息"} title={activeStatuses.has(detail?.status ?? "") ? "加入队列 · Enter" : "发送 · Enter"} disabled={!composerReady || sending}>{activeStatuses.has(detail?.status ?? "") ? <><Clock3 size={14} /><span>排队</span></> : <Send size={16} />}</button></div>
+          </footer>
+          {actionError && <div className="v4-composer-error"><AlertTriangle size={14} />{actionError}</div>}
+        </form>
+      </section>
+
+      {studioLayout.right && !isChat && <div className="v5-studio-resizer right" role="separator" aria-label="调整工具工作台宽度" aria-orientation="vertical" tabIndex={0} onPointerDown={(event) => beginResize("right", event)} onKeyDown={(event) => resizeWithKeyboard("right", event.key)} />}
+
+      {!isChat && <section className="v4-studio-dock">
+        <nav>
+          <button type="button" className={studioLayout.dock && dock === "activity" ? "active" : ""} onClick={() => { setDock("activity"); setStudioLayout((current) => ({ ...current, dock: true, right: true })); }}><Activity size={14} />活动详情 <b>{processEvents.length}</b></button>
+          <button type="button" className={studioLayout.dock && dock === "terminal" ? "active" : ""} onClick={openTerminalPanel}><TerminalSquare size={14} />交互终端 <b>{terminals.length || ""}</b><i className={terminals.some((item) => item.running) ? "live" : ""} /></button>
+          <button type="button" className={studioLayout.dock && dock === "browser" ? "active" : ""} onClick={() => void openBrowserDock()}><Globe2 size={14} />浏览器 <i className={browserStatus?.running ? "live" : ""} /></button>
+          <button type="button" className={studioLayout.dock && dock === "file" ? "active" : ""} onClick={() => { setDock("file"); setStudioLayout((current) => ({ ...current, dock: true, right: true })); }}><Code2 size={14} />文件</button>
+          <button type="button" className={studioLayout.dock && dock === "changes" ? "active" : ""} onClick={() => { setDock("changes"); setStudioLayout((current) => ({ ...current, dock: true, right: true })); }}><FileDiff size={14} />变更 <b>{detail?.file_changes.length ?? 0}</b></button>
+          <span className="v4-dock-summary">{dock === "browser" && browserStatus?.running ? "VISIBLE BROWSER · 用户可随时接管" : terminal?.running ? "TERMINAL LIVE · 点击终端区域直接输入" : `${processEvents.length} 个可读步骤 · ${collapsedEventCount} 条底层事件已折叠`}</span>
+          {studioLayout.dock && <button className="v4-dock-toggle icon" type="button" aria-label={studioLayout.dockExpanded ? "恢复底部面板高度" : "展开底部面板高度"} title={studioLayout.dockExpanded ? "恢复普通高度" : "展开工作区域"} onClick={() => setStudioLayout((current) => ({ ...current, dockExpanded: !current.dockExpanded }))}>{studioLayout.dockExpanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>}
+          <button className="v4-dock-toggle" type="button" aria-label="关闭工具工作台" title="关闭工具工作台 · Ctrl J" onClick={() => setStudioLayout((current) => ({ ...current, dock: false, right: false, dockExpanded: false }))}><X size={16} />关闭</button>
+        </nav>
+        {studioLayout.dock && dock === "activity" && <div className="v5-workbench-activity"><section className="v5-workbench-session"><div className="v4-agent-profile"><span>{detail?.runner_name?.slice(0, 2).toUpperCase()}</span><div><strong>{detail?.runner_name}</strong><small>{detail?.model_name} · {statusLabels[detail?.status ?? ""]}</small></div></div><dl className="v4-telemetry"><div><dt>Token</dt><dd>{quotaTokens.toLocaleString()}</dd></div><div><dt>费用</dt><dd>${quotaCost.toFixed(3)}</dd></div><div><dt>用时</dt><dd>{duration(detail?.duration_ms ?? 0)}</dd></div><div><dt>变更</dt><dd>{detail?.file_changes.length ?? 0}</dd></div></dl></section><section className="v4-terminal"><header><span>完整活动记录</span><small>用于排错和审计；对话中只显示可读摘要</small></header>{processEvents.slice(-40).map((event) => <div key={event.seq}><time>{time(event.created_at)}</time><span>{eventTitle(event)}</span></div>)}{!processEvents.length && <span>等待 Agent 活动…</span>}</section><footer className="v5-session-actions"><button type="button" onClick={() => void forkSession()} disabled={!detail}><GitFork size={14} />创建分支</button><button type="button" onClick={exportSession} disabled={!detail}><Download size={14} />导出</button>{retryableTurn && <button type="button" onClick={() => void retryLastTurn()} disabled={sending}><RefreshCw size={14} />重试</button>}<button className="danger" type="button" onClick={() => void archiveSession()} disabled={!detail || activeStatuses.has(detail?.status ?? "")}><Archive size={14} />归档</button></footer></div>}
+        {studioLayout.dock && dock === "terminal" && (terminal?.running ? <div className="v4-interactive-terminal"><header><div className="v5-terminal-tabs">{terminals.map((item) => <div className={item.id === terminal.id ? "active" : ""} key={item.id}><button type="button" onClick={() => setActiveTerminalId(item.id)}><i className={item.running ? "live" : ""} /><span>{item.title}</span></button><button type="button" aria-label={`关闭终端 ${item.title}`} onClick={() => void closeInteractiveTerminal(item.id)}><X size={11} /></button></div>)}<button className="new" type="button" title="新建终端" disabled={terminals.filter((item) => item.running).length >= 3} onClick={() => void startInteractiveTerminal()}><Plus size={13} /></button></div><span>{terminal.shell} · 点击下方区域直接输入</span></header><TerminalView key={terminal.id} content={terminalText} onData={(data) => void writeTerminalData(data)} onResize={(columns, rows) => void resizeTerminal(columns, rows)} /><form onSubmit={sendTerminalInput}><span>快速命令 ›</span><input aria-label="终端快速命令" value={terminalInput} onChange={(event) => setTerminalInput(event.target.value)} placeholder="也可在上方终端内直接输入" autoComplete="off" /><button type="submit" disabled={!terminalInput}>运行</button></form></div> : <div className="v4-terminal-empty"><TerminalSquare size={26} /><strong>{terminal ? "当前终端已退出" : "启动项目交互终端"}</strong><p>{detail?.permission_profile === "standard" || detail?.permission_profile === "full" ? "终端将在当前项目目录打开；可同时保留 3 个标签，刷新页面后自动恢复仍在运行的终端。" : "交互终端需要“标准开发”或“完全访问”权限。可在上方输入框工具栏随时切换。"}</p>{detail?.permission_profile === "standard" || detail?.permission_profile === "full" ? <button type="button" onClick={() => void startInteractiveTerminal()}><TerminalSquare size={14} />{terminal ? "新建终端" : "启动终端"}</button> : <button type="button" onClick={() => void updateRuntimeSetting({ permission_profile: "standard" })}><ShieldCheck size={14} />切换到标准开发</button>}</div>)}
+        {studioLayout.dock && dock === "browser" && <div className="v5-studio-browser"><nav className="v5-browser-tabs">{browserStatus?.pages.map((page) => <div className={page.id === browserPageId ? "active" : ""} key={page.id}><button type="button" onClick={() => void switchBrowserPage(page.id)}><Globe2 size={11} /><span>{page.title || "新标签"}</span></button><button type="button" aria-label={`关闭浏览器标签 ${page.title}`} onClick={() => void closeBrowserPage(page.id)}><X size={11} /></button></div>)}<button className="new" type="button" title="新建浏览器标签" disabled={browserBusy} onClick={() => void createBrowserPage()}><Plus size={13} /></button><span>VISIBLE BROWSER · 可随时接管</span></nav><form onSubmit={navigateBrowser}><Globe2 size={14} /><input aria-label="浏览器地址" value={browserUrl} onChange={(event) => setBrowserUrl(event.target.value)} placeholder="https://example.com" /><button type="submit" disabled={browserBusy}>{browserBusy ? "加载中…" : "访问"}</button><button type="button" disabled={!browserPageId || browserBusy} onClick={() => void captureBrowser()}><RefreshCw size={13} />刷新</button><span><i className={browserStatus?.running ? "live" : ""} />{browserStatus?.running ? "可接管" : "未启动"}</span></form><div><section className="v5-studio-browser-view">{browserImage ? <img src={browserImage} alt="可见浏览器当前截图" /> : <div><Globe2 size={25} /><strong>启动可见浏览器</strong><small>浏览器会在独立窗口打开，你可以随时直接接管。</small><button type="button" onClick={() => void openBrowserDock()}>启动浏览器</button></div>}</section><section className="v5-studio-browser-controls"><header><div><strong>{browserSnapshot?.title || "页面控件"}</strong><small>{browserSnapshot?.url || "选择页面元素即可操作"}</small></div><button type="button" disabled={!browserPageId} onClick={() => void captureBrowser()}><Camera size={13} /></button></header><div className="fields"><input value={browserValue} onChange={(event) => setBrowserValue(event.target.value)} placeholder="为输入框准备填写内容" /><button type="button" disabled={!browserSelector || browserBusy} onClick={() => void interactBrowser("fill")}>填写</button><button type="button" disabled={!browserSelector || browserBusy} onClick={() => void interactBrowser("click")}>点击</button></div><div className="controls">{browserSnapshot?.controls.slice(0, 100).map((control) => <button className={browserSelector === control.selector ? "active" : ""} type="button" disabled={control.disabled} key={`${control.index}-${control.selector}`} onClick={() => setBrowserSelector(control.selector || "")}><b>{control.index + 1}</b><span><strong>{control.text || control.tag}</strong><small>{control.tag}{control.type ? ` · ${control.type}` : ""}</small></span></button>)}{browserSnapshot && !browserSnapshot.controls.length && <p>页面没有可操作控件。</p>}</div></section></div></div>}
+        {studioLayout.dock && dock === "file" && <pre className="v4-file-preview">{preview ? preview.content : "从左侧项目树选择一个 UTF-8 文本文件。"}</pre>}
+        {studioLayout.dock && dock === "changes" && <div className="v4-change-review"><div className="v4-change-list">{detail?.file_changes.map((change) => <button className={change.id === changePreview?.id ? "active" : ""} type="button" key={change.id} onClick={() => void openChange(change)}><span className={change.change_type}>{change.change_type.slice(0, 1).toUpperCase()}</span><code>{change.path}</code><small>{change.status} · {change.size_delta >= 0 ? "+" : ""}{change.size_delta} B</small></button>)}{!detail?.file_changes.length && <span>本会话尚未修改文件。</span>}</div>{changePreview && <section className="v4-diff-review"><header><strong>{changePreview.path}</strong><span>{changePreview.status}</span><div><button type="button" onClick={() => void reviewChange("reject")} disabled={!changePreview.can_restore || changePreview.status !== "observed"}>拒绝并还原</button><button type="button" onClick={() => void reviewChange("apply_content")} disabled={changePreview.status !== "observed"}>应用编辑内容</button><button className="accept" type="button" onClick={() => void reviewChange("accept")} disabled={changePreview.status !== "observed"}>接受变更</button></div></header><div><pre>{changePreview.diff || "此文件没有可显示的文本 Diff。"}</pre><textarea aria-label="编辑后的文件内容" value={changeEdit} onChange={(event) => setChangeEdit(event.target.value)} /></div></section>}</div>}
+      </section>}
+      {createOpen && renderCreateModal()}
+    </div>
+  );
+}

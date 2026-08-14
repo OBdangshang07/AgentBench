@@ -6,7 +6,7 @@ import { SuiteDrawer } from "../components/SuiteDrawer";
 import { api } from "../lib/api";
 import { formatDate } from "../lib/format";
 import { useApi } from "../lib/useApi";
-import type { Experiment, ModelConfig, Participant, Runner, Suite, SystemStatus } from "../types";
+import type { Experiment, ModelConfig, Participant, ReasoningEffort, ReasoningPolicy, Runner, Suite, SystemStatus } from "../types";
 
 export default function Experiments() {
   const state = useApi<Experiment[]>("/experiments", 4_000);
@@ -51,6 +51,10 @@ function CreateExperiment({ initialSuiteId = "", onClose, onSaved }: { initialSu
   const [participants, setParticipants] = useState<Participant[]>([{ model_id: "", runner_id: "" }]);
   const [repetitions, setRepetitions] = useState(1);
   const [concurrency, setConcurrency] = useState(2);
+  const [reasoningPolicy, setReasoningPolicy] = useState<ReasoningPolicy>("standard");
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("high");
+  const [judgeReasoningEffort, setJudgeReasoningEffort] = useState<ReasoningEffort>("high");
+  const [strictFairness, setStrictFairness] = useState(true);
   const [selectedNode, setSelectedNode] = useState("suite");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -60,9 +64,19 @@ function CreateExperiment({ initialSuiteId = "", onClose, onSaved }: { initialSu
   const judgeModel = models.data?.find((model) => model.id === systemStatus.data?.settings.judge_model_id);
   const judgeRunner = runners.data?.find((runner) => runner.id === systemStatus.data?.settings.judge_runner_id);
   const estimatedRuns = (selectedSuite?.case_count ?? 0) * participants.length * repetitions;
+  const frontendSuite = Boolean(selectedSuite && /Xnmk (Library )?前端/.test(selectedSuite.name));
+  const estimatedMinutes = selectedSuite?.case_count ? Math.round(selectedSuite.case_count * (frontendSuite ? 110 : 8) / Math.max(1, concurrency)) : 0;
   const participantReady = participants.every((item) => item.model_id && item.runner_id);
+  const fairnessReady = !strictFairness || (reasoningPolicy !== "native" && participants.every((participant) => {
+    const runner = runners.data?.find((item) => item.id === participant.runner_id);
+    return !participant.runner_id || runner?.adapter?.reasoning_control?.supported !== false;
+  }));
 
   useEffect(() => { if (!suiteId && suites.data?.length) setSuiteId(suites.data[0].id); }, [suiteId, suites.data]);
+  useEffect(() => { if (frontendSuite) setConcurrency(1); }, [frontendSuite]);
+  useEffect(() => {
+    setReasoningPolicy((selectedSuite?.difficulty_max ?? 0) >= 6 ? "maximum" : "standard");
+  }, [suiteId, selectedSuite?.difficulty_max]);
 
   function updateParticipant(index: number, patch: Partial<Participant>) {
     setParticipants((items) => items.map((item, position) => position === index ? { ...item, ...patch } : item));
@@ -72,14 +86,14 @@ function CreateExperiment({ initialSuiteId = "", onClose, onSaved }: { initialSu
     event.preventDefault(); setBusy(true); setError("");
     const form = new FormData(event.currentTarget);
     try {
-      const created = await api<Experiment>("/experiments", { method: "POST", body: JSON.stringify({ name: form.get("name"), suite_id: suiteId, participants, repetitions, concurrency }) });
+      const created = await api<Experiment>("/experiments", { method: "POST", body: JSON.stringify({ name: form.get("name"), suite_id: suiteId, participants, repetitions, concurrency, reasoning_policy: reasoningPolicy, reasoning_effort: reasoningEffort, strict_fairness: strictFairness, judge_reasoning_effort: judgeReasoningEffort }) });
       await api(`/experiments/${created.id}/start`, { method: "POST" });
       onSaved(); navigate(`/experiments/${created.id}`);
     } catch (value) { setError(value instanceof Error ? value.message : "创建失败"); setBusy(false); }
   }
 
   const selectedTitle = selectedNode === "suite" ? selectedSuite?.name ?? "测试套件" : selectedNode.startsWith("participant") ? `参测者 ${Number(selectedNode.split("-")[1]) + 1}` : selectedNode === "judge" ? "匿名裁判" : "本地运行策略";
-  const selectedDescription = selectedNode === "suite" ? "测试套件定义评测范围；启动时锁定题目版本和评分器版本。" : selectedNode.startsWith("participant") ? "参测节点将底层模型与负责执行任务的 Agent 明确绑定。" : selectedNode === "judge" ? "裁判节点只处理无法完全确定性验证的评分维度。" : "定义并发、重复、时间及格线和产物保留规则。";
+  const selectedDescription = selectedNode === "suite" ? "测试套件定义评测范围；启动时锁定题目版本和评分器版本。" : selectedNode.startsWith("participant") ? "参测节点将底层模型与负责执行任务的 Agent 明确绑定。" : selectedNode === "judge" ? frontendSuite ? "前端套件不调用 AI 裁判，作品统一进入人工评分工作台。" : "裁判节点只处理无法完全确定性验证的评分维度。" : "定义并发、重复、时间及格线和产物保留规则。";
 
   return (
     <div className="ab-view ab-compose-view">
@@ -100,8 +114,8 @@ function CreateExperiment({ initialSuiteId = "", onClose, onSaved }: { initialSu
               const runner = runners.data?.find((item) => item.id === participant.runner_id);
               return <GraphNode key={index} className={`participant-${index}`} selected={selectedNode === `participant-${index}`} onClick={() => setSelectedNode(`participant-${index}`)} label={`PARTICIPANT ${String(index + 1).padStart(2, "0")}`} icon={<Bot size={15} />} title={model?.name ?? "选择参测模型"} detail={`${runner?.name ?? "选择 Agent"} · ${runner?.capability.installed ? "已检测" : "待配置"}`} footerLeft={runner?.runner_type ?? "MODEL × AGENT"} footerRight={participant.model_id && participant.runner_id ? "READY" : "WAIT"} />;
             })}
-            <GraphNode className="judge" selected={selectedNode === "judge"} onClick={() => setSelectedNode("judge")} label="JUDGE" icon={<ShieldCheck size={15} />} title={judgeModel?.name ?? "确定性评分优先"} detail={`${judgeRunner?.name ?? "未启用裁判 Agent"} · 匿名评审`} footerLeft="RUBRIC ONLY" footerRight={judgeModel ? "READY" : "OPTIONAL"} />
-            <GraphNode className="policy" selected={selectedNode === "policy"} onClick={() => setSelectedNode("policy")} label="RUN POLICY" icon={<Play size={15} />} title="本地执行" detail={`并发 ${concurrency} · 重复 ${repetitions}\n无硬超时`} footerLeft={`${estimatedRuns} RUNS`} footerRight="READY" />
+            <GraphNode className="judge" selected={selectedNode === "judge"} onClick={() => setSelectedNode("judge")} label={frontendSuite ? "HUMAN REVIEW" : "JUDGE"} icon={<ShieldCheck size={15} />} title={frontendSuite ? "纯人工评分" : judgeModel?.name ?? "确定性评分优先"} detail={frontendSuite ? "逐项 Rubric · 草稿与审计" : `${judgeRunner?.name ?? "未启用裁判 Agent"} · 匿名评审`} footerLeft="RUBRIC ONLY" footerRight={frontendSuite ? "REQUIRED" : judgeModel ? "READY" : "OPTIONAL"} />
+            <GraphNode className="policy" selected={selectedNode === "policy"} onClick={() => setSelectedNode("policy")} label="RUN POLICY" icon={<Play size={15} />} title={reasoningPolicy === "maximum" ? "MAX 极限条件" : reasoningPolicy === "standard" ? "High 标准条件" : reasoningPolicy === "native" ? "Agent 原生条件" : `${reasoningEffort.toUpperCase()} 自定义条件`} detail={`并发 ${concurrency} · 重复 ${repetitions}\n${strictFairness ? "严格公平" : "允许非标准映射"}`} footerLeft={`${estimatedRuns} RUNS`} footerRight="READY" />
           </div>
           <div className="ab-minimap"><i /></div>
         </section>
@@ -114,14 +128,19 @@ function CreateExperiment({ initialSuiteId = "", onClose, onSaved }: { initialSu
             <div className="ab-form-section-label">PARTICIPANTS</div>
             {participants.map((participant, index) => {
               const runner = runners.data?.find((item) => item.id === participant.runner_id);
-              return <section className="ab-participant-config" key={index}><header><strong>参测者 {String(index + 1).padStart(2, "0")}</strong><span className={participant.model_id && participant.runner_id ? "ready" : ""}>{participant.model_id && participant.runner_id ? "● READY" : "○ WAIT"}</span>{participants.length > 1 && <button type="button" onClick={() => setParticipants((items) => items.filter((_, position) => position !== index))}><Trash2 size={12} /></button>}</header><select required aria-label={`参测者 ${index + 1} 模型`} value={participant.model_id} onChange={(event) => updateParticipant(index, { model_id: event.target.value })}><option value="" disabled>选择模型</option>{models.data?.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select><select required aria-label={`参测者 ${index + 1} Agent`} value={participant.runner_id} onChange={(event) => updateParticipant(index, { runner_id: event.target.value })}><option value="" disabled>选择 Agent</option>{runners.data?.map((item) => <option key={item.id} value={item.id}>{item.name}{!item.capability.installed ? " · 未检测" : ""}</option>)}</select><small>{runner?.capability.installed ? `✓ ${runner.name} 已就绪` : "选择后检查本机执行环境"}</small></section>;
+              return <section className="ab-participant-config" key={index}><header><strong>参测者 {String(index + 1).padStart(2, "0")}</strong><span className={participant.model_id && participant.runner_id ? "ready" : ""}>{participant.model_id && participant.runner_id ? "● READY" : "○ WAIT"}</span>{participants.length > 1 && <button type="button" onClick={() => setParticipants((items) => items.filter((_, position) => position !== index))}><Trash2 size={12} /></button>}</header><select required aria-label={`参测者 ${index + 1} 模型`} value={participant.model_id} onChange={(event) => updateParticipant(index, { model_id: event.target.value })}><option value="" disabled>选择模型</option>{models.data?.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select><select required aria-label={`参测者 ${index + 1} Agent`} value={participant.runner_id} onChange={(event) => updateParticipant(index, { runner_id: event.target.value })}><option value="" disabled>选择 Agent</option>{runners.data?.map((item) => <option key={item.id} value={item.id}>{item.name}{!item.capability.installed ? " · 未检测" : ""}</option>)}</select><small>{runner?.capability.installed ? `✓ ${runner.name} 已就绪` : "选择后检查本机执行环境"}</small>{runner?.adapter?.reasoning_control && <small className={runner.adapter.reasoning_control.verified ? "ab-condition-ok" : "ab-condition-warn"}>{runner.adapter.reasoning_control.note}</small>}</section>;
             })}
             <button className="ab-add-participant" type="button" onClick={() => setParticipants((items) => [...items, { model_id: "", runner_id: "" }])}><Plus size={12} />添加参测组合</button>
+            <div className="ab-form-section-label">REASONING CONDITION</div>
+            <label className="ab-form-field"><span>测评思考策略 <small>写入成绩条件</small></span><select aria-label="测评思考策略" value={reasoningPolicy} onChange={(event) => { const policy = event.target.value as ReasoningPolicy; setReasoningPolicy(policy); if (policy === "native") setStrictFairness(false); }}><option value="standard">标准 · High</option><option value="maximum">极限 · Agent 可验证最高档</option><option value="native">Agent 原生默认 · 非标准榜</option><option value="custom">自定义映射</option></select><small>{reasoningPolicy === "maximum" ? "Ultra 套件默认使用 MAX；各 Agent 按其真实最高档映射并记录。" : reasoningPolicy === "standard" ? "跨 Agent 统一请求 High，适合主标准榜。" : "原生默认或自定义条件会与标准榜分开。"}</small></label>
+            {reasoningPolicy === "custom" && <label className="ab-form-field"><span>参测模型思考强度</span><select aria-label="参测模型思考强度" value={reasoningEffort} onChange={(event) => setReasoningEffort(event.target.value as ReasoningEffort)}>{(["low", "medium", "high", "xhigh", "max"] as ReasoningEffort[]).map((effort) => <option key={effort} value={effort}>{effort.toUpperCase()}</option>)}</select></label>}
+            {!frontendSuite && <label className="ab-form-field"><span>匿名裁判思考强度 <small>与参测者独立</small></span><select aria-label="匿名裁判思考强度" value={judgeReasoningEffort} onChange={(event) => setJudgeReasoningEffort(event.target.value as ReasoningEffort)}>{(["low", "medium", "high", "xhigh", "max"] as ReasoningEffort[]).map((effort) => <option key={effort} value={effort}>{effort.toUpperCase()}</option>)}</select></label>}
+            <label className="ab-fairness-toggle"><input type="checkbox" checked={strictFairness} onChange={(event) => setStrictFairness(event.target.checked)} /><span><strong>严格公平检查</strong><small>无法控制思考档位的 Agent 将阻止启动；未验证映射会明确警告。</small></span></label>
             <div className="ab-policy-grid"><label className="ab-form-field"><span>重复次数</span><input type="number" min="1" max="10" value={repetitions} onChange={(event) => setRepetitions(Number(event.target.value))} /></label><label className="ab-form-field"><span>并发任务</span><input type="number" min="1" max="8" value={concurrency} onChange={(event) => setConcurrency(Number(event.target.value))} /></label></div>
-            <div className="ab-node-diagnostics"><strong><Check size={11} />连接检查{suiteId && participantReady ? "通过" : "等待配置"}</strong><span>{selectedSuite?.case_count ?? 0} 个测试 × {participants.length} 个参测组合 × {repetitions} 次重复；超过时间及格线继续运行，仅作轻量效率扣分。</span></div>
+            <div className="ab-node-diagnostics"><strong><Check size={11} />连接检查{suiteId && participantReady && fairnessReady ? "通过" : "等待配置"}</strong><span>{!fairnessReady ? "当前 Agent 无法在严格公平模式下控制思考档位，请更换 Agent 或关闭严格公平。" : `${selectedSuite?.case_count ?? 0} 个测试 × ${participants.length} 个参测组合 × ${repetitions} 次重复；${frontendSuite ? `预计约 ${estimatedMinutes} 分钟，磁盘占用取决于 Agent 生成作品与依赖；每题独立目录，完成后纯人工评分。` : "超过时间及格线继续运行，仅作轻量效率扣分。"}`}</span></div>
             {error && <div className="ab-compose-error">{error}</div>}
           </div>
-          <div className="ab-launch-panel"><div className="ab-launch-stats"><div><span>参测者</span><strong>{participants.length}</strong></div><div><span>运行</span><strong>{estimatedRuns}</strong></div><div><span>裁判</span><strong>{judgeModel ? "ON" : "RULE"}</strong></div></div><button className="ab-run-button wide" type="submit" disabled={!suiteId || !participantReady || busy}><Play size={14} />{busy ? "正在创建…" : "验证并开始本地评测"}</button></div>
+          <div className="ab-launch-panel"><div className="ab-launch-stats"><div><span>参测者</span><strong>{participants.length}</strong></div><div><span>运行</span><strong>{estimatedRuns}</strong></div><div><span>评分</span><strong>{frontendSuite ? "HUMAN" : judgeModel ? "AI" : "RULE"}</strong></div></div><button className="ab-run-button wide" type="submit" disabled={!suiteId || !participantReady || !fairnessReady || busy}><Play size={14} />{busy ? "正在创建…" : frontendSuite ? "创建作品集并运行套件" : "验证并开始本地评测"}</button></div>
         </aside>
       </form>}
       {previewSuite && <SuiteDrawer suiteId={previewSuite.id} suiteName={previewSuite.name} onClose={() => setPreviewSuiteId("")} />}

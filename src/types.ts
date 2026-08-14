@@ -1,4 +1,6 @@
 export type JsonObject = Record<string, unknown>;
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
+export type ReasoningPolicy = "standard" | "maximum" | "native" | "custom" | "historical";
 
 export interface ModelConfig {
   id: string;
@@ -24,7 +26,9 @@ export type ModelSource =
   | "gemini-cli"
   | "aider-cli"
   | "kimi-code"
-  | "qoder-cli";
+  | "qoder-cli"
+  | "cursor-cli"
+  | "deepseek-harness";
 
 export interface DiscoveredModel {
   id: string;
@@ -58,6 +62,8 @@ export interface ModelDiscoveryResult {
     installation?: "temporary_npx" | string;
     desktop_installed?: boolean;
     desktop_executable?: string;
+    desktop_configured?: boolean;
+    config_path?: string;
     note?: string;
   };
   models: DiscoveredModel[];
@@ -78,6 +84,8 @@ export interface Runner {
     | "aider_cli"
     | "kimi_code_cli"
     | "qoder_cli"
+    | "cursor_cli"
+    | "deepseek_harness"
     | "command";
   executable?: string;
   args: string[];
@@ -107,6 +115,23 @@ export interface Runner {
     command?: string;
     unavailable_reason?: string | null;
     manual_instructions?: string;
+  };
+  adapter?: {
+    conversation_mode: "native_resume" | "history_replay";
+    native_resume: boolean;
+    structured_events: "full" | "stream" | "filtered_text";
+    mcp: boolean;
+    visible_browser?: boolean;
+    model_override: boolean;
+    approval_gate: boolean;
+    process_tree_cancel: boolean;
+    interactive_terminal: boolean;
+    reasoning_control?: {
+      supported: boolean;
+      maximum?: string | null;
+      verified: boolean;
+      note: string;
+    };
   };
 }
 
@@ -148,6 +173,8 @@ export interface TestCase {
   avg_score?: number | null;
   full_score_rate?: number | null;
   low_discrimination?: boolean;
+  manual_scoring?: boolean;
+  suite_kind?: string;
   definition?: {
     instruction: string;
     tools: string[];
@@ -169,8 +196,46 @@ export interface TestCase {
       private_validation?: boolean;
       instance_count?: number;
       task_count?: number;
+      suite_kind?: string;
+      manual_scoring?: boolean;
+      source_repository?: string;
+      source_commit?: string;
+      source_path?: string;
+      suite_revision?: string;
     };
+    rubric?: ManualRubric;
   };
+}
+
+export interface ManualRubricDimension {
+  key: string;
+  label: string;
+  max_score: number;
+  criteria: string;
+}
+
+export interface ManualRubric {
+  mode: "manual";
+  version: string;
+  dimensions: ManualRubricDimension[];
+  checklist: Array<{ key: string; label: string }>;
+  critical_defects: Array<{ key: string; label: string }>;
+}
+
+export interface ManualReview {
+  id: string;
+  run_id: string;
+  status: "draft" | "submitted";
+  rubric_version: string;
+  reviewer: string;
+  dimension_scores: Record<string, number>;
+  checklist: Record<string, boolean>;
+  critical_defects: string[];
+  comment: string;
+  evidence: Array<{ name: string; path: string; size: number }>;
+  total_score?: number | null;
+  updated_at: string;
+  submitted_at?: string | null;
 }
 
 export interface MathPaperImport {
@@ -243,6 +308,11 @@ export interface Experiment {
   participants: Participant[];
   repetitions: number;
   concurrency: number;
+  reasoning_policy?: ReasoningPolicy;
+  reasoning_effort?: ReasoningEffort | null;
+  strict_fairness?: boolean;
+  judge_reasoning_effort?: ReasoningEffort | null;
+  runtime_config_version?: string;
   status: string;
   run_count?: number;
   finished_count?: number;
@@ -250,9 +320,17 @@ export interface Experiment {
   weighted_score?: number | null;
   exam_score?: number | null;
   exam_total?: number | null;
+  exam_scoring_basis?: "answer_quality" | string;
   created_at: string;
   started_at?: string;
   completed_at?: string;
+  suite_metadata?: {
+    kind: "benchmark" | "frontend";
+    manual_scoring?: boolean;
+    source_repository?: string;
+    source_commit?: string;
+    suite_revision?: string;
+  };
   summary?: {
     total: number;
     completed: number;
@@ -262,6 +340,7 @@ export interface Experiment {
     weighted_score?: number | null;
     exam_score?: number | null;
     exam_total?: number | null;
+    exam_scoring_basis?: "answer_quality" | string;
     avg_objective_score?: number | null;
     avg_judge_score?: number | null;
     avg_time_score?: number | null;
@@ -269,6 +348,11 @@ export interface Experiment {
     cost_usd?: number;
     tokens?: number;
     unpriced_runs?: number;
+    reviewed_runs?: number;
+    unreviewed_runs?: number;
+    review_progress?: number;
+    reviewed_weighted_score?: number | null;
+    frontend_weighted_score?: number | null;
   };
 }
 
@@ -304,6 +388,13 @@ export interface RunSummary {
   completed_at?: string | null;
   error_code?: string;
   error_message?: string;
+  requested_reasoning_effort?: ReasoningEffort | null;
+  effective_reasoning_effort?: string | null;
+  effort_source?: string;
+  effort_verified?: boolean;
+  runtime_identity?: Record<string, unknown>;
+  telemetry_status?: "pending" | "reported" | "partial" | "unavailable" | "unknown" | string;
+  failure_class?: "agent_solution_failure" | "agent_timeout" | "runtime_environment_failure" | "validator_infrastructure_failure" | "permission_mismatch" | string | null;
   created_at: string;
 }
 
@@ -326,7 +417,7 @@ export interface ValidatorResult {
 
 export interface ScoreDimension {
   id: string;
-  dimension: "objective_quality" | "judge_quality" | "time_efficiency" | "step_efficiency" | string;
+  dimension: "objective_quality" | "judge_quality" | "manual_quality" | "time_efficiency" | "step_efficiency" | string;
   score: number;
   weight: number;
   evidence: JsonObject;
@@ -376,12 +467,68 @@ export interface RunDetail extends RunSummary {
     id: string;
     score?: number;
     status: string;
+    reasoning_effort?: string | null;
+    runtime_identity?: Record<string, unknown>;
     evidence: JsonObject;
   }>;
   test_definition?: Omit<NonNullable<TestCase["definition"]>, "instruction"> & { instruction?: string | null };
   materials?: { name: string; size_bytes: number }[];
   runner_type: string;
   model_name: string;
+  frontend?: {
+    difficulty: number;
+    source_repository: string;
+    source_commit: string;
+    source_path: string;
+    suite_revision: string;
+    preview_entry: string;
+    rubric: ManualRubric;
+    review?: ManualReview | null;
+  };
+}
+
+export interface FrontendPreview {
+  available: boolean;
+  kind: "static" | "project" | "none";
+  entry?: string;
+  url?: string;
+  scripts?: string[];
+  reason?: string;
+}
+
+export interface FrontendPortfolioRun {
+  id: string;
+  model_id: string;
+  runner_id: string;
+  repetition: number;
+  status: string;
+  score?: number | null;
+  workspace_path?: string | null;
+  duration_ms: number;
+  tokens_input: number;
+  tokens_output: number;
+  cost_usd: number;
+  model_name: string;
+  runner_name: string;
+  title: string;
+  slug: string;
+  difficulty: number;
+  preview: FrontendPreview;
+  review?: ManualReview | null;
+}
+
+export interface FrontendPortfolio {
+  experiment_id: string;
+  root_path: string;
+  metadata: NonNullable<Experiment["suite_metadata"]>;
+  score: {
+    reviewed_runs: number;
+    unreviewed_runs: number;
+    review_progress: number;
+    reviewed_weighted_score?: number | null;
+    frontend_weighted_score?: number | null;
+  };
+  runs: FrontendPortfolioRun[];
 }
 
 export interface DashboardData {
@@ -456,5 +603,24 @@ export interface LeaderboardRow {
   success_rate: number;
   avg_duration_ms: number;
   total_cost: number;
+  avg_tokens: number | null;
+  telemetry_runs?: number;
+}
+
+export interface ExamLeaderboardRow {
+  model_id: string;
+  runner_id: string;
+  model_name: string;
+  runner_name: string;
+  board: "math-2025" | "ncre";
+  mode: "closed-book" | "tool-augmented" | "office";
+  papers: number;
+  exam_total: number;
+  avg_exam_score: number;
+  best_exam_score: number;
+  benchmark_score: number;
+  benchmark_rate: number;
+  avg_duration_ms: number;
   avg_tokens: number;
+  total_cost: number;
 }

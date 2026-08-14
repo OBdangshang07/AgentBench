@@ -20,6 +20,7 @@ from agentbench.catalog import (
     PLANNING_SUITE_ID,
     PRACTICAL_SUITE_ID,
     REASONING_SUITE_ID,
+    REASONIX_RUNNER_ID,
     SMOKE_SUITE_ID,
     ULTRA_SUITE_ID,
     V2_FULL_SUITE_ID,
@@ -430,7 +431,7 @@ def test_seed_disables_retired_builtin_cases(settings):
             "SELECT enabled FROM test_cases WHERE id='retired'"
         )
         assert retired == {"enabled": 0}
-        assert service.dashboard()["test_cases"] == 258
+        assert service.dashboard()["test_cases"] == 282
     finally:
         service.close()
 
@@ -566,7 +567,7 @@ def test_seeded_suites_have_expected_sizes(settings):
         assert len(gauntlet_cases) >= 55
         assert {case["category"] for case in gauntlet_cases}.isdisjoint({"office-exam"})
         assert 50 <= len(gauntlet_lite_cases) <= 75
-        assert service.dashboard()["test_cases"] == 258
+        assert service.dashboard()["test_cases"] == 282
         suites = {item["id"]: item for item in service.list_suites()}
         assert suites[FRONTIER_SUITE_ID]["difficulty_max"] == 5
         assert suites[PRACTICAL_SUITE_ID]["docker_case_count"] > 0
@@ -590,6 +591,7 @@ def test_seeded_suites_have_expected_sizes(settings):
             "aider_cli",
             "kimi_code_cli",
             "qoder_cli",
+            "cursor_cli",
         } <= runner_types
     finally:
         service.close()
@@ -632,11 +634,17 @@ def test_builtin_runner_upgrade_refreshes_code_owned_fields_only(settings):
         aider = upgraded.database.fetch_one(
             "SELECT * FROM agent_runners WHERE id=?", (AIDER_RUNNER_ID,)
         )
-        assert codex is not None and aider is not None
+        reasonix = upgraded.database.fetch_one(
+            "SELECT * FROM agent_runners WHERE id=?", (REASONIX_RUNNER_ID,)
+        )
+        assert codex is not None and aider is not None and reasonix is not None
         assert "--skip-git-repo-check" in codex["args_json"]
         assert codex["env_json"] == '{"KEEP":"yes"}'
         assert codex["limits_json"] == '{"timeout_seconds":77}'
         assert codex["enabled"] == 0
         assert "--no-git" in aider["args_json"]
+        reasonix_args = json.loads(reasonix["args_json"])
+        assert reasonix_args[reasonix_args.index("--dir") + 1] == "{workspace}"
+        assert reasonix_args[reasonix_args.index("--model") + 1] == "{model_name}"
     finally:
         upgraded.close()

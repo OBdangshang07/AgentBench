@@ -1,5 +1,5 @@
 use std::{
-    env,
+    env, fs,
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
     os::windows::process::CommandExt,
@@ -31,6 +31,97 @@ fn packaged_backend(resource_dir: &Path) -> Option<PathBuf> {
         .join("backend")
         .join(filename);
     candidate.is_file().then_some(candidate)
+}
+
+fn is_packaged_backend_filename(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
+    if normalized == "agentbench-backend.exe" {
+        return true;
+    }
+    let Some(version) = normalized
+        .strip_prefix("agentbench-backend-")
+        .and_then(|value| value.strip_suffix(".exe"))
+    else {
+        return false;
+    };
+    !version.is_empty()
+        && version.chars().any(|character| character.is_ascii_digit())
+        && version
+            .chars()
+            .all(|character| character.is_ascii_digit() || character == '.')
+}
+
+fn cleanup_obsolete_backends(resource_dir: &Path) {
+    let Some(current) = packaged_backend(resource_dir) else {
+        return;
+    };
+    let Some(backend_dir) = current.parent() else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(backend_dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == current || !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if is_packaged_backend_filename(name) {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_packaged_backend_filename, resolve_workspace_folder};
+    use std::{
+        env, fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[test]
+    fn recognizes_only_release_sidecar_names() {
+        assert!(is_packaged_backend_filename("agentbench-backend.exe"));
+        assert!(is_packaged_backend_filename("agentbench-backend-3.1.1.exe"));
+        assert!(is_packaged_backend_filename("AgentBench-Backend-4.0.0.EXE"));
+        assert!(!is_packaged_backend_filename(
+            "agentbench-backend-backup.exe"
+        ));
+        assert!(!is_packaged_backend_filename("unrelated.exe"));
+    }
+
+    #[test]
+    fn validates_workspace_folders_before_launching_explorer() {
+        assert_eq!(
+            resolve_workspace_folder("  ").unwrap_err(),
+            "Workspace path is empty"
+        );
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("agentbench-open-folder-{unique}"));
+        fs::create_dir(&root).expect("create test workspace");
+        let resolved = resolve_workspace_folder(root.to_str().expect("utf-8 path"))
+            .expect("existing directory should be accepted");
+        assert!(resolved.is_absolute());
+        assert!(resolved.is_dir());
+        assert!(!resolved.to_string_lossy().starts_with(r"\\?\"));
+
+        let file = root.join("artifact.txt");
+        fs::write(&file, "test").expect("create test artifact");
+        assert_eq!(
+            resolve_workspace_folder(file.to_str().expect("utf-8 path")).unwrap_err(),
+            "Workspace path is not a directory"
+        );
+        fs::remove_dir_all(root).expect("remove test workspace");
+    }
 }
 
 fn development_python() -> Option<PathBuf> {
@@ -84,12 +175,13 @@ fn endpoint_state() -> EndpointState {
     }
 }
 
-fn terminate_confirmed_old_backend() -> Result<(), String> {
+fn terminate_confirmed_backend(expect_current_version: bool) -> Result<(), String> {
+    let rejected_version_operator = if expect_current_version { "-ne" } else { "-eq" };
     let script = format!(
         concat!(
             "$ErrorActionPreference='Stop'; ",
             "$health=Invoke-RestMethod -Uri 'http://127.0.0.1:43765/api/v1/health' -TimeoutSec 2; ",
-            "if ($health.name -ne 'AgentBench Desktop' -or $health.version -eq '{}') ",
+            "if ($health.name -ne 'AgentBench Desktop' -or $health.version {} '{}') ",
             "{{ throw 'Backend identity/version no longer matches' }}; ",
             "$owners=Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort 43765 -State Listen ",
             "| Select-Object -ExpandProperty OwningProcess -Unique; ",
@@ -97,6 +189,7 @@ fn terminate_confirmed_old_backend() -> Result<(), String> {
             "if ($process.Path -notlike '*agentbench-backend*.exe') {{ throw 'Listener is not an AgentBench sidecar' }}; ",
             "Stop-Process -Id $owner -Force }}"
         ),
+        rejected_version_operator,
         env!("CARGO_PKG_VERSION")
     );
     let status = Command::new("powershell.exe")
@@ -118,7 +211,15 @@ fn terminate_confirmed_old_backend() -> Result<(), String> {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    Err("The old AgentBench sidecar is still listening on port 43765".into())
+    Err("The confirmed AgentBench sidecar is still listening on port 43765".into())
+}
+
+fn terminate_confirmed_old_backend() -> Result<(), String> {
+    terminate_confirmed_backend(false)
+}
+
+fn terminate_confirmed_current_backend() -> Result<(), String> {
+    terminate_confirmed_backend(true)
 }
 
 fn backend_command(app: &tauri::App) -> Result<Command, String> {
@@ -186,17 +287,64 @@ fn stop_backend(app_handle: &tauri::AppHandle) {
     let state = app_handle.state::<BackendProcess>();
     if let Ok(mut guard) = state.0.lock() {
         if let Some(mut child) = guard.take() {
+            // PyInstaller one-file executables can hand the listening server to an
+            // extracted child process. Close the verified listener as well as the
+            // original process handle so the port cannot outlive the desktop app.
+            let _ = terminate_confirmed_current_backend();
             let _ = child.kill();
             let _ = child.wait();
         }
     };
 }
 
+fn resolve_workspace_folder(path: &str) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Workspace path is empty".into());
+    }
+    let resolved = PathBuf::from(trimmed)
+        .canonicalize()
+        .map_err(|error| format!("Workspace path does not exist or cannot be accessed: {error}"))?;
+    if !resolved.is_dir() {
+        return Err("Workspace path is not a directory".into());
+    }
+    // Windows canonicalization commonly adds an extended-length `\\?\` prefix.
+    // Filesystem APIs accept it, but Explorer can reject that spelling for an
+    // otherwise valid directory, so convert it back to a shell-friendly path.
+    let display = resolved.to_string_lossy();
+    if let Some(unc) = display.strip_prefix(r"\\?\UNC\") {
+        return Ok(PathBuf::from(format!(r"\\{unc}")));
+    }
+    if let Some(local) = display.strip_prefix(r"\\?\") {
+        return Ok(PathBuf::from(local));
+    }
+    Ok(resolved)
+}
+
+#[tauri::command]
+fn open_workspace_folder(path: String) -> Result<(), String> {
+    let resolved = resolve_workspace_folder(&path)?;
+    Command::new("explorer.exe")
+        .arg(resolved)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Could not open workspace in Windows Explorer: {error}"))?;
+    Ok(())
+}
+
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .invoke_handler(tauri::generate_handler![open_workspace_folder])
         .setup(|app| {
             let backend = ensure_backend(app).map_err(std::io::Error::other)?;
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                cleanup_obsolete_backends(&resource_dir);
+            }
             app.manage(BackendProcess(Mutex::new(backend)));
             Ok(())
         })

@@ -110,7 +110,7 @@ export default function Layout() {
             <div className="ab-palette-search"><Search size={16} /><input autoFocus value={commandQuery} onChange={(event) => setCommandQuery(event.target.value)} placeholder="搜索测试、模型、运行或执行命令…" /><button type="button" onClick={() => setCommandOpen(false)}><X size={15} /></button><kbd>ESC</kbd></div>
             <div className="ab-palette-label">NAVIGATE</div>
             {commandItems.map(({ to, label, icon: Icon }, index) => <Link className="ab-palette-item" key={to} to={to} onClick={() => setCommandOpen(false)}><Icon size={14} /><span>{label}</span><kbd>{index + 1}</kbd></Link>)}
-            <footer>本机数据 · {dashboard?.test_cases ?? 0} 个测试 · Desktop {status?.version ?? "3.1.1"}</footer>
+            <footer>本机数据 · {dashboard?.test_cases ?? 0} 个测试 · Desktop {status?.version ?? "4.0.0"}</footer>
           </section>
         </div>
       )}

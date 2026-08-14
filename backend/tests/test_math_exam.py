@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from pypdf import PdfWriter
 
 from agentbench.api import create_app
-from agentbench.catalog import MOCK_MODEL_ID, UNIFIED_RUNNER_ID
+from agentbench.catalog import MATH_2025_CLOSED_SUITE_ID, MOCK_MODEL_ID, UNIFIED_RUNNER_ID
 from agentbench.math_builtin import SOURCE_SHA256, build_builtin_math_cases, builtin_math_manifest
 from agentbench.math_exam import build_question_drafts, import_math_pdf
 
@@ -29,6 +29,7 @@ def test_math_question_drafts_keep_official_150_point_structure():
     assert sum(item["points"] for item in drafts if item["type"] == "choice") == 50
     assert sum(item["points"] for item in drafts if item["type"] == "fill") == 30
     assert sum(item["points"] for item in drafts if item["type"] == "solution") == 70
+    assert [item["points"] for item in drafts[16:]] == [10, 12, 12, 12, 12, 12]
     assert drafts[16]["rubric"]["validators"][0]["weight"] == 40
     assert drafts[16]["rubric"]["validators"][1]["weight"] == 60
 
@@ -41,6 +42,7 @@ def test_user_pdf_is_bundled_as_two_verified_22_question_suites():
     assert manifest["source"]["page_count"] == 17
     assert len(manifest["questions"]) == 22
     assert sum(item["points"] for item in manifest["questions"]) == 150
+    assert [item["points"] for item in manifest["questions"][16:]] == [10, 12, 12, 12, 12, 12]
     assert len(cases["closed-book"]) == 22
     assert len(cases["tool-augmented"]) == 22
     assert cases["closed-book"][0]["definition"]["tools"] == []
@@ -176,9 +178,91 @@ def test_math_paper_review_and_publish_creates_two_real_suites(settings):
             "UPDATE runs SET status='completed',score=0 WHERE id=?", (selected[17],)
         )
         summary = client.get(f"/api/v1/experiments/{experiment['id']}").json()["summary"]
-        assert summary["avg_score"] == 33.33
-        assert summary["exam_score"] == 50.0
+        assert summary["avg_score"] == 3.33
+        assert summary["exam_score"] == 5.0
         assert summary["exam_total"] == 150.0
+        assert summary["exam_scoring_basis"] == "answer_quality"
+
+
+def test_math_paper_score_uses_answer_quality_not_efficiency(settings):
+    with TestClient(create_app(settings)) as client:
+        experiment = client.post(
+            "/api/v1/experiments",
+            json={
+                "name": "quality-only-math-score",
+                "suite_id": MATH_2025_CLOSED_SUITE_ID,
+                "participants": [
+                    {"model_id": MOCK_MODEL_ID, "runner_id": UNIFIED_RUNNER_ID}
+                ],
+                "repetitions": 1,
+                "concurrency": 1,
+            },
+        ).json()
+        service = client.app.state.service
+        run = service.database.fetch_one(
+            "SELECT r.id FROM runs r JOIN test_cases t ON t.id=r.test_case_id "
+            "WHERE r.experiment_id=? ORDER BY t.slug LIMIT 1",
+            (experiment["id"],),
+        )
+        service.database.execute(
+            "UPDATE runs SET status='completed',score=6 WHERE id=?", (run["id"],)
+        )
+        now = "2026-01-01T00:00:00+00:00"
+        service.database.execute(
+            "INSERT INTO score_components(id,run_id,dimension,score,weight,evidence_json,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("math-quality", run["id"], "objective_quality", 0, 94, "{}", now),
+        )
+        service.database.execute(
+            "INSERT INTO score_components(id,run_id,dimension,score,weight,evidence_json,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("math-time", run["id"], "time_efficiency", 100, 3, "{}", now),
+        )
+
+        summary = client.get(f"/api/v1/experiments/{experiment['id']}").json()["summary"]
+        assert summary["exam_score"] == 0
+        assert summary["weighted_score"] == 0
+
+
+def test_math_paper_keeps_declared_objective_and_judge_weights(settings):
+    with TestClient(create_app(settings)) as client:
+        experiment = client.post(
+            "/api/v1/experiments",
+            json={
+                "name": "weighted-math-quality",
+                "suite_id": MATH_2025_CLOSED_SUITE_ID,
+                "participants": [
+                    {"model_id": MOCK_MODEL_ID, "runner_id": UNIFIED_RUNNER_ID}
+                ],
+                "repetitions": 1,
+                "concurrency": 1,
+            },
+        ).json()
+        service = client.app.state.service
+        run = service.database.fetch_one(
+            "SELECT r.id FROM runs r JOIN test_cases t ON t.id=r.test_case_id "
+            "WHERE r.experiment_id=? AND json_extract(t.definition_json, "
+            "'$.metadata.question_no')=17",
+            (experiment["id"],),
+        )
+        service.database.execute(
+            "UPDATE runs SET status='completed',score=59.97 WHERE id=?", (run["id"],)
+        )
+        now = "2026-01-01T00:00:00+00:00"
+        for component_id, dimension, score, weight in (
+            ("math-objective", "objective_quality", 0, 37.6),
+            ("math-judge", "judge_quality", 100, 56.4),
+            ("math-token", "token_efficiency", 0, 1),
+        ):
+            service.database.execute(
+                "INSERT INTO score_components(id,run_id,dimension,score,weight,evidence_json,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (component_id, run["id"], dimension, score, weight, "{}", now),
+            )
+
+        summary = client.get(f"/api/v1/experiments/{experiment['id']}").json()["summary"]
+        assert summary["weighted_score"] == 4
+        assert summary["exam_score"] == 6
 
 
 def test_math_question_cannot_be_confirmed_without_required_review_data(settings):
