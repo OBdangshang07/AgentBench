@@ -25,6 +25,8 @@ const dimensionNames: Record<string, { label: string; note: string }> = {
 const validatorNames: Record<string, string> = {
   exact_match: "精确答案", contains: "关键内容", regex: "格式规则", json_schema: "JSON 结构", json_file: "JSON 产物", symbolic_json: "结构化数学答案", file_exists: "文件存在", file_content: "文件内容", file_contains: "文件关键内容", forbidden_paths: "安全边界", command: "隐藏命令验证", command_metrics: "私有指标验证", ai_rubric: "匿名裁判", manual_rubric: "人工评分量表", time_efficiency: "完成时效", step_efficiency: "步骤效率", token_efficiency: "Token 效率", efficiency: "旧版步骤效率",
 };
+const effortSourceNames: Record<string, string> = { direct: "直接透传", mapped: "Agent 档位映射", capped: "最高档限制", binary_mapping: "二值思考映射", model_mapping: "模型语义映射", api_requested: "API 请求", api_accepted: "API 已接受", api_rejected: "API 拒绝后回退", provider_variant: "Provider Variant", unsupported: "不可控", historical_unknown: "历史未知" };
+const failureClassNames: Record<string, string> = { agent_solution_failure: "能力结果未通过", agent_timeout: "Agent 执行超时", runtime_environment_failure: "运行环境故障", validator_infrastructure_failure: "验证器基础设施故障", permission_mismatch: "权限/沙箱条件不一致" };
 
 function evidenceText(evidence: Record<string, unknown>) {
   for (const key of ["summary", "reason", "detail", "message"]) {
@@ -81,6 +83,7 @@ export default function RunDetailPage() {
   const questionInstruction = run.test_definition?.instruction?.trim() ?? "";
   const materials = run.materials ?? [];
   const showQuestion = Boolean(questionInstruction) || materials.length > 0;
+  const runtimeIdentity = run.runtime_identity ?? {};
 
   function flash(text: string) { setWorkspaceHint(text); window.setTimeout(() => setWorkspaceHint(""), 1800); }
   async function previewFrontend() {
@@ -116,7 +119,8 @@ export default function RunDetailPage() {
         </section>
 
         <aside className="ab-context-pane">
-          <section className="ab-context-block"><label>EXECUTION COST</label><div className="ab-cost-grid"><div><span>总用时</span><strong>{formatDuration(run.duration_ms)}</strong></div><div><span>轮次</span><strong>{Math.max(1, run.attempt_count)} / {Math.max(1, attempts.length || run.attempt_count)}</strong></div><div><span>输入 Token</span><strong>{formatNumber(run.tokens_input)}</strong></div><div><span>输出 Token</span><strong>{formatNumber(run.tokens_output)}</strong></div></div></section>
+          <section className="ab-context-block"><label>EXECUTION COST</label><div className="ab-cost-grid"><div><span>总用时</span><strong>{formatDuration(run.duration_ms)}</strong></div><div><span>轮次</span><strong>{Math.max(1, run.attempt_count)} / {Math.max(1, attempts.length || run.attempt_count)}</strong></div><div><span>输入 Token</span><strong>{run.telemetry_status === "unavailable" ? "N/A" : formatNumber(run.tokens_input)}</strong></div><div><span>输出 Token</span><strong>{run.telemetry_status === "unavailable" ? "N/A" : formatNumber(run.tokens_output)}</strong></div></div><small className="ab-runtime-note">遥测：{run.telemetry_status === "unavailable" ? "Agent 未上报，不参与 Token 效率扣分" : run.telemetry_status ?? "历史未知"}</small></section>
+          <section className="ab-context-block"><label>RUNTIME CONDITION</label><div className="ab-runtime-ledger"><div><span>思考强度</span><strong>{run.requested_reasoning_effort?.toUpperCase() ?? "DEFAULT"} → {run.effective_reasoning_effort?.toUpperCase() ?? "N/A"}</strong></div><div><span>映射状态</span><strong className={run.effort_verified ? "verified" : "unverified"}>{run.effort_verified ? "已验证" : "未验证"}</strong></div><div><span>映射来源</span><strong>{effortSourceNames[run.effort_source ?? ""] ?? run.effort_source ?? "历史未知"}</strong></div><div><span>实际路由</span><strong>{String(runtimeIdentity.agent_provider ?? runtimeIdentity.model_provider ?? "—")} / {String(runtimeIdentity.model_name ?? run.model_name)}</strong></div><div><span>Agent 版本</span><strong>{String(runtimeIdentity.runner_version ?? "未上报")}</strong></div>{run.failure_class && <div className="failure"><span>失败分类</span><strong>{failureClassNames[run.failure_class] ?? run.failure_class}</strong></div>}</div></section>
           <section className="ab-context-block"><label>EVENT TRACE</label>{eventTrace.length ? eventTrace.map((event) => <div className={`ab-context-event${event.event_type.includes("failed") || event.event_type.includes("retry") ? " warn" : ""}`} key={event.id}><strong>{eventNames[event.event_type] ?? event.event_type}</strong><span>{typeof event.payload.summary === "string" ? event.payload.summary : `EVENT #${event.seq}`}</span></div>) : <div className="ab-muted">没有结构化事件记录</div>}</section>
           <section className="ab-context-block"><label>ARTIFACTS</label>{run.artifacts.length ? run.artifacts.slice(0, 6).map((artifact) => <a className="ab-artifact-row" key={artifact.id} href={downloadUrl(`/runs/${run.id}/artifacts/${artifact.id}`)}><FileCode2 size={13} /><span>{artifact.path} · {formatNumber(artifact.size)} B</span><b>查看</b></a>) : <div className="ab-muted">没有文件产物</div>}</section>
           {run.final_answer && <section className="ab-context-block"><label>FINAL ANSWER</label><pre className="ab-final-answer">{run.final_answer}</pre></section>}

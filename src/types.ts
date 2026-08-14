@@ -1,4 +1,6 @@
 export type JsonObject = Record<string, unknown>;
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
+export type ReasoningPolicy = "standard" | "maximum" | "native" | "custom" | "historical";
 
 export interface ModelConfig {
   id: string;
@@ -60,6 +62,8 @@ export interface ModelDiscoveryResult {
     installation?: "temporary_npx" | string;
     desktop_installed?: boolean;
     desktop_executable?: string;
+    desktop_configured?: boolean;
+    config_path?: string;
     note?: string;
   };
   models: DiscoveredModel[];
@@ -122,6 +126,12 @@ export interface Runner {
     approval_gate: boolean;
     process_tree_cancel: boolean;
     interactive_terminal: boolean;
+    reasoning_control?: {
+      supported: boolean;
+      maximum?: string | null;
+      verified: boolean;
+      note: string;
+    };
   };
 }
 
@@ -298,6 +308,11 @@ export interface Experiment {
   participants: Participant[];
   repetitions: number;
   concurrency: number;
+  reasoning_policy?: ReasoningPolicy;
+  reasoning_effort?: ReasoningEffort | null;
+  strict_fairness?: boolean;
+  judge_reasoning_effort?: ReasoningEffort | null;
+  runtime_config_version?: string;
   status: string;
   run_count?: number;
   finished_count?: number;
@@ -373,6 +388,13 @@ export interface RunSummary {
   completed_at?: string | null;
   error_code?: string;
   error_message?: string;
+  requested_reasoning_effort?: ReasoningEffort | null;
+  effective_reasoning_effort?: string | null;
+  effort_source?: string;
+  effort_verified?: boolean;
+  runtime_identity?: Record<string, unknown>;
+  telemetry_status?: "pending" | "reported" | "partial" | "unavailable" | "unknown" | string;
+  failure_class?: "agent_solution_failure" | "agent_timeout" | "runtime_environment_failure" | "validator_infrastructure_failure" | "permission_mismatch" | string | null;
   created_at: string;
 }
 
@@ -445,6 +467,8 @@ export interface RunDetail extends RunSummary {
     id: string;
     score?: number;
     status: string;
+    reasoning_effort?: string | null;
+    runtime_identity?: Record<string, unknown>;
     evidence: JsonObject;
   }>;
   test_definition?: Omit<NonNullable<TestCase["definition"]>, "instruction"> & { instruction?: string | null };
@@ -579,7 +603,8 @@ export interface LeaderboardRow {
   success_rate: number;
   avg_duration_ms: number;
   total_cost: number;
-  avg_tokens: number;
+  avg_tokens: number | null;
+  telemetry_runs?: number;
 }
 
 export interface ExamLeaderboardRow {

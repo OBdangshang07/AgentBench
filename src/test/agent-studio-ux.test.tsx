@@ -153,7 +153,7 @@ function installApiMock(
   });
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = String(input);
-    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.2" });
+    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.3" });
     if (url.endsWith("/sessions")) return json([currentSession]);
     if (url.endsWith("/sessions/session-1") && init?.method === "PATCH") return json({ ...currentDetail, ...JSON.parse(String(init.body)) });
     if (url.includes("/sessions/session-1?message_limit=")) return json(currentDetail);

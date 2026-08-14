@@ -17,6 +17,7 @@ import type { ExamLeaderboardRow, LeaderboardRow } from "../types";
 
 type Board = "unified" | "native" | "math2025" | "ncre";
 type MathMode = "closed-book" | "tool-augmented";
+type BenchmarkCondition = "standard" | "maximum" | "nonstandard" | "historical";
 
 const boardMeta = {
   unified: {
@@ -53,8 +54,9 @@ function Participant({ rank, model, runner }: { rank: number; model: string; run
 export default function Leaderboard() {
   const [board, setBoard] = useState<Board>("unified");
   const [mathMode, setMathMode] = useState<MathMode>("closed-book");
+  const [condition, setCondition] = useState<BenchmarkCondition>("standard");
   const regularPath = board === "unified" || board === "native"
-    ? `/leaderboard?lane=${board}`
+    ? `/leaderboard?lane=${board}&condition=${condition}`
     : null;
   const examPath = board === "math2025"
     ? `/leaderboard/exams/math-2025?mode=${mathMode}`
@@ -96,13 +98,14 @@ export default function Leaderboard() {
             <div><span>{meta.eyebrow}</span><h2>{meta.title}</h2><p>{meta.description}</p></div><Trophy size={34} />
           </div>
           {board === "math2025" && <div className="ab-exam-mode" role="group" aria-label="考研数学榜模式"><span>考试模式</span><button className={mathMode === "closed-book" ? "active" : ""} type="button" onClick={() => setMathMode("closed-book")}>闭卷推理</button><button className={mathMode === "tool-augmented" ? "active" : ""} type="button" onClick={() => setMathMode("tool-augmented")}>工具增强</button><small>两种模式不混排</small></div>}
+          {!isExam && <div className="ab-exam-mode" role="group" aria-label="测评运行条件"><span>运行条件</span><button className={condition === "standard" ? "active" : ""} type="button" onClick={() => setCondition("standard")}>HIGH 标准榜</button><button className={condition === "maximum" ? "active" : ""} type="button" onClick={() => setCondition("maximum")}>MAX 极限榜</button><button className={condition === "nonstandard" ? "active" : ""} type="button" onClick={() => setCondition("nonstandard")}>非标准</button><button className={condition === "historical" ? "active" : ""} type="button" onClick={() => setCondition("historical")}>历史</button><small>不同思考预算不混排</small></div>}
           {loading ? <LoadingBlock /> : error ? <ErrorBlock message={error} retry={() => void refresh()} /> : isExam ? examRows.length ? (
             <div className="ab-ranking-table ab-exam-ranking-table">
               <div className="ab-ranking-columns"><span>RANK / PARTICIPANT</span><span>PAPERS</span><span>AVERAGE</span><span>BEST</span><span>{board === "math2025" ? "90 POINT" : "PASS"}</span><span>TIME</span><span>TOKEN</span><span>COST</span></div>
               {examRows.map((row, index) => <div className="ab-ranking-row" key={`${row.model_id}-${row.runner_id}`}><Participant rank={index} model={row.model_name} runner={row.runner_name} /><b>{row.papers}</b><strong className="ab-ranking-score">{row.avg_exam_score.toFixed(1)}<small> / {row.exam_total.toFixed(0)}</small></strong><span>{row.best_exam_score.toFixed(1)}<small> / {row.exam_total.toFixed(0)}</small></span><span>{row.benchmark_rate.toFixed(0)}%<small>≥ {row.benchmark_score.toFixed(0)}</small></span><span>{formatDuration(row.avg_duration_ms)}</span><span>{formatNumber(row.avg_tokens)}</span><span>${row.total_cost.toFixed(3)}</span></div>)}
             </div>
           ) : <div className="ab-case-empty">该榜单还没有完整试卷。未完成的半张卷不会进入排行，也不会按已答部分外推。</div> : regularRows.length ? (
-            <div className="ab-ranking-table"><div className="ab-ranking-columns"><span>RANK / PARTICIPANT</span><span>RUNS</span><span>QUALITY</span><span>SUCCESS</span><span>TIME</span><span>TOKEN</span><span>COST</span></div>{regularRows.map((row, index) => <div className="ab-ranking-row" key={`${row.model_id}-${row.runner_id}`}><Participant rank={index} model={row.model_name} runner={row.runner_name} /><b>{row.runs}</b><strong className="ab-ranking-score">{row.avg_score.toFixed(1)}</strong><span>{row.success_rate.toFixed(0)}%</span><span>{formatDuration(row.avg_duration_ms)}<small>{row.avg_time_score?.toFixed(1) ?? "—"}</small></span><span>{formatNumber(row.avg_tokens)}<small>{row.avg_token_score?.toFixed(1) ?? "—"}</small></span><span>${row.total_cost.toFixed(3)}</span></div>)}</div>
+            <div className="ab-ranking-table"><div className="ab-ranking-columns"><span>RANK / PARTICIPANT</span><span>RUNS</span><span>QUALITY</span><span>SUCCESS</span><span>TIME</span><span>TOKEN</span><span>COST</span></div>{regularRows.map((row, index) => <div className="ab-ranking-row" key={`${row.model_id}-${row.runner_id}`}><Participant rank={index} model={row.model_name} runner={row.runner_name} /><b>{row.runs}</b><strong className="ab-ranking-score">{row.avg_score.toFixed(1)}</strong><span>{row.success_rate.toFixed(0)}%</span><span>{formatDuration(row.avg_duration_ms)}<small>{row.avg_time_score?.toFixed(1) ?? "—"}</small></span><span>{row.avg_tokens == null ? "N/A" : formatNumber(row.avg_tokens)}<small>{row.avg_tokens == null ? "未上报" : row.avg_token_score?.toFixed(1) ?? "—"}</small></span><span>${row.total_cost.toFixed(3)}</span></div>)}</div>
           ) : <div className="ab-case-empty">该赛道还没有已完成的评分数据。</div>}
         </section>
         <aside className="ab-ranking-context">

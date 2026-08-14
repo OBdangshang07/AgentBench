@@ -9,7 +9,7 @@ function json(value: unknown) {
 function installApiMock() {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = String(input);
-    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.2" });
+    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.3" });
     if (url.includes("/leaderboard/exams/math-2025")) return json([]);
     if (url.includes("/leaderboard/exams/ncre")) return json([]);
     if (url.includes("/leaderboard?lane=")) return json([]);
@@ -26,6 +26,9 @@ describe("Leaderboard boards", () => {
 
     expect(screen.getByRole("button", { name: /统一 Agent 模型榜/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /原生 Agent 系统榜/ })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "测评运行条件" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "MAX 极限榜" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes("condition=maximum"))).toBe(true));
     fireEvent.click(screen.getByRole("button", { name: /2025 考研数学（一）榜/ }));
     expect(await screen.findByRole("group", { name: "考研数学榜模式" })).toBeInTheDocument();
     expect(screen.getByText(/完整 22 题/)).toBeInTheDocument();

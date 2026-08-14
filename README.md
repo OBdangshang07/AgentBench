@@ -1,5 +1,16 @@
 # AgentBench Desktop
 
+## V5.2.3：可审计的思考强度与 Harness 公平性
+
+- 正式测评新增 HIGH 标准、MAX 极限、Agent 原生和自定义四种思考策略；Ultra 默认 MAX，参测者与匿名裁判分别固化实际档位。
+- 每次运行记录 Agent 版本、模型 Provider、模型名、Agent 内部 Provider 路由、请求/实际思考档位及映射验证状态。
+- DeepSeek Harness 使用工作区写权限及工作区内 TEMP/TMP，隔离配置不修改全局 Harness 设置；Reasonix 与 Harness 即使显示名相似，也按实际路由区分。
+- Ultra 安全反馈可识别隐藏执行超时和 `payload` 数据契约错误，但不泄露隐藏实例；失败区分能力、超时、运行环境、验证器环境和权限不一致。
+- Token 未上报显示 N/A；HIGH 标准榜、MAX 极限榜、非标准榜和历史榜互不混排。
+- NCRE Office 题目、验证器与评分逻辑保持不变。
+
+完整变更见 [`docs/releases/V5.2.3.md`](docs/releases/V5.2.3.md)。
+
 ## V5.2.0：离线固化的真实前端工程套件
 
 - 将获许可的 `Xnmk029/Xnmk_Library` 当前版本固化为 24 个本地前端工程题，不在客户端运行时访问或同步远程仓库。

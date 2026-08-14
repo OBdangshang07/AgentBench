@@ -61,6 +61,7 @@ class OpenAICompatibleClient:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.reasoning_effort = reasoning_effort
+        self.reasoning_status = "requested" if reasoning_effort else "not_requested"
         self.timeout = timeout
 
     def complete(self, history: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ModelDecision:
@@ -117,6 +118,7 @@ class OpenAICompatibleClient:
                 timeout=self.timeout,
             )
             if response.status_code == 400 and "reasoning_effort" in payload:
+                self.reasoning_status = "rejected_fallback"
                 fallback_payload = {key: value for key, value in payload.items() if key != "reasoning_effort"}
                 response = httpx.post(
                     f"{self.base_url}/chat/completions",
@@ -177,6 +179,7 @@ class AnthropicClient:
         self.model_name = model_name
         self.max_tokens = max_tokens
         self.reasoning_effort = reasoning_effort
+        self.reasoning_status = "requested" if reasoning_effort else "not_requested"
         self.timeout = timeout
 
     def complete(self, history: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ModelDecision:
@@ -244,6 +247,7 @@ class AnthropicClient:
                 f"{self.base_url}/v1/messages", headers=headers, json=payload, timeout=self.timeout
             )
             if response.status_code == 400 and "output_config" in payload:
+                self.reasoning_status = "rejected_fallback"
                 fallback_payload = {key: value for key, value in payload.items() if key != "output_config"}
                 response = httpx.post(
                     f"{self.base_url}/v1/messages",
@@ -279,6 +283,9 @@ class MockModelClient:
     def __init__(self, metadata: dict[str, Any]):
         self.actions = list(metadata.get("demo_actions") or [])
         self.final_response = str(metadata.get("demo_response") or "任务已完成。")
+        self.reasoning_status = (
+            "requested" if metadata.get("reasoning_effort") else "not_requested"
+        )
         self.index = 0
 
     def complete(self, history: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ModelDecision:

@@ -89,7 +89,7 @@ def test_deepseek_harness_plain_text_output_is_final_answer():
     )
 
     assert final == output
-    assert (input_tokens, output_tokens, cost, count) == (0, 0, None, 1)
+    assert (input_tokens, output_tokens, cost, count) == (0, 0, None, 2)
 
 
 def test_codex_discovery_reads_visible_cache_and_configured_providers(tmp_path, monkeypatch):

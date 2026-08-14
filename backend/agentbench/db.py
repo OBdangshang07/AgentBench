@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 
 def utc_now() -> str:
@@ -112,6 +112,11 @@ CREATE TABLE IF NOT EXISTS experiments (
     concurrency INTEGER NOT NULL DEFAULT 1,
     benchmark_generation TEXT NOT NULL DEFAULT 'v2',
     scoring_profile TEXT NOT NULL DEFAULT 'balanced-v2',
+    reasoning_policy TEXT NOT NULL DEFAULT 'historical',
+    reasoning_effort TEXT,
+    strict_fairness INTEGER NOT NULL DEFAULT 0,
+    judge_reasoning_effort TEXT,
+    runtime_config_version TEXT NOT NULL DEFAULT 'legacy',
     status TEXT NOT NULL DEFAULT 'draft',
     created_at TEXT NOT NULL,
     started_at TEXT,
@@ -128,6 +133,13 @@ CREATE TABLE IF NOT EXISTS runs (
     repetition INTEGER NOT NULL DEFAULT 1,
     lane TEXT NOT NULL,
     scoring_profile TEXT NOT NULL DEFAULT 'balanced-v2',
+    requested_reasoning_effort TEXT,
+    effective_reasoning_effort TEXT,
+    effort_source TEXT NOT NULL DEFAULT 'historical_unknown',
+    effort_verified INTEGER NOT NULL DEFAULT 0,
+    runtime_identity_json TEXT NOT NULL DEFAULT '{}',
+    telemetry_status TEXT NOT NULL DEFAULT 'unknown',
+    failure_class TEXT,
     status TEXT NOT NULL DEFAULT 'queued',
     final_answer TEXT,
     score REAL,
@@ -198,6 +210,8 @@ CREATE TABLE IF NOT EXISTS judge_reviews (
     judge_runner_id TEXT,
     score REAL,
     status TEXT NOT NULL,
+    reasoning_effort TEXT,
+    runtime_identity_json TEXT NOT NULL DEFAULT '{}',
     evidence_json TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -633,6 +647,13 @@ class Database:
                 ("passed", "INTEGER"),
                 ("test_revision_id", "TEXT"),
                 ("scoring_profile", "TEXT NOT NULL DEFAULT 'balanced-v2'"),
+                ("requested_reasoning_effort", "TEXT"),
+                ("effective_reasoning_effort", "TEXT"),
+                ("effort_source", "TEXT NOT NULL DEFAULT 'historical_unknown'"),
+                ("effort_verified", "INTEGER NOT NULL DEFAULT 0"),
+                ("runtime_identity_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("telemetry_status", "TEXT NOT NULL DEFAULT 'unknown'"),
+                ("failure_class", "TEXT"),
             ):
                 if name not in run_columns:
                     connection.execute(f"ALTER TABLE runs ADD COLUMN {name} {declaration}")
@@ -643,6 +664,11 @@ class Database:
             for name, declaration in (
                 ("benchmark_generation", "TEXT NOT NULL DEFAULT 'v2'"),
                 ("scoring_profile", "TEXT NOT NULL DEFAULT 'balanced-v2'"),
+                ("reasoning_policy", "TEXT NOT NULL DEFAULT 'historical'"),
+                ("reasoning_effort", "TEXT"),
+                ("strict_fairness", "INTEGER NOT NULL DEFAULT 0"),
+                ("judge_reasoning_effort", "TEXT"),
+                ("runtime_config_version", "TEXT NOT NULL DEFAULT 'legacy'"),
             ):
                 if name not in experiment_columns:
                     connection.execute(
@@ -701,6 +727,18 @@ class Database:
                     "ALTER TABLE agent_sessions ADD COLUMN reasoning_effort "
                     "TEXT NOT NULL DEFAULT 'medium'"
                 )
+            judge_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(judge_reviews)").fetchall()
+            }
+            for name, declaration in (
+                ("reasoning_effort", "TEXT"),
+                ("runtime_identity_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ):
+                if name not in judge_columns:
+                    connection.execute(
+                        f"ALTER TABLE judge_reviews ADD COLUMN {name} {declaration}"
+                    )
             if "skill_pack_id" not in session_columns:
                 connection.execute("ALTER TABLE agent_sessions ADD COLUMN skill_pack_id TEXT")
             if "profile_id" not in session_columns:

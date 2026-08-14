@@ -1030,8 +1030,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lane: str = Query(default="unified", pattern="^(unified|native)$"),
         suite_id: str | None = None,
         benchmark_generation: str = Query(default="v3", pattern="^(v2|v3|all)$"),
+        condition: str = Query(
+            default="standard", pattern="^(standard|maximum|nonstandard|historical|all)$"
+        ),
     ) -> list[dict[str, Any]]:
-        return svc.leaderboard(lane, suite_id, benchmark_generation)
+        return svc.leaderboard(lane, suite_id, benchmark_generation, condition)
 
     @app.get("/api/v1/leaderboard/exams/{exam}")
     def exam_leaderboard(

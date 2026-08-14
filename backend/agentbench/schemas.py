@@ -82,12 +82,20 @@ class Participant(BaseModel):
     runner_id: str
 
 
+ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
+ReasoningPolicy = Literal["standard", "maximum", "native", "custom"]
+
+
 class ExperimentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=140)
     suite_id: str
     participants: list[Participant] = Field(min_length=1, max_length=20)
     repetitions: int = Field(default=1, ge=1, le=10)
     concurrency: int = Field(default=1, ge=1, le=8)
+    reasoning_policy: ReasoningPolicy = "standard"
+    reasoning_effort: ReasoningEffort = "high"
+    strict_fairness: bool = True
+    judge_reasoning_effort: ReasoningEffort = "high"
 
 
 class TestCaseImport(BaseModel):
@@ -161,7 +169,6 @@ class ModelEnabledUpdate(BaseModel):
 
 
 PermissionProfile = Literal["readonly", "workspace", "standard", "full"]
-ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
 
 
 class ProjectCreate(BaseModel):

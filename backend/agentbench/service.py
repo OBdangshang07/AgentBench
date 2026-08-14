@@ -300,6 +300,7 @@ def runner_adapter_capabilities(runner_type: str, tools: list[str]) -> dict[str,
         "kimi_code_cli",
         "cursor_cli",
     }
+    maximum_condition = benchmark_reasoning_condition(runner_type, "maximum", "max")
     return {
         "conversation_mode": "native_resume" if native_resume else "history_replay",
         "native_resume": native_resume,
@@ -312,6 +313,12 @@ def runner_adapter_capabilities(runner_type: str, tools: list[str]) -> dict[str,
         "approval_gate": True,
         "process_tree_cancel": True,
         "interactive_terminal": False,
+        "reasoning_control": {
+            "supported": maximum_condition["effective"] is not None,
+            "maximum": maximum_condition["effective"],
+            "verified": maximum_condition["verified"],
+            "note": maximum_condition["note"],
+        },
     }
 
 
@@ -385,6 +392,70 @@ def _harness_reasoning_effort(value: str | None) -> tuple[str, str]:
     if requested == "max":
         return "max", "极限"
     return "high", "标准"
+
+
+_REASONING_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+
+def benchmark_reasoning_condition(
+    runner_type: str,
+    policy: str,
+    configured_effort: str | None,
+    model_name: str = "",
+) -> dict[str, Any]:
+    """Resolve the requested benchmark budget to an honest Agent-specific condition."""
+    requested = {
+        "standard": "high",
+        "maximum": "max",
+        "custom": configured_effort or "high",
+    }.get(policy)
+    if requested not in _REASONING_LEVELS:
+        return {
+            "requested": None,
+            "effective": None,
+            "source": "agent_default",
+            "verified": False,
+            "note": "沿用 Agent 原生默认配置；不属于标准化成绩",
+        }
+    effective = requested
+    source = "direct"
+    verified = True
+    note = "请求档位可直接传递给 Agent"
+    if runner_type == "codex_cli" and requested == "max":
+        effective, source, note = "xhigh", "capped", "Codex 当前最高标准化档位为 XHigh"
+    elif runner_type == "deepseek_harness":
+        effective, _ = _harness_reasoning_effort(requested)
+        source = "mapped" if effective != requested else "direct"
+        note = f"Harness 实际使用 {effective.upper()} 档"
+    elif runner_type == "qoder_cli" and requested in {"xhigh", "max"}:
+        effective, source, note = "high", "capped", "Qoder 当前最高可验证档位为 High"
+    elif runner_type == "kimi_code_cli":
+        effective = "high" if requested in {"high", "xhigh", "max"} else "low"
+        source = "binary_mapping"
+        note = "Kimi Code 仅提供 Thinking 开/关映射"
+    elif runner_type == "reasonix_cli" and "deepseek" in model_name.lower():
+        effective = {"medium": "low", "xhigh": "high"}.get(requested, requested)
+        source = "model_mapping" if effective != requested else "direct"
+        note = "已按 Reasonix 的 DeepSeek effort 语义映射"
+    elif runner_type in {"cursor_cli", "gemini_cli", "aider_cli", "command"}:
+        effective, source, verified = None, "unsupported", False
+        note = "该 Agent 暂无稳定、可验证的思考强度参数"
+    elif runner_type == "opencode_cli":
+        source, verified = "provider_variant", False
+        note = "OpenCode Variant 取决于 Provider；需运行时确认"
+    elif runner_type == "unified":
+        source, verified = "api_requested", False
+        note = "已请求 API reasoning 参数；是否接受需由 Provider 回执确认"
+    elif runner_type == "claude_code_cli" and requested in {"xhigh", "max"}:
+        effective, source, verified = "high", "version_capped", False
+        note = "Claude Code 高档以上支持随版本变化，启动前需确认"
+    return {
+        "requested": requested,
+        "effective": effective,
+        "source": source,
+        "verified": verified,
+        "note": note,
+    }
 
 
 def _harness_activity_phase(
@@ -3407,8 +3478,10 @@ class EvaluationService:
             if not workspace_path.is_relative_to(self.settings.workspaces_dir.resolve()):
                 raise RuntimeError("Invalid model test workspace")
             workspace = Workspace(workspace_path)
+            task_temp = (workspace.root / ".agentbench-tmp").resolve()
+            task_temp.mkdir(parents=True, exist_ok=True)
             smoke_runner = dict(runner)
-            smoke_runner["limits_json"] = json.dumps({"timeout_seconds": 90})
+            smoke_runner["limits_json"] = json.dumps({"max_runtime_seconds": 90})
             if runner_type == "claude_code_cli":
                 smoke_args = _json(smoke_runner.get("args_json"), [])
                 if "--effort" in smoke_args:
@@ -3423,8 +3496,13 @@ class EvaluationService:
                     {
                         "instruction": "Return exactly AGENTBENCH-OK and nothing else.",
                         "tools": [],
-                        "limits": {"timeout_seconds": 90},
-                        "metadata": {"connection_test": True},
+                        "limits": {"max_runtime_seconds": 90},
+                        "metadata": {
+                            "connection_test": True,
+                            "task_temp": str(task_temp),
+                            "reasoning_effort": "high",
+                            "permission_profile": "workspace",
+                        },
                     },
                     workspace,
                     lambda *_args: None,
@@ -4066,11 +4144,16 @@ class EvaluationService:
         experiment_id = new_id()
         now = utc_now()
         participants = [item.model_dump() for item in value.participants]
+        requested_effort = None if value.reasoning_policy == "native" else (
+            "high" if value.reasoning_policy == "standard" else
+            "max" if value.reasoning_policy == "maximum" else value.reasoning_effort
+        )
         with self.database.transaction() as connection:
             connection.execute(
                 "INSERT INTO experiments(id,name,suite_id,participants_json,repetitions,concurrency,"
-                "benchmark_generation,scoring_profile,status,created_at) "
-                "VALUES (?,?,?,?,?,?,'v3','balanced-v3','draft',?)",
+                "benchmark_generation,scoring_profile,reasoning_policy,reasoning_effort,"
+                "strict_fairness,judge_reasoning_effort,runtime_config_version,status,created_at) "
+                "VALUES (?,?,?,?,?,?,'v3','balanced-v3',?,?,?,?,?,'draft',?)",
                 (
                     experiment_id,
                     value.name,
@@ -4078,6 +4161,11 @@ class EvaluationService:
                     json.dumps(participants),
                     value.repetitions,
                     value.concurrency,
+                    value.reasoning_policy,
+                    requested_effort,
+                    int(value.strict_fairness),
+                    value.judge_reasoning_effort,
+                    "5.2.3",
                     now,
                 ),
             )
@@ -4092,15 +4180,38 @@ class EvaluationService:
             for repetition in range(1, value.repetitions + 1):
                 for participant in participants:
                     runner = connection.execute(
-                        "SELECT runner_type FROM agent_runners WHERE id=?",
+                        "SELECT runner_type,name FROM agent_runners WHERE id=?",
                         (participant["runner_id"],),
                     ).fetchone()
+                    model = connection.execute(
+                        "SELECT name,provider,model_name,settings_json FROM models WHERE id=?",
+                        (participant["model_id"],),
+                    ).fetchone()
                     lane = "unified" if runner["runner_type"] == "unified" else "native"
+                    condition = benchmark_reasoning_condition(
+                        str(runner["runner_type"]),
+                        value.reasoning_policy,
+                        requested_effort,
+                        str(model["model_name"]),
+                    )
+                    settings = _json(model["settings_json"], {})
+                    runtime_identity = {
+                        "schema": "agentbench-runtime/v1",
+                        "runner_type": runner["runner_type"],
+                        "runner_name": runner["name"],
+                        "model_display_name": model["name"],
+                        "model_provider": model["provider"],
+                        "model_name": model["model_name"],
+                        "agent_provider": settings.get("agent_provider"),
+                        "identity_verified": False,
+                    }
                     for case in cases:
                         connection.execute(
                             "INSERT INTO runs(id,experiment_id,test_case_id,model_id,runner_id,"
-                            "test_revision_id,repetition,lane,scoring_profile,status,created_at) "
-                            "VALUES (?,?,?,?,?,?,?,?,'balanced-v3','queued',?)",
+                            "test_revision_id,repetition,lane,scoring_profile,requested_reasoning_effort,"
+                            "effective_reasoning_effort,effort_source,effort_verified,runtime_identity_json,"
+                            "telemetry_status,status,created_at) "
+                            "VALUES (?,?,?,?,?,?,?,?,'balanced-v3',?,?,?,?,?,?,'queued',?)",
                             (
                                 new_id(),
                                 experiment_id,
@@ -4110,6 +4221,12 @@ class EvaluationService:
                                 case["test_revision_id"],
                                 repetition,
                                 lane,
+                                condition["requested"],
+                                condition["effective"],
+                                condition["source"],
+                                int(condition["verified"]),
+                                json.dumps(runtime_identity, ensure_ascii=False),
+                                "pending",
                                 now,
                             ),
                         )
@@ -4142,6 +4259,7 @@ class EvaluationService:
         if not row:
             raise KeyError("experiment_not_found")
         row["participants"] = _json(row.pop("participants_json"), [])
+        row["strict_fairness"] = bool(row.get("strict_fairness"))
         row["suite_metadata"] = self._suite_runtime_metadata(experiment_id)
         row["summary"] = self.database.fetch_one(
             "SELECT COUNT(*) AS total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed,"
@@ -4246,7 +4364,12 @@ class EvaluationService:
         )
         for run in runs:
             self.executor.submit(self._run_with_semaphore, run["id"], semaphore)
-        self.database.insert_audit("experiment.started", "experiment", experiment_id)
+        self.database.insert_audit(
+            "experiment.started",
+            "experiment",
+            experiment_id,
+            {"warnings": preflight.get("warnings", []), "checks": preflight.get("checks", {})},
+        )
         return self.get_experiment(experiment_id)
 
     def preflight_experiment(self, experiment_id: str) -> dict[str, Any]:
@@ -4256,6 +4379,7 @@ class EvaluationService:
         warnings: list[str] = []
         participants = experiment["participants"]
         native_runners: list[dict[str, Any]] = []
+        runtime_conditions: list[dict[str, Any]] = []
         seen_runner_ids: set[str] = set()
         for participant in participants:
             model = self.get_model(participant["model_id"])
@@ -4267,6 +4391,28 @@ class EvaluationService:
                 continue
             if not model["enabled"] or not runner["enabled"]:
                 errors.append(f"{model['name']} × {runner['name']} 已被停用")
+            condition = benchmark_reasoning_condition(
+                str(runner["runner_type"]),
+                str(experiment.get("reasoning_policy") or "historical"),
+                experiment.get("reasoning_effort"),
+                str(model.get("model_name") or ""),
+            )
+            runtime_conditions.append(
+                {
+                    "model_id": model["id"],
+                    "model_name": model["name"],
+                    "runner_id": runner["id"],
+                    "runner_name": runner["name"],
+                    **condition,
+                }
+            )
+            if experiment.get("strict_fairness") and condition["effective"] is None:
+                errors.append(
+                    f"{model['name']} × {runner['name']} 无法控制思考强度；"
+                    "严格公平模式下不能启动"
+                )
+            elif not condition["verified"]:
+                warnings.append(f"{model['name']} × {runner['name']}：{condition['note']}")
             if runner["runner_type"] == "unified":
                 continue
             if runner["id"] not in seen_runner_ids:
@@ -4279,6 +4425,27 @@ class EvaluationService:
             runner_errors, runner_warnings = self._check_runner(runner)
             errors.extend(runner_errors)
             warnings.extend(runner_warnings)
+
+        identity_groups: dict[str, set[tuple[str, str]]] = {}
+        for participant in participants:
+            model = self.get_model(participant["model_id"])
+            display_name = re.split(r"\bvia\b", str(model["name"]), maxsplit=1, flags=re.I)[0]
+            display_name = re.sub(
+                r"\b(codex|reasonix|harness|claude\s*code|opencode|qoder|kimi\s*code|cursor)\b",
+                "",
+                display_name,
+                flags=re.I,
+            )
+            display_key = re.sub(r"[^a-z0-9]+", "", display_name.lower())
+            settings = model.get("settings") or {}
+            identity_groups.setdefault(display_key, set()).add(
+                (str(settings.get("agent_provider") or model["provider"]), str(model["model_name"]))
+            )
+        if any(len(identities) > 1 for identities in identity_groups.values()):
+            warnings.append(
+                "检测到显示名称相近但 Provider/模型路由不同的参测项；"
+                "它们会按不同运行身份记录，不能宣称为严格同模型对比"
+            )
 
         definitions = self.database.fetch_all(
             "SELECT DISTINCT COALESCE(tr.definition_json,t.definition_json) AS definition_json "
@@ -4379,6 +4546,9 @@ class EvaluationService:
                 "requires_docker": requires_docker,
                 "requires_judge": requires_judge,
                 "manual_scoring": manual_only,
+                "reasoning_policy": experiment.get("reasoning_policy") or "historical",
+                "strict_fairness": bool(experiment.get("strict_fairness")),
+                "runtime_conditions": runtime_conditions,
             },
         }
 
@@ -4563,6 +4733,8 @@ class EvaluationService:
         )
         for row in rows:
             row["passed"] = None if row["passed"] is None else bool(row["passed"])
+            row["effort_verified"] = bool(row.get("effort_verified"))
+            row["runtime_identity"] = _json(row.pop("runtime_identity_json", None), {})
         return rows
 
     def get_run(self, run_id: str) -> dict[str, Any]:
@@ -4576,6 +4748,8 @@ class EvaluationService:
         if not row:
             raise KeyError("run_not_found")
         row["passed"] = None if row["passed"] is None else bool(row["passed"])
+        row["effort_verified"] = bool(row.get("effort_verified"))
+        row["runtime_identity"] = _json(row.pop("runtime_identity_json", None), {})
         definition, revision = self._definition_for_run(row)
         raw_metadata = copy.deepcopy(definition.get("metadata") or {})
         raw_rubric = copy.deepcopy(definition.get("rubric") or {})
@@ -4626,6 +4800,7 @@ class EvaluationService:
         )
         for review in row["judge_reviews"]:
             review["evidence"] = _json(review.pop("evidence_json"), {})
+            review["runtime_identity"] = _json(review.pop("runtime_identity_json", None), {})
         return row
 
     def get_run_material(self, run_id: str, filename: str) -> tuple[bytes, str]:
@@ -5005,6 +5180,41 @@ class EvaluationService:
             )
             assert runner
             definition, revision = self._definition_for_run(run)
+            experiment_condition = self.database.fetch_one(
+                "SELECT reasoning_policy FROM experiments WHERE id=?",
+                (run["experiment_id"],),
+            ) or {"reasoning_policy": "historical"}
+            condition = benchmark_reasoning_condition(
+                str(runner["runner_type"]),
+                str(experiment_condition["reasoning_policy"]),
+                run.get("requested_reasoning_effort"),
+                str(model.get("model_name") or ""),
+            )
+            runtime_identity = _json(run.get("runtime_identity_json"), {})
+            capability = (
+                {"installed": True, "version": "built-in", "executable": "agentbench"}
+                if runner["runner_type"] == "unified"
+                else native_cli_status(str(runner.get("executable") or ""))
+            )
+            runtime_identity.update(
+                {
+                    "runner_version": capability.get("version"),
+                    "runner_executable": capability.get("executable"),
+                    "requested_reasoning_effort": condition["requested"],
+                    "effective_reasoning_effort": condition["effective"],
+                    "effort_source": condition["source"],
+                    "effort_verified": condition["verified"],
+                }
+            )
+            self.database.execute(
+                "UPDATE runs SET requested_reasoning_effort=?,effective_reasoning_effort=?,"
+                "effort_source=?,effort_verified=?,runtime_identity_json=? WHERE id=?",
+                (
+                    condition["requested"], condition["effective"], condition["source"],
+                    int(condition["verified"]), json.dumps(runtime_identity, ensure_ascii=False), run_id,
+                ),
+            )
+            definition.setdefault("metadata", {})["reasoning_effort"] = condition["effective"]
             event_sink(
                 "run.started",
                 {
@@ -5013,6 +5223,7 @@ class EvaluationService:
                     "test_version": revision.get("version"),
                     "definition_hash": revision.get("definition_hash"),
                     "scoring_profile": run.get("scoring_profile") or "balanced-v2",
+                    "runtime_condition": condition,
                 },
             )
             metadata = definition.get("metadata") or {}
@@ -5045,6 +5256,9 @@ class EvaluationService:
                 shutil.rmtree(workspace_path)
             workspace = Workspace(workspace_path)
             workspace.seed(definition.get("initial_files") or {})
+            task_temp = (workspace.root / ".agentbench-tmp").resolve()
+            task_temp.mkdir(parents=True, exist_ok=True)
+            definition.setdefault("metadata", {})["task_temp"] = str(task_temp)
             self.database.execute(
                 "UPDATE runs SET status='running',workspace_path=? WHERE id=?",
                 (str(workspace.root), run_id),
@@ -5072,7 +5286,9 @@ class EvaluationService:
             adjusted_score: float | None = None
             passed = False
             previous_summary = ""
+            client: ModelClient | None = None
             for attempt_no in range(1, max_attempts + 1):
+                task_temp.mkdir(parents=True, exist_ok=True)
                 attempt_instruction = self._attempt_instruction(
                     definition["instruction"], attempt_no, hints, previous_summary
                 )
@@ -5118,6 +5334,35 @@ class EvaluationService:
                 cumulative_usage.add(result.usage)
                 cumulative_duration += result.duration_ms
                 cumulative_steps += result.steps
+                telemetry_status = self._telemetry_status(cumulative_usage)
+                self.database.execute(
+                    "UPDATE runs SET telemetry_status=? WHERE id=?",
+                    (telemetry_status, run_id),
+                )
+                if client is not None and getattr(client, "reasoning_status", None) == "rejected_fallback":
+                    runtime_identity["reasoning_status"] = "provider_rejected_fallback"
+                    self.database.execute(
+                        "UPDATE runs SET effort_verified=0,effort_source='api_rejected',"
+                        "runtime_identity_json=? WHERE id=?",
+                        (json.dumps(runtime_identity, ensure_ascii=False), run_id),
+                    )
+                    event_sink(
+                        "runtime.condition_updated",
+                        {"verified": False, "source": "api_rejected", "status": "fallback"},
+                    )
+                elif client is not None and getattr(client, "reasoning_status", None) == "requested":
+                    runtime_identity.update(
+                        {"reasoning_status": "provider_accepted", "effort_verified": True}
+                    )
+                    self.database.execute(
+                        "UPDATE runs SET effort_verified=1,effort_source='api_accepted',"
+                        "runtime_identity_json=? WHERE id=?",
+                        (json.dumps(runtime_identity, ensure_ascii=False), run_id),
+                    )
+                    event_sink(
+                        "runtime.condition_updated",
+                        {"verified": True, "source": "api_accepted", "status": "accepted"},
+                    )
                 cost, cost_source = self._usage_cost(model, cumulative_usage)
                 attempt_cost, _ = self._usage_cost(model, result.usage)
                 if cancel_event.is_set():
@@ -5152,12 +5397,15 @@ class EvaluationService:
                     return
                 if not result.ok:
                     infrastructure_failure = result.error_code in {
-                        "runtime_safety_limit",
                         "cli_missing",
                         "cli_unavailable",
                         "native_cli_disabled",
                         "model_error",
+                        "harness_model_not_active",
                     }
+                    failure_class = self._failure_class(
+                        result.error_code, result.error_message, phase="execution"
+                    )
                     self.database.execute(
                         "UPDATE run_attempts SET status=?,tokens_input=?,tokens_output=?,cost_usd=?,"
                         "duration_ms=?,steps=?,error_code=?,error_message=?,completed_at=? WHERE id=?",
@@ -5178,7 +5426,7 @@ class EvaluationService:
                     self.database.execute(
                         "UPDATE runs SET status=?,final_answer=?,steps=?,tokens_input=?,tokens_output=?,"
                         "cost_usd=?,cost_source=?,duration_ms=?,attempt_count=?,passed=0,error_code=?,"
-                        "error_message=?,completed_at=? WHERE id=?",
+                        "error_message=?,telemetry_status=?,failure_class=?,completed_at=? WHERE id=?",
                         (
                             terminal_status,
                             result.final_answer,
@@ -5191,6 +5439,8 @@ class EvaluationService:
                             attempt_no - 1 if infrastructure_failure else attempt_no,
                             result.error_code,
                             result.error_message,
+                            telemetry_status,
+                            failure_class,
                             utc_now(),
                             run_id,
                         ),
@@ -5204,6 +5454,8 @@ class EvaluationService:
                         },
                     )
                     return
+                if task_temp.exists():
+                    shutil.rmtree(task_temp, ignore_errors=True)
                 self.database.execute("UPDATE runs SET status='validating' WHERE id=?", (run_id,))
                 event_sink("run.validating", {"attempt": attempt_no})
                 manual_scoring = bool(
@@ -5267,7 +5519,8 @@ class EvaluationService:
                     self.database.execute(
                         "UPDATE runs SET status='environment_unavailable',final_answer=?,steps=?,"
                         "tokens_input=?,tokens_output=?,cost_usd=?,cost_source=?,duration_ms=?,"
-                        "attempt_count=?,passed=0,error_code=?,error_message=?,completed_at=? WHERE id=?",
+                        "attempt_count=?,passed=0,error_code=?,error_message=?,telemetry_status=?,"
+                        "failure_class=?,completed_at=? WHERE id=?",
                         (
                             result.final_answer,
                             cumulative_steps,
@@ -5279,6 +5532,10 @@ class EvaluationService:
                             attempt_no - 1,
                             platform_code,
                             platform_message,
+                            telemetry_status,
+                            self._failure_class(
+                                platform_code, platform_message, phase="validation"
+                            ),
                             utc_now(),
                             run_id,
                         ),
@@ -5404,11 +5661,13 @@ class EvaluationService:
                 "environment_unavailable": "environment_unavailable",
                 "needs_review": "needs_review",
             }[score.status]
+            if task_temp.exists():
+                shutil.rmtree(task_temp, ignore_errors=True)
             self._record_artifacts(run_id, workspace, event_sink)
             self.database.execute(
                 "UPDATE runs SET status=?,final_answer=?,score=?,steps=?,tokens_input=?,tokens_output=?,"
                 "cost_usd=?,cost_source=?,duration_ms=?,attempt_count=?,passed=?,error_code=NULL,"
-                "error_message=NULL,completed_at=? WHERE id=?",
+                "error_message=NULL,telemetry_status=?,failure_class=?,completed_at=? WHERE id=?",
                 (
                     final_status,
                     result.final_answer,
@@ -5421,6 +5680,8 @@ class EvaluationService:
                     cumulative_duration,
                     attempt_no,
                     int(passed),
+                    self._telemetry_status(cumulative_usage),
+                    None if passed else self._score_failure_class(score),
                     utc_now(),
                     run_id,
                 ),
@@ -5439,7 +5700,9 @@ class EvaluationService:
             logger.exception("Run %s failed", run_id)
             self.database.execute(
                 "UPDATE runs SET status='failed',error_code='internal_error',error_message=?,"
-                "completed_at=? WHERE id=?",
+                "failure_class='runtime_environment_failure',"
+                "telemetry_status=CASE WHEN telemetry_status='pending' THEN 'unavailable' "
+                "ELSE telemetry_status END,completed_at=? WHERE id=?",
                 (str(exc)[:2000], utc_now(), run_id),
             )
             try:
@@ -5447,6 +5710,14 @@ class EvaluationService:
             except Exception:
                 logger.exception("Could not persist failure event for %s", run_id)
         finally:
+            workspace_value = self.database.fetch_one(
+                "SELECT workspace_path FROM runs WHERE id=?", (run_id,)
+            )
+            if workspace_value and workspace_value.get("workspace_path"):
+                cleanup_root = Path(str(workspace_value["workspace_path"])).resolve()
+                cleanup_temp = (cleanup_root / ".agentbench-tmp").resolve()
+                if cleanup_temp.is_relative_to(cleanup_root):
+                    shutil.rmtree(cleanup_temp, ignore_errors=True)
             with self._state_lock:
                 self._cancel_events.pop(run_id, None)
                 self._paused_runs.discard(run_id)
@@ -5494,7 +5765,73 @@ class EvaluationService:
             lines.append(
                 f"- {component.validator_type}: {component.score:.1f}/100 ({component.status})"
             )
+            evidence_text = " ".join(
+                str(component.evidence.get(key) or "")
+                for key in ("reason", "stderr", "stdout", "message", "error")
+            )
+            if re.search(r"timed out after\s+\d+(?:\.\d+)?\s+seconds|command_timeout", evidence_text, re.I):
+                lines.append("  安全诊断：隐藏验证执行超过单项安全上限；优先检查算法复杂度和终止条件。")
+            if re.search(r"KeyError\s*[:(]?\s*['\"]?payload|['\"]payload['\"]", evidence_text, re.I):
+                lines.append("  安全诊断：关键数据契约缺少 payload 字段；检查事件序列化与恢复路径。")
         return "\n".join(lines[:20])
+
+    @staticmethod
+    def _telemetry_status(usage) -> str:
+        input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+        output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+        reported_cost = getattr(usage, "reported_cost_usd", None)
+        if input_tokens > 0 and output_tokens > 0:
+            return "reported"
+        if input_tokens > 0 or output_tokens > 0 or reported_cost is not None:
+            return "partial"
+        return "unavailable"
+
+    @staticmethod
+    def _failure_class(error_code: str | None, message: str | None, *, phase: str) -> str:
+        code = str(error_code or "").lower()
+        detail = str(message or "").lower()
+        permission_markers = (
+            "permission",
+            "access is denied",
+            "read-only",
+            "readonly",
+            "sandbox",
+            "operation not permitted",
+        )
+        if phase == "validation" or code.startswith("validator_"):
+            return "validator_infrastructure_failure"
+        if any(marker in code or marker in detail for marker in permission_markers):
+            return "permission_mismatch"
+        if code in {"command_timeout", "runtime_safety_limit"} or "timed out" in detail:
+            return "agent_timeout"
+        if code in {
+            "cli_missing",
+            "cli_unavailable",
+            "native_cli_disabled",
+            "model_error",
+            "harness_model_not_active",
+            "internal_error",
+        }:
+            return "runtime_environment_failure"
+        return "agent_solution_failure"
+
+    @staticmethod
+    def _score_failure_class(score) -> str:
+        evidence_text = " ".join(
+            " ".join(
+                str(component.evidence.get(key) or "")
+                for key in ("reason", "stderr", "stdout", "message", "error")
+            )
+            for component in score.components
+        ).lower()
+        if re.search(r"timed out after\s+\d+(?:\.\d+)?\s+seconds|command_timeout", evidence_text):
+            return "agent_timeout"
+        if any(
+            marker in evidence_text
+            for marker in ("permission denied", "access is denied", "read-only", "operation not permitted")
+        ):
+            return "permission_mismatch"
+        return "agent_solution_failure"
 
     @staticmethod
     def _usage_cost(model: dict[str, Any], usage) -> tuple[float, str]:
@@ -5557,6 +5894,18 @@ class EvaluationService:
         args = _json(runner.get("args_json"), [])
         native_environment = _json(runner.get("env_json"), {})
         model_settings = _json(model.get("settings_json"), {})
+        task_temp = str(metadata.get("task_temp") or "").strip()
+        if task_temp:
+            native_environment.update({"TEMP": task_temp, "TMP": task_temp, "TMPDIR": task_temp})
+        if metadata.get("reasoning_effort") and not metadata.get("studio_session"):
+            args = self._studio_native_options(
+                args,
+                str(runner["runner_type"]),
+                "workspace",
+                str(metadata["reasoning_effort"]),
+                [],
+                str(model.get("model_name") or ""),
+            )
         harness_runtime_root: Path | None = None
         harness_selection: tuple[str, str, str] | None = None
         if runner["runner_type"] == "deepseek_harness":
@@ -5810,11 +6159,17 @@ class EvaluationService:
                 timeout=int(
                     definition_limits.get(
                         "max_runtime_seconds",
-                        runner_limits.get(
-                            "max_runtime_seconds",
-                            self.get_setting("default_max_runtime_seconds")
-                            if self.get_setting("default_max_runtime_seconds") is not None
-                            else 7200,
+                        definition_limits.get(
+                            "timeout_seconds",
+                            runner_limits.get(
+                                "max_runtime_seconds",
+                                runner_limits.get(
+                                    "timeout_seconds",
+                                    self.get_setting("default_max_runtime_seconds")
+                                    if self.get_setting("default_max_runtime_seconds") is not None
+                                    else 7200,
+                                ),
+                            ),
                         ),
                     )
                 ),
@@ -6171,7 +6526,13 @@ class EvaluationService:
     ) -> tuple[str, int, int, float | None, int]:
         if runner_type == "deepseek_harness":
             final = output.strip()
-            return final, 0, 0, None, 1 if final else 0
+            observed_steps = sum(
+                1
+                for line in output.splitlines()
+                if line.strip()
+                and not line.lstrip().startswith(("DeepSeek Harness", "DSH ", "---"))
+            )
+            return final, 0, 0, None, min(500, observed_steps) if final else 0
         final = ""
         input_tokens = 0
         output_tokens = 0
@@ -6318,6 +6679,45 @@ class EvaluationService:
                 return ValidationResult(
                     "ai_rubric", weight, 0, "needs_review", {"reason": "Judge runner not found"}
                 )
+            experiment_id = run.get("experiment_id")
+            if not experiment_id:
+                stored_run = self.database.fetch_one(
+                    "SELECT experiment_id FROM runs WHERE id=?", (run["id"],)
+                ) or {}
+                experiment_id = stored_run.get("experiment_id")
+            judge_config = (
+                self.database.fetch_one(
+                    "SELECT judge_reasoning_effort FROM experiments WHERE id=?",
+                    (experiment_id,),
+                )
+                if experiment_id
+                else None
+            ) or {}
+            judge_effort = str(judge_config.get("judge_reasoning_effort") or "high")
+            judge_condition = benchmark_reasoning_condition(
+                str(runner["runner_type"]), "custom", judge_effort, str(model["model_name"])
+            )
+            capability = (
+                {"installed": True, "version": "built-in", "executable": "agentbench"}
+                if runner["runner_type"] == "unified"
+                else native_cli_status(str(runner.get("executable") or ""))
+            )
+            model_settings = model.get("settings") or _json(model.get("settings_json"), {})
+            judge_runtime_identity = {
+                "schema": "agentbench-runtime/v1",
+                "runner_type": runner["runner_type"],
+                "runner_name": runner["name"],
+                "runner_version": capability.get("version"),
+                "runner_executable": capability.get("executable"),
+                "model_display_name": model["name"],
+                "model_provider": model["provider"],
+                "model_name": model["model_name"],
+                "agent_provider": model_settings.get("agent_provider"),
+                "requested_reasoning_effort": judge_condition["requested"],
+                "effective_reasoning_effort": judge_condition["effective"],
+                "effort_source": judge_condition["source"],
+                "effort_verified": judge_condition["verified"],
+            }
             files = workspace.list_files()[:50]
             file_samples: dict[str, str] = {}
             sample_budget = 50_000
@@ -6340,13 +6740,28 @@ class EvaluationService:
             )
             def invoke(cli_capture: dict[str, Any]) -> str:
                 if runner["runner_type"] == "unified":
-                    decision = self._model_client(model, {}).complete(
+                    judge_client = self._model_client(
+                        model, {"reasoning_effort": judge_condition["effective"]}
+                    )
+                    decision = judge_client.complete(
                         [
                             {"role": "system", "content": "Return strict JSON only."},
                             {"role": "user", "content": prompt},
                         ],
                         [],
                     )
+                    if getattr(judge_client, "reasoning_status", None) == "rejected_fallback":
+                        judge_runtime_identity.update(
+                            {
+                                "effort_verified": False,
+                                "effort_source": "api_rejected",
+                                "reasoning_status": "provider_rejected_fallback",
+                            }
+                        )
+                    elif getattr(judge_client, "reasoning_status", None) == "requested":
+                        judge_runtime_identity.update(
+                            {"effort_verified": True, "reasoning_status": "provider_accepted"}
+                        )
                     return decision.content
                 if not self._native_cli_allowed() or not runner.get("executable"):
                     raise ValueError("Native judge Agent is disabled or unavailable")
@@ -6358,24 +6773,56 @@ class EvaluationService:
                     judge_workspace = Workspace(judge_workspace_path)
                     # Fallback channel for CLIs that ignore stdin.
                     judge_workspace.write_file("judge_prompt.md", prompt)
-                    judge_result = run_native_cli(
-                        executable=runner["executable"],
-                        args=_json(runner.get("args_json"), []),
-                        workspace=judge_workspace,
-                        placeholders={
-                            "model_name": model["model_name"],
-                            "prompt": self.JUDGE_STDIN_GUIDANCE,
-                            "workspace": str(judge_workspace.root),
-                        },
-                        extra_env=_json(runner.get("env_json"), {}),
-                        timeout=min(
-                            int(
-                                _json(runner.get("limits_json"), {}).get("timeout_seconds", 900)
-                            ),
-                            1800,
-                        ),
-                        stdin_text=prompt,
+                    judge_temp = (judge_workspace.root / ".agentbench-tmp").resolve()
+                    judge_temp.mkdir(parents=True, exist_ok=True)
+                    judge_environment = _json(runner.get("env_json"), {})
+                    judge_environment.update(
+                        {"TEMP": str(judge_temp), "TMP": str(judge_temp), "TMPDIR": str(judge_temp)}
                     )
+                    judge_args = self._studio_native_options(
+                        _json(runner.get("args_json"), []),
+                        str(runner["runner_type"]),
+                        "workspace",
+                        str(judge_condition["effective"] or judge_effort),
+                        [],
+                        str(model["model_name"]),
+                    )
+                    judge_harness_root: Path | None = None
+                    try:
+                        if runner["runner_type"] == "deepseek_harness":
+                            provider = str(model_settings.get("agent_provider") or "")
+                            judge_args, judge_harness_root, actual_effort, _ = (
+                                self._prepare_harness_run_config(
+                                    judge_args,
+                                    provider,
+                                    str(model["model_name"]),
+                                    str(judge_condition["effective"] or judge_effort),
+                                )
+                            )
+                            judge_runtime_identity["effective_reasoning_effort"] = actual_effort
+                        judge_result = run_native_cli(
+                            executable=runner["executable"],
+                            args=judge_args,
+                            workspace=judge_workspace,
+                            placeholders={
+                                "model_name": model["model_name"],
+                                "prompt": self.JUDGE_STDIN_GUIDANCE,
+                                "workspace": str(judge_workspace.root),
+                            },
+                            extra_env=judge_environment,
+                            timeout=min(
+                                int(
+                                    _json(runner.get("limits_json"), {}).get(
+                                        "timeout_seconds", 900
+                                    )
+                                ),
+                                1800,
+                            ),
+                            stdin_text=prompt,
+                        )
+                    finally:
+                        if judge_harness_root is not None:
+                            shutil.rmtree(judge_harness_root, ignore_errors=True)
                     cli_capture["judge_cli_stdout"] = judge_result.stdout[-20_000:]
                     cli_capture["judge_cli_stderr"] = judge_result.stderr[-20_000:]
                     if not judge_result.ok:
@@ -6423,13 +6870,16 @@ class EvaluationService:
                 )
                 self.database.execute(
                     "INSERT INTO judge_reviews(id,run_id,judge_model_id,judge_runner_id,score,"
-                    "status,evidence_json,created_at) VALUES (?,?,?,?,?,'completed',?,?)",
+                    "status,reasoning_effort,runtime_identity_json,evidence_json,created_at) "
+                    "VALUES (?,?,?,?,?,'completed',?,?,?,?)",
                     (
                         new_id(),
                         run["id"],
                         judge_model_id,
                         judge_runner_id,
                         score,
+                        judge_condition["effective"],
+                        json.dumps(judge_runtime_identity, ensure_ascii=False),
                         json.dumps(data, ensure_ascii=False),
                         utc_now(),
                     ),
@@ -7007,6 +7457,7 @@ class EvaluationService:
         lane: str = "unified",
         suite_id: str | None = None,
         benchmark_generation: str = "v3",
+        condition: str = "standard",
     ) -> list[dict[str, Any]]:
         clauses = ["r.lane=?", "r.status='completed'", "t.enabled=1"]
         params: list[Any] = [lane]
@@ -7016,6 +7467,26 @@ class EvaluationService:
         if suite_id:
             clauses.append("e.suite_id=?")
             params.append(suite_id)
+        if condition == "standard":
+            clauses.extend(
+                ["e.reasoning_policy='standard'", "e.strict_fairness=1", "r.effort_verified=1"]
+            )
+        elif condition == "maximum":
+            clauses.extend(
+                ["e.reasoning_policy='maximum'", "e.strict_fairness=1", "r.effort_verified=1"]
+            )
+        elif condition == "nonstandard":
+            clauses.extend(
+                [
+                    "e.reasoning_policy!='historical'",
+                    "(e.reasoning_policy IN ('native','custom') OR e.strict_fairness=0 "
+                    "OR r.effort_verified=0)",
+                ]
+            )
+        elif condition == "historical":
+            clauses.append("e.reasoning_policy='historical'")
+        elif condition != "all":
+            raise ValueError("unsupported_leaderboard_condition")
         return self.database.fetch_all(
             "SELECT r.model_id,r.runner_id,m.name AS model_name,a.name AS runner_name,r.lane,"
             "COUNT(*) AS runs,AVG(r.score) AS avg_score,"
@@ -7027,7 +7498,10 @@ class EvaluationService:
             "AND sc.dimension='token_efficiency' LIMIT 1)) AS avg_token_score,"
             "SUM(CASE WHEN COALESCE(r.passed,r.score>=60) THEN 1 ELSE 0 END)*100.0/COUNT(*) AS success_rate,"
             "AVG(r.duration_ms) AS avg_duration_ms,SUM(r.cost_usd) AS total_cost,"
-            "AVG(r.tokens_input+r.tokens_output) AS avg_tokens FROM runs r "
+            "AVG(CASE WHEN r.telemetry_status IN ('reported','partial') "
+            "THEN r.tokens_input+r.tokens_output END) AS avg_tokens,"
+            "SUM(CASE WHEN r.telemetry_status IN ('reported','partial') THEN 1 ELSE 0 END) "
+            "AS telemetry_runs FROM runs r "
             "JOIN experiments e ON e.id=r.experiment_id JOIN test_cases t ON t.id=r.test_case_id "
             "JOIN models m ON m.id=r.model_id "
             "JOIN agent_runners a ON a.id=r.runner_id WHERE "

@@ -429,6 +429,27 @@ def _qoder_desktop_path() -> Path | None:
     return next((item for item in candidates if item and item.is_file()), None)
 
 
+def _codex_desktop_context(result: dict[str, Any]) -> dict[str, Any]:
+    """Explain the common Windows Desktop-alias/standalone-CLI split honestly."""
+    configured_home = os.getenv("CODEX_HOME")
+    codex_home = Path(configured_home).expanduser() if configured_home else Path.home() / ".codex"
+    config_path = codex_home / "config.toml"
+    executable = str(result.get("executable") or "")
+    windows_alias = "windowsapps" in executable.lower()
+    if windows_alias:
+        result["desktop_installed"] = True
+        result["desktop_executable"] = executable
+    if config_path.is_file():
+        result["desktop_configured"] = True
+        result["config_path"] = str(config_path)
+    if windows_alias or config_path.is_file():
+        result["note"] = (
+            "检测到 Codex Desktop/配置，但当前没有可由 AgentBench 调用的独立 Codex CLI；"
+            "请安装 @openai/codex，安装后重启 AgentBench 以刷新 PATH"
+        )
+    return result
+
+
 def _npm_native_binary(shim: str, executable: str | None) -> str | None:
     """Resolve known npm .cmd shims to binaries that preserve multiline arguments."""
     shim_path = Path(shim)
@@ -530,6 +551,8 @@ def native_cli_status(executable: str | None) -> dict[str, Any]:
         }
         if name in INSTALL_COMMAND_BY_EXECUTABLE:
             result["install_command"] = INSTALL_COMMAND_BY_EXECUTABLE[name]
+        if name == "codex":
+            result = _codex_desktop_context(result)
         if name == "opencode":
             desktop_path = _opencode_desktop_path()
             if desktop_path:
@@ -632,7 +655,11 @@ def native_cli_status(executable: str | None) -> dict[str, Any]:
             "error": f"Version check exited {result.returncode}",
         }
 
-    return last_failure or {"installed": False, "executable": executable, "version": None}
+    result = last_failure or {"installed": False, "executable": executable, "version": None}
+    if _executable_name(executable) == "codex":
+        result = _codex_desktop_context(result)
+        result.setdefault("install_command", INSTALL_COMMAND_BY_EXECUTABLE["codex"])
+    return result
 
 
 def run_native_cli(
