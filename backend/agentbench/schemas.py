@@ -4,6 +4,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
+from .math_rubric import (
+    AlternatePathModel,
+    RubricSourceModel,
+    ScoringPointModel,
+    SourceTier,
+)
+
 
 class ModelCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
@@ -80,6 +87,12 @@ class RunnerCreate(BaseModel):
 class Participant(BaseModel):
     model_id: str
     runner_id: str
+    agent_mode: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+        pattern=r"^[a-z0-9][a-z0-9._-]*$",
+    )
 
 
 ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
@@ -127,6 +140,17 @@ class MathQuestionUpdate(BaseModel):
     accepted_answers: list[str] | None = Field(default=None, max_length=40)
     variables: list[str] | None = Field(default=None, max_length=20)
     solution_obligations: list[str] | None = Field(default=None, max_length=30)
+    # Structured marking scheme fields.  They are optional so that an old imported
+    # paper can still be reviewed and published through the legacy compatibility
+    # path; a new official/reconstructed rubric should provide all of them together.
+    rubric_version: str | None = Field(default=None, min_length=1, max_length=120)
+    rubric_source: RubricSourceModel | None = None
+    source_tier: SourceTier | None = None
+    scoring_points: list[ScoringPointModel] | None = Field(default=None, max_length=100)
+    alternate_paths: list[AlternatePathModel] | None = Field(default=None, max_length=30)
+    allow_new_solutions: bool | None = None
+    low_confidence_threshold: float | None = Field(default=None, ge=0, le=1)
+    judge_disagreement_threshold: float | None = Field(default=None, ge=0, le=100)
     review_status: Literal["needs_review", "confirmed"] | None = None
 
 

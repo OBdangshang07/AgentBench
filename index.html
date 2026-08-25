@@ -1,13 +1,145 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#0d1117" />
-    <title>AgentBench Desktop</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=1920,height=1080">
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+  <style>
+    @font-face { font-family: "Source Han Sans SC"; src: local("Source Han Sans SC"); }
+    @font-face { font-family: "Source Han Serif SC"; src: local("Source Han Serif SC"); }
+    @font-face { font-family: "Microsoft YaHei"; src: local("Microsoft YaHei"); }
+    @font-face { font-family: "STSong"; src: local("STSong"); }
+    @font-face { font-family: "Cascadia Mono"; src: local("Cascadia Mono"); }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html,body { width:1920px; height:1080px; overflow:hidden; background:#efe5ce; }
+    body { color:#20262c; font-family:"Source Han Sans SC","Microsoft YaHei",sans-serif; }
+    #root { position:relative; width:1920px; height:1080px; overflow:hidden; }
+    .serif { font-family:"Source Han Serif SC",STSong,serif; }
+    .mono { font-family:"JetBrains Mono","Cascadia Mono",monospace; font-variant-numeric:tabular-nums; }
+    .scene { position:absolute; inset:0; width:1920px; height:1080px; overflow:hidden; }
+    .paper { position:absolute; inset:0; background-color:#efe5ce; background-image:radial-gradient(circle at 16% 8%,rgba(184,59,47,.09),transparent 31%),linear-gradient(rgba(66,55,41,.07) 2px,transparent 2px),linear-gradient(90deg,rgba(66,55,41,.045) 2px,transparent 2px); background-size:auto,54px 54px,54px 54px; }
+    .grain { position:absolute; inset:0; opacity:.14; background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.75' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.18'/%3E%3C/svg%3E"); }
+    .top-rule { position:absolute; left:86px; right:86px; top:58px; height:4px; background:#20262c; }
+    .top-meta { position:absolute; left:86px; right:86px; top:78px; display:flex; justify-content:space-between; font:700 21px/1 "JetBrains Mono",monospace; letter-spacing:.1em; }
+    .red { color:#b83b2f; }
+    .ghost { position:absolute; right:-40px; top:120px; color:rgba(32,38,44,.07); font:700 170px/1 "Source Han Serif SC",serif; white-space:nowrap; }
+    .intro-grid { position:absolute; left:92px; right:92px; top:168px; bottom:96px; display:grid; grid-template-columns:1.18fr .82fr; gap:72px; }
+    .intro-main { border-left:18px solid #b83b2f; padding:52px 0 0 52px; }
+    .intro-kicker { font-size:28px; font-weight:900; letter-spacing:.22em; }
+    .intro-title { margin-top:44px; font-size:112px; line-height:1.04; letter-spacing:-.055em; font-weight:900; }
+    .intro-title strong { color:#b83b2f; }
+    .intro-sub { margin-top:32px; max-width:1040px; font-size:32px; line-height:1.5; font-weight:700; color:#4f504c; }
+    .intro-method { align-self:end; border:4px solid #20262c; background:rgba(239,229,206,.84); padding:38px; }
+    .intro-method h2 { font-size:29px; letter-spacing:.14em; margin-bottom:31px; }
+    .method-row { display:flex; justify-content:space-between; align-items:baseline; padding:20px 0; border-top:2px solid #20262c; }
+    .method-row span { font-size:23px; font-weight:800; }
+    .method-row b { font:900 35px/1 "JetBrains Mono",monospace; color:#b83b2f; }
+    .score-head { position:absolute; left:88px; right:88px; top:132px; height:172px; display:grid; grid-template-columns:1fr 560px; gap:48px; }
+    .model-block { display:flex; align-items:flex-end; border-bottom:5px solid #20262c; padding-bottom:24px; }
+    .rank-block { display:flex; align-items:flex-end; gap:28px; }
+    .rank-num { font:900 86px/.8 "JetBrains Mono",monospace; color:#b83b2f; }
+    .model-copy small { display:block; margin-bottom:14px; font:700 19px/1 "JetBrains Mono",monospace; letter-spacing:.12em; color:#6a665d; }
+    .model-copy h2 { max-width:950px; font-size:59px; line-height:1; font-weight:900; letter-spacing:-.035em; }
+    .result-box { display:grid; grid-template-columns:1fr 190px; background:#20262c; color:#f3e8d1; border:4px solid #20262c; }
+    .total-block { padding:22px 30px; border-right:2px solid #777269; }
+    .total-block label,.time-block label { display:block; font:700 16px/1 "JetBrains Mono",monospace; letter-spacing:.12em; color:#d6c8ad; }
+    .total-number { display:inline-block; width:305px; margin-top:12px; font:900 76px/.9 "JetBrains Mono",monospace; transform-origin:left bottom; }
+    .total-denom { font:700 24px/1 "JetBrains Mono",monospace; color:#d6c8ad; }
+    .time-block { padding:24px 22px; display:flex; flex-direction:column; justify-content:space-between; }
+    .time-value { font:900 38px/1 "JetBrains Mono",monospace; color:#e35a49; }
+    .score-title { position:absolute; left:92px; top:344px; font-size:57px; line-height:1; font-weight:900; }
+    .score-title .circle { position:relative; color:#b83b2f; }
+    .score-title .circle::after { content:""; position:absolute; left:-24px; right:-24px; top:-11px; bottom:-11px; border:7px solid #b83b2f; border-radius:52% 47% 53% 48%; transform:rotate(-4deg); }
+    .score-note { position:absolute; right:92px; top:357px; font:700 21px/1 "JetBrains Mono",monospace; color:#625f57; }
+    .type-grid { position:absolute; left:92px; right:92px; top:440px; bottom:72px; display:grid; grid-template-columns:repeat(3,1fr); gap:28px; }
+    .type-card { position:relative; border:4px solid #20262c; padding:40px 44px 34px; background:rgba(239,229,206,.84); overflow:hidden; }
+    .type-card.solution { background:#b83b2f; border-color:#b83b2f; color:#f3e8d1; }
+    .type-index { font:700 19px/1 "JetBrains Mono",monospace; color:#b83b2f; letter-spacing:.14em; }
+    .solution .type-index { color:#f3e8d1; }
+    .type-card h3 { margin-top:32px; font-size:50px; line-height:1; }
+    .type-desc { margin-top:19px; font:700 19px/1.4 "JetBrains Mono",monospace; color:#68645b; }
+    .solution .type-desc { color:#f0d8ca; }
+    .type-score { margin-top:56px; font:900 88px/.85 "JetBrains Mono",monospace; letter-spacing:-.06em; }
+    .type-score small { font-size:29px; letter-spacing:0; }
+    .type-track { position:absolute; left:44px; right:44px; bottom:86px; height:18px; background:#cec2a8; overflow:hidden; }
+    .solution .type-track { background:#8e2d25; }
+    .type-fill { display:block; width:100%; height:100%; background:#20262c; transform-origin:left center; }
+    .solution .type-fill { background:#f3e8d1; }
+    .type-foot { position:absolute; left:44px; right:44px; bottom:31px; display:flex; justify-content:space-between; align-items:baseline; padding-top:17px; border-top:2px solid currentColor; }
+    .type-foot span { font-size:20px; font-weight:800; }
+    .type-foot b { font:900 29px/1 "JetBrains Mono",monospace; }
+    .board-title { position:absolute; left:90px; top:146px; font-size:73px; line-height:1; font-weight:900; }
+    .board-sub { position:absolute; right:92px; top:188px; font:700 20px/1 "JetBrains Mono",monospace; color:#625f57; }
+    .board-list { position:absolute; left:92px; right:92px; top:278px; bottom:110px; display:grid; grid-template-rows:repeat(6,1fr); gap:10px; }
+    .board-row { position:relative; display:grid; grid-template-columns:105px 1fr 250px 190px; align-items:center; border:3px solid #20262c; background:rgba(239,229,206,.86); padding:0 30px; overflow:hidden; }
+    .board-row.best { color:#f3e8d1; border-color:#b83b2f; background:#b83b2f; }
+    .board-rank { font:900 39px/1 "JetBrains Mono",monospace; color:#b83b2f; }
+    .best .board-rank { color:#f3e8d1; }
+    .board-name { font-size:30px; font-weight:900; }
+    .board-score { text-align:right; font:900 43px/1 "JetBrains Mono",monospace; }
+    .board-time { text-align:right; font:700 25px/1 "JetBrains Mono",monospace; }
+    .board-bar { position:absolute; left:0; bottom:0; width:100%; height:9px; background:#b83b2f; transform-origin:left center; }
+    .best .board-bar { background:#f3e8d1; }
+    .board-foot { position:absolute; left:92px; right:92px; bottom:50px; display:flex; justify-content:space-between; font:700 18px/1 "JetBrains Mono",monospace; color:#625f57; }
+    #global-track { position:absolute; z-index:99; left:0; right:0; bottom:0; height:13px; background:#c9bda5; }
+    #global-progress { display:block; width:100%; height:100%; background:#b83b2f; transform-origin:left center; }
+  </style>
+</head>
+<body>
+<main data-hf-id="hf-h1up" id="root" data-composition-id="main" data-start="0" data-duration="62" data-width="1920" data-height="1080">
+  <section data-hf-id="hf-y16h" id="intro" class="scene clip" data-start="0" data-duration="4" data-track-index="1">
+    <div data-hf-id="hf-2ava" class="paper"></div><div data-hf-id="hf-h60x" class="grain"></div><div data-hf-id="hf-tw5w" class="top-rule"></div><div data-hf-id="hf-epk5" class="top-meta"><span data-hf-id="hf-q9iu">AGENTBENCH · 2025 数学一</span><span data-hf-id="hf-bbm6">ONE ROUND · SAME PAPER</span></div><div data-hf-id="hf-6aik" class="ghost">∫　Σ　lim　A²x</div>
+    <div data-hf-id="hf-ul57" class="intro-grid"><div data-hf-id="hf-782o" class="intro-main"><div data-hf-id="hf-qykf" class="intro-kicker red">新版赛制 · 只看成绩</div><h1 data-hf-id="hf-gxrh" class="intro-title serif">AI 考研数学<br data-hf-id="hf-x5px"><strong data-hf-id="hf-yto0">分数揭晓</strong></h1><p data-hf-id="hf-7btg" class="intro-sub">不再铺满录屏过程。每个模型用一张成绩单，直接比较题型得分、总分和用时。</p></div><aside data-hf-id="hf-7tuf" class="intro-method"><h2 data-hf-id="hf-1bzt">本轮展示口径</h2><div data-hf-id="hf-fxvk" class="method-row"><span data-hf-id="hf-kpr4">测试次数</span><b data-hf-id="hf-97c4">1 ROUND</b></div><div data-hf-id="hf-kcoo" class="method-row"><span data-hf-id="hf-h94f">卷面满分</span><b data-hf-id="hf-tqtd">150</b></div><div data-hf-id="hf-j5rl" class="method-row"><span data-hf-id="hf-zsdy">揭晓顺序</span><b data-hf-id="hf-s109">LOW → HIGH</b></div></aside></div>
+  </section>
+  <section data-hf-id="hf-mimo" id="score-mimo" class="scene score-scene clip" data-start="4" data-duration="6.5" data-track-index="2" data-name="MiMo V2.5 Pro" data-runner="OPENCODE" data-rank="08" data-total="114" data-time="26:27" data-choice="40" data-fill="30" data-solution="44"></section>
+  <section data-hf-id="hf-pgst" id="score-glm" class="scene score-scene clip" data-start="10.5" data-duration="6.5" data-track-index="3" data-name="GLM 5.2" data-runner="OPENCODE" data-rank="07" data-total="126.5" data-time="05:14" data-choice="50" data-fill="21" data-solution="55.5"></section>
+  <section data-hf-id="hf-luna" id="score-luna" class="scene score-scene clip" data-start="17" data-duration="6.5" data-track-index="4" data-name="GPT-5.6 Luna" data-runner="CODEX CLI" data-rank="06" data-total="130.5" data-time="26:27" data-choice="50" data-fill="25.5" data-solution="55"></section>
+  <section data-hf-id="hf-glm53" id="score-glm53" class="scene score-scene clip" data-start="23.5" data-duration="6.5" data-track-index="5" data-name="GLM 5.3" data-runner="OPENCODE" data-rank="05" data-total="132" data-time="05:14" data-choice="50" data-fill="25.5" data-solution="56.5"></section>
+  <section data-hf-id="hf-c0kp" id="score-kimi" class="scene score-scene clip" data-start="30" data-duration="6.5" data-track-index="6" data-name="Kimi K3" data-runner="OPENCODE" data-rank="04" data-total="133" data-time="14:45" data-choice="50" data-fill="20.5" data-solution="62.5"></section>
+  <section data-hf-id="hf-icmw" id="score-pro" class="scene score-scene clip" data-start="36.5" data-duration="6.5" data-track-index="7" data-name="DeepSeek V4 Pro GA" data-runner="REASONIX · GA" data-rank="03" data-total="138.5" data-time="10:19" data-choice="50" data-fill="30" data-solution="58.5"></section>
+  <section data-hf-id="hf-qwen" id="score-qwen" class="scene score-scene clip" data-start="43" data-duration="6.5" data-track-index="8" data-name="Qwen 3.8 Max" data-runner="OPENCODE" data-rank="02" data-total="140" data-time="12:12" data-choice="50" data-fill="30" data-solution="60"></section>
+  <section data-hf-id="hf-4zg4" id="score-flash" class="scene score-scene clip" data-start="49.5" data-duration="6.5" data-track-index="9" data-name="DeepSeek V4 Flash GA" data-runner="REASONIX · GA" data-rank="01" data-total="142" data-time="07:00" data-choice="50" data-fill="30" data-solution="62"></section>
+  <section data-hf-id="hf-t1kc" id="leaderboard" class="scene clip" data-start="56" data-duration="6" data-track-index="10">
+    <div data-hf-id="hf-btl6" class="paper"></div><div data-hf-id="hf-3l5h" class="grain"></div><div data-hf-id="hf-p9gs" class="top-rule"></div><div data-hf-id="hf-i62h" class="top-meta"><span data-hf-id="hf-iu3y">PROVISIONAL LEADERBOARD</span><span data-hf-id="hf-pteg">8 MODELS TESTED</span></div><h2 data-hf-id="hf-k2f8" class="board-title serif">现有成绩，按总分归档。</h2><div data-hf-id="hf-30e3" class="board-sub">同卷 · 单轮 · 分数显示至 0.5</div>
+    <div data-hf-id="hf-qfu5" class="board-list"><div data-hf-id="hf-mr05" class="board-row"><span data-hf-id="hf-mrk5" class="board-rank">08</span><span data-hf-id="hf-mnm5" class="board-name">MiMo V2.5 Pro</span><span data-hf-id="hf-msc5" class="board-score">114</span><span data-hf-id="hf-mtm5" class="board-time">26:27</span><span data-hf-id="hf-mbr5" class="board-bar" data-scale=".76"></span></div><div data-hf-id="hf-19wn" class="board-row"><span data-hf-id="hf-94za" class="board-rank">07</span><span data-hf-id="hf-ryy6" class="board-name">GLM 5.2</span><span data-hf-id="hf-pe0w" class="board-score">126.5</span><span data-hf-id="hf-klnr" class="board-time">05:14</span><span data-hf-id="hf-3196" class="board-bar" data-scale=".843"></span></div><div data-hf-id="hf-luna-row" class="board-row"><span data-hf-id="hf-luna-rank" class="board-rank">06</span><span data-hf-id="hf-luna-name" class="board-name">GPT-5.6 Luna</span><span data-hf-id="hf-luna-score" class="board-score">130.5</span><span data-hf-id="hf-luna-time" class="board-time">26:27</span><span data-hf-id="hf-luna-bar" class="board-bar" data-scale=".87"></span></div><div data-hf-id="hf-glm53-row" class="board-row"><span data-hf-id="hf-glm53-rank" class="board-rank">05</span><span data-hf-id="hf-glm53-name" class="board-name">GLM 5.3</span><span data-hf-id="hf-glm53-score" class="board-score">132</span><span data-hf-id="hf-glm53-time" class="board-time">05:14</span><span data-hf-id="hf-glm53-bar" class="board-bar" data-scale=".88"></span></div><div data-hf-id="hf-b7yf" class="board-row"><span data-hf-id="hf-7y27" class="board-rank">04</span><span data-hf-id="hf-z0iv" class="board-name">Kimi K3</span><span data-hf-id="hf-7y0z" class="board-score">133</span><span data-hf-id="hf-botj" class="board-time">14:45</span><span data-hf-id="hf-9zze" class="board-bar" data-scale=".887"></span></div><div data-hf-id="hf-atne" class="board-row"><span data-hf-id="hf-8cd8" class="board-rank">03</span><span data-hf-id="hf-17is" class="board-name">DeepSeek V4 Pro GA</span><span data-hf-id="hf-dje7" class="board-score">138.5</span><span data-hf-id="hf-ohoe" class="board-time">10:19</span><span data-hf-id="hf-asft" class="board-bar" data-scale=".923"></span></div><div data-hf-id="hf-qrow" class="board-row"><span data-hf-id="hf-qrk1" class="board-rank">02</span><span data-hf-id="hf-qnm1" class="board-name">Qwen 3.8 Max</span><span data-hf-id="hf-qsc1" class="board-score">140</span><span data-hf-id="hf-qtm1" class="board-time">12:12</span><span data-hf-id="hf-qbr1" class="board-bar" data-scale=".933"></span></div><div data-hf-id="hf-0e57" class="board-row best"><span data-hf-id="hf-75g5" class="board-rank">01</span><span data-hf-id="hf-6lq7" class="board-name">DeepSeek V4 Flash GA</span><span data-hf-id="hf-6nfn" class="board-score">142</span><span data-hf-id="hf-djjs" class="board-time">07:00</span><span data-hf-id="hf-ln13" class="board-bar" data-scale=".947"></span></div></div>
+    <div data-hf-id="hf-gfod" class="board-foot"><span data-hf-id="hf-1rqp">后续模型继续插入对应分数位置</span><span data-hf-id="hf-do4t">RESULTS AS OF 2026-08-15</span></div>
+  </section>
+  <div data-hf-id="hf-ch9i" id="global-track"><span data-hf-id="hf-jgap" id="global-progress"></span></div>
+</main>
+<script>
+  const scoreDefs=[
+    {key:"choice",index:"01 / CHOICE",title:"选择题",desc:"第 1–10 题 · 每题 5 分",max:50,weight:"33.3%"},
+    {key:"fill",index:"02 / BLANK",title:"填空题",desc:"第 11–16 题 · 每题 5 分",max:30,weight:"20.0%"},
+    {key:"solution",index:"03 / SOLUTION",title:"解答题",desc:"第 17–22 题 · 共 70 分",max:70,weight:"46.7%"}
+  ];
+  document.querySelectorAll(".score-scene").forEach((scene,index)=>{
+    const d=scene.dataset;
+    const cards=scoreDefs.map(item=>{const value=Number(d[item.key]);const kind=item.key==="solution"?" solution":"";return `<article class="type-card${kind}"><div class="type-index">${item.index}</div><h3>${item.title}</h3><p class="type-desc">${item.desc}</p><div class="type-score">${value}<small> / ${item.max}</small></div><div class="type-track"><span class="type-fill" data-scale="${value/item.max}"></span></div><div class="type-foot"><span>卷面权重</span><b>${item.weight}</b></div></article>`}).join("");
+    scene.innerHTML=`<div class="paper"></div><div class="grain"></div><div class="top-rule"></div><div class="top-meta"><span>SCORE BY QUESTION TYPE</span><span>0${index+1} / 08 · OFFICIAL RESULT</span></div><div class="ghost">${d.name}</div><div class="score-head"><div class="model-block"><div class="rank-block"><div class="rank-num">${d.rank}</div><div class="model-copy"><small>${d.runner} · MODEL RESULT</small><h2>${d.name}</h2></div></div></div><div class="result-box"><div class="total-block"><label>TOTAL SCORE</label><span class="total-number mono" id="total-${index}">0</span><span class="total-denom"> / 150</span></div><div class="time-block"><label>ELAPSED</label><span class="time-value">${d.time}</span></div></div></div><h2 class="score-title serif">三类题型，<span class="circle">得分汇总</span></h2><div class="score-note">由低到高 · 第 ${index+1} 位登场</div><div class="type-grid">${cards}</div>`;
+  });
+  window.__timelines=window.__timelines||{};
+  const tl=gsap.timeline({paused:true});
+  const formatScore=value=>{const rounded=Math.round(value*2)/2;return Number.isInteger(rounded)?String(rounded):rounded.toFixed(1)};
+  tl.fromTo(".intro-kicker",{x:-90,opacity:0},{x:0,opacity:1,duration:.48,ease:"expo.out"},.2);
+  tl.fromTo(".intro-title",{scale:1.16,opacity:0},{scale:1,opacity:1,duration:.62,ease:"power4.out"},.55);
+  tl.fromTo(".intro-sub",{y:28,opacity:0},{y:0,opacity:1,duration:.45,ease:"power3.out"},1.15);
+  tl.fromTo(".intro-method",{x:90,opacity:0},{x:0,opacity:1,duration:.56,ease:"power3.out"},.85);
+  document.querySelectorAll(".score-scene").forEach((scene,index)=>{
+    const base=Number(scene.dataset.start);const target=Number(scene.dataset.total);const state={value:0};const selector=`#${scene.id}`;const counterEl=scene.querySelector(".total-number");
+    tl.fromTo(`${selector} .model-block`,{x:-85,opacity:0},{x:0,opacity:1,duration:.5,ease:"expo.out"},base+.12);
+    tl.fromTo(`${selector} .result-box`,{x:95,opacity:0},{x:0,opacity:1,duration:.52,ease:"power3.out"},base+.18);
+    tl.to(state,{value:target,duration:1.25,ease:"power3.out",onUpdate:()=>{counterEl.textContent=formatScore(state.value)}},base+.28);
+    tl.fromTo(counterEl,{scale:.5,opacity:0},{scale:1,opacity:1,duration:1.25,ease:"power3.out"},base+.28);
+    tl.fromTo(`${selector} .score-title,${selector} .score-note`,{y:24,opacity:0},{y:0,opacity:1,duration:.42,stagger:.08,ease:"power2.out"},base+.48);
+    tl.fromTo(`${selector} .type-card`,{y:42,scale:.96,opacity:0},{y:0,scale:1,opacity:1,duration:.55,stagger:.07,ease:"power3.out"},base+.7);
+    scene.querySelectorAll(".type-fill").forEach((fill,i)=>tl.fromTo(fill,{scaleX:0},{scaleX:Number(fill.dataset.scale),duration:.95,ease:"power2.out"},base+1+i*.08));
+  });
+  tl.fromTo("#leaderboard .board-title,#leaderboard .board-sub",{y:25,opacity:0},{y:0,opacity:1,duration:.48,stagger:.08,ease:"power3.out"},56.18);
+  tl.fromTo("#leaderboard .board-row",{x:-100,opacity:0},{x:0,opacity:1,duration:.52,stagger:.08,ease:"expo.out"},56.55);
+  document.querySelectorAll("#leaderboard .board-bar").forEach((bar,i)=>tl.fromTo(bar,{scaleX:0},{scaleX:Number(bar.dataset.scale),duration:1.15,ease:"power2.out"},56.85+i*.08));
+  tl.fromTo("#global-progress",{scaleX:0},{scaleX:1,duration:62,ease:"none"},0);
+  tl.to("#leaderboard",{opacity:0,duration:.7,ease:"power1.inOut"},61.3);
+  window.__timelines.main=tl;
+</script>
+</body>
 </html>

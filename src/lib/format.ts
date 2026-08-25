@@ -9,7 +9,7 @@ export const statusLabel: Record<string, string> = {
   failed: "失败",
   cancelled: "已取消",
   interrupted: "被中断",
-  environment_unavailable: "缺少沙箱",
+  environment_unavailable: "运行环境不可用",
   needs_review: "待复核",
 };
 

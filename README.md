@@ -1,5 +1,35 @@
 # AgentBench Desktop
 
+## V5.2.6：考研数学逐点评分与可审计裁判
+
+- 2025考研数学（一）第17—22题接入版本化逐点评分量表，AI裁判只判断每个得分点，后端按10/12分题目分值确定性汇总。
+- 评分来源分为国家官方、省级官方、专家重建和未核验四级；由于官方逐题细则依法不公开，内置量表如实标记为专家重建，不冒充官方评分参考。
+- 支持部分分、误差延续、替代路径与等价新解法；低置信度、新解法、评分缺失和多裁判分歧自动进入人工复核。
+- 多裁判按得分点取中位数后再确定性求和，运行详情展示量表版本、来源等级、逐点得分、证据和复核原因。
+- 保持历史评分版本兼容；旧运行不会静默重算。完整后端229项回归、数学专项17项和前端构建均已通过。
+- 累积包含5.2.4的DeepSeek Harness多模式能力与5.2.5的隔离模型路由修复。
+
+完整变更见 [`docs/releases/V5.2.6.md`](docs/releases/V5.2.6.md)。
+
+## V5.2.5：Harness 隔离模型路由修复
+
+- DeepSeek Harness 测评按参测模型记录的 Provider 与模型名生成每轮隔离配置，不再错误要求其等于 Harness 全局默认模型。
+- `opencode-go / deepseek-v4-pro` 等已发现的第三方 Harness 路由可以直接参测，同时不修改 `~/.dsh/settings.yaml` 的默认模型。
+- “运行环境不可用”不再笼统显示为“缺少沙箱”，模型路由、Preset、CLI 与验证器问题继续保留各自错误码与详情。
+- 保持 5.2.4 的五种 Harness 模式、统一排行榜与 Preset 审计逻辑；NCRE Office 题库和评分逻辑未修改。
+
+完整变更见 [`docs/releases/V5.2.5.md`](docs/releases/V5.2.5.md)。
+
+## V5.2.4：DeepSeek Harness 多模式测评
+
+- DeepSeek Harness 正式支持 Standard、PTC/Code、Minimal、Cordis 与 Anchored Standard 五种模式，并在创建测评时提供可用性校验后的下拉选择。
+- 各模式真实挂载对应 Preset 与工具环境；Code 模式启用 `DSH_TOOLS_MODE=code`，Cordis 模式额外挂载 Cordis Host Runner。
+- 模式不拆分排行榜，同一模型与 Runner 的成绩继续合并；运行详情保留请求模式、实际模式、来源、Preset 哈希和验证状态用于审计。
+- Preset 缺失、损坏或在开跑前被移除时归类为运行环境不可用，不静默回退、不消耗答题轮次，也不误判为模型能力失败。
+- 每轮 Harness 使用独立 one-shot driver 与临时配置，不修改用户的全局 Harness 设置；NCRE Office 题库与评分逻辑保持不变。
+
+完整变更见 [`docs/releases/V5.2.4.md`](docs/releases/V5.2.4.md)。
+
 ## V5.2.3：可审计的思考强度与 Harness 公平性
 
 - 正式测评新增 HIGH 标准、MAX 极限、Agent 原生和自定义四种思考策略；Ultra 默认 MAX，参测者与匿名裁判分别固化实际档位。

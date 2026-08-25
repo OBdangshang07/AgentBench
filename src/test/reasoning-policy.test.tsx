@@ -14,9 +14,9 @@ describe("benchmark reasoning policy", () => {
     const bodies: Record<string, unknown>[] = [];
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.3" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.6" });
       if (url.endsWith("/models")) return json([{ id: "model-1", name: "DeepSeek V4 Pro", enabled: true }]);
-      if (url.endsWith("/runners")) return json([{ id: "runner-1", name: "DeepSeek Harness", runner_type: "deepseek_harness", enabled: true, capability: { installed: true }, adapter: { reasoning_control: { supported: true, verified: true, maximum: "max", note: "Harness 实际使用 MAX 档" } } }]);
+      if (url.endsWith("/runners")) return json([{ id: "runner-1", name: "DeepSeek Harness", runner_type: "deepseek_harness", enabled: true, capability: { installed: true }, adapter: { default_agent_mode: "standard", agent_modes: [{ id: "standard", name: "标准模式", description: "完整工具集", source: "system", tools_mode: "native", experimental: false, available: true }, { id: "anchored-standard", name: "Anchored Standard", description: "先锚定再展开", source: "user", tools_mode: "native", experimental: true, available: true }], reasoning_control: { supported: true, verified: true, maximum: "max", note: "Harness 实际使用 MAX 档" } } }]);
       if (url.endsWith("/suites")) return json([{ id: "ultra", name: "Ultra 极限挑战", version: "3", case_count: 2, difficulty_min: 6, difficulty_max: 6 }]);
       if (url.endsWith("/system/status")) return json({ settings: {} });
       if (url.endsWith("/experiments") && init?.method === "POST") {
@@ -33,6 +33,7 @@ describe("benchmark reasoning policy", () => {
     await waitFor(() => expect(screen.getByRole("combobox", { name: "测评思考策略" })).toHaveValue("maximum"));
     fireEvent.change(screen.getByRole("combobox", { name: "参测者 1 模型" }), { target: { value: "model-1" } });
     fireEvent.change(screen.getByRole("combobox", { name: "参测者 1 Agent" }), { target: { value: "runner-1" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "参测者 1 Harness 模式" }), { target: { value: "anchored-standard" } });
     fireEvent.change(screen.getByRole("combobox", { name: "匿名裁判思考强度" }), { target: { value: "xhigh" } });
     fireEvent.click(screen.getByRole("button", { name: /验证并开始本地评测/ }));
 
@@ -42,6 +43,7 @@ describe("benchmark reasoning policy", () => {
       reasoning_effort: "high",
       strict_fairness: true,
       judge_reasoning_effort: "xhigh",
+      participants: [{ model_id: "model-1", runner_id: "runner-1", agent_mode: "anchored-standard" }],
     });
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/experiments/experiment-1/start"))).toBe(true);
   });

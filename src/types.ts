@@ -132,6 +132,18 @@ export interface Runner {
       verified: boolean;
       note: string;
     };
+    default_agent_mode?: string;
+    agent_modes?: Array<{
+      id: string;
+      name: string;
+      description: string;
+      source: "system" | "user" | string;
+      tools_mode: "native" | "code" | string;
+      experimental: boolean;
+      available: boolean;
+      error?: string | null;
+      sha256?: string | null;
+    }>;
   };
 }
 
@@ -202,6 +214,15 @@ export interface TestCase {
       source_commit?: string;
       source_path?: string;
       suite_revision?: string;
+      exam?: string;
+      year?: number;
+      question_no?: number;
+      points?: number;
+      question_type?: string;
+      rubric_protocol?: string;
+      rubric_version?: string | null;
+      source_tier?: "official_national" | "official_provincial" | "expert_reconstructed" | "unverified" | string;
+      rubric_source?: MathRubricSource | null;
     };
     rubric?: ManualRubric;
   };
@@ -259,6 +280,17 @@ export interface MathPaperImport {
     accepted_answers?: string[];
     variables?: string[];
     solution_obligations?: string[];
+    rubric_version?: string | null;
+    rubric_source?: MathRubricSource | null;
+    source_tier?: MathRubricSource["source_tier"];
+    scoring_points?: Array<{
+      point_id: string;
+      description: string;
+      max_points: number;
+      depends_on?: string[];
+      mutually_exclusive_with?: string[];
+      alternate_for?: string[];
+    }>;
     source_pages?: number[];
     detection_confidence?: string;
     review_status: string;
@@ -298,6 +330,7 @@ export interface SuiteCasePreview {
 export interface Participant {
   model_id: string;
   runner_id: string;
+  agent_mode?: string;
 }
 
 export interface Experiment {
@@ -413,6 +446,33 @@ export interface ValidatorResult {
   score: number;
   status: string;
   evidence: JsonObject;
+}
+
+export interface MathRubricSource {
+  source_id: string;
+  version: string;
+  source_tier: "official_national" | "official_provincial" | "expert_reconstructed" | "unverified" | string;
+  title?: string;
+  issuing_body?: string;
+  url?: string | null;
+  accessed_at?: string | null;
+  page?: string | number | null;
+  evidence?: string;
+  verification_status?: "verified" | "partially_verified" | "unverified" | string;
+  notes?: string;
+}
+
+export interface MathPointAward {
+  point_id: string;
+  description: string;
+  max_points: number;
+  awarded_points: number;
+  status: string;
+  confidence?: number | null;
+  evidence?: string;
+  rationale?: string;
+  propagated_error?: boolean;
+  independent_work?: boolean;
 }
 
 export interface ScoreDimension {

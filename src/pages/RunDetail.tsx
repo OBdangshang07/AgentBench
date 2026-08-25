@@ -10,7 +10,7 @@ import { formatDuration, formatNumber } from "../lib/format";
 import { useOpenFolder } from "../lib/useOpenFolder";
 import { useApi } from "../lib/useApi";
 import { useRunEvents } from "../lib/useRunEvents";
-import type { ManualRubric, ManualReview, RunDetail, RunSummary, ScoreDimension } from "../types";
+import type { JsonObject, ManualRubric, ManualReview, MathPointAward, MathRubricSource, RunDetail, RunSummary, ScoreDimension } from "../types";
 
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "cancelled", "needs_review", "environment_unavailable", "interrupted"]);
 
@@ -45,6 +45,27 @@ function pickDimensions(dimensions: ScoreDimension[], run: RunDetail) {
     { id: "token", dimension: "token_efficiency", score: run.token_score ?? 100, weight: 1, evidence: {} },
   ];
   return (dimensions.length ? dimensions : fallback).slice(0, 4);
+}
+
+const sourceTierNames: Record<string, string> = {
+  official_national: "国家官方评分参考",
+  official_provincial: "省级官方评卷细则",
+  expert_reconstructed: "专家重建量表",
+  unverified: "未核验量表",
+};
+
+function mathRubricEvidence(run: RunDetail) {
+  const validator = run.validators.find((item) => item.validator_type === "ai_rubric" && (typeof item.evidence.rubric_version === "string" || typeof item.evidence.rubric_evaluation === "object"));
+  const evidence = validator?.evidence ?? {};
+  const evaluation = evidence.rubric_evaluation && typeof evidence.rubric_evaluation === "object" ? evidence.rubric_evaluation as JsonObject : {};
+  const metadata = run.test_definition?.metadata;
+  const source = (evidence.rubric_source && typeof evidence.rubric_source === "object" ? evidence.rubric_source : metadata?.rubric_source) as MathRubricSource | null | undefined;
+  const pointAwards = (Array.isArray(evidence.point_awards) ? evidence.point_awards : Array.isArray(evaluation.point_results) ? evaluation.point_results : []) as unknown as MathPointAward[];
+  const reasons = (Array.isArray(evidence.review_reasons) ? evidence.review_reasons : Array.isArray(evaluation.review_flags) ? evaluation.review_flags : []) as unknown as string[];
+  const version = String(evidence.rubric_version ?? metadata?.rubric_version ?? "");
+  const tier = String(evidence.source_tier ?? metadata?.source_tier ?? source?.source_tier ?? "");
+  if (!version && !source && !pointAwards.length) return null;
+  return { validator, source, pointAwards, reasons, version, tier, reviewStatus: String(evidence.review_status ?? validator?.status ?? "unknown") };
 }
 
 export default function RunDetailPage() {
@@ -84,6 +105,7 @@ export default function RunDetailPage() {
   const materials = run.materials ?? [];
   const showQuestion = Boolean(questionInstruction) || materials.length > 0;
   const runtimeIdentity = run.runtime_identity ?? {};
+  const mathRubric = mathRubricEvidence(run);
 
   function flash(text: string) { setWorkspaceHint(text); window.setTimeout(() => setWorkspaceHint(""), 1800); }
   async function previewFrontend() {
@@ -115,12 +137,13 @@ export default function RunDetailPage() {
           {previewError && <div className="error-banner"><strong>预览不可用</strong><span>{previewError}</span></div>}
           {run.frontend && <section className="frontend-source-ledger"><div><span>FIXED SOURCE</span><strong>{run.frontend.source_path}</strong><code>{run.frontend.source_commit}</code></div><a href={run.frontend.source_repository} target="_blank" rel="noreferrer"><ExternalLink size={12} />来源仓库</a></section>}
           <div className="ab-proof-ledger"><div className="ab-ledger-title"><h3>验证义务 / PROOF OBLIGATIONS</h3><span>隐藏数据仅展示摘要，不泄露答案</span></div>{run.validators.length ? run.validators.map((validator, index) => <div className="ab-proof-item" key={validator.id}><i className="ab-proof-index">{String(index + 1).padStart(2, "0")}</i><div className="ab-proof-copy"><strong>{validatorNames[validator.validator_type] ?? validator.validator_type}</strong><small>{evidenceText(validator.evidence)}</small></div><code className="ab-proof-evidence">status = {validator.status}</code><b className="ab-proof-score">{validator.score.toFixed(1)} / 100</b></div>) : <div className="ab-proof-empty">这条历史运行没有独立验证器记录，最终分数来自兼容评分路径。</div>}</div>
+          {mathRubric && <section className="math-rubric-ledger"><div className="ab-ledger-title"><h3>数学逐点评分 / <span>MARKING SCHEME</span></h3><span>{sourceTierNames[mathRubric.tier] ?? mathRubric.tier} · {mathRubric.version}</span></div><div className="math-rubric-source"><div><strong>{mathRubric.source?.title || sourceTierNames[mathRubric.tier] || "评分量表"}</strong><small>{mathRubric.source?.issuing_body || "来源机构未标注"} · 核验状态 {mathRubric.source?.verification_status ?? "未知"}</small></div><b className={mathRubric.reviewStatus === "completed" || mathRubric.reviewStatus === "passed" ? "verified" : "unverified"}>{mathRubric.reviewStatus === "needs_review" ? "需要人工复核" : "逐点计分完成"}</b></div>{mathRubric.pointAwards.length ? <div className="math-point-awards">{mathRubric.pointAwards.map((point) => <div className="math-point-award" key={point.point_id}><div><code>{point.point_id}</code><strong>{point.description}</strong><small>{point.evidence || point.rationale || "裁判未提供证据摘要"}</small></div><b>{Number(point.awarded_points).toFixed(1)} / {Number(point.max_points).toFixed(1)}</b></div>)}</div> : <div className="ab-proof-empty">量表来源已固化；本次运行尚无逐项裁判结果。</div>}{mathRubric.reasons.length > 0 && <div className="error-banner"><strong>复核原因</strong><span>{mathRubric.reasons.join(" · ")}</span></div>}{mathRubric.source?.url && <a className="ab-ghost-button" href={mathRubric.source.url} target="_blank" rel="noreferrer"><ExternalLink size={12} />查看来源</a>}</section>}
           {showQuestion && <section className="ab-question-evidence"><div className="ab-ledger-title"><h3>题目 / <span>EXAM QUESTION</span></h3><span>本次运行收到的公开任务</span></div>{questionInstruction && <pre>{questionInstruction}</pre>}{materials.length > 0 && <div className="ab-materials">{materials.map((material) => <a key={material.name} href={downloadUrl(`/runs/${run.id}/materials/${encodeURIComponent(material.name)}`)}><FileText size={13} /><span>{material.name}</span><b>{formatNumber(material.size_bytes)} bytes</b></a>)}</div>}</section>}
         </section>
 
         <aside className="ab-context-pane">
           <section className="ab-context-block"><label>EXECUTION COST</label><div className="ab-cost-grid"><div><span>总用时</span><strong>{formatDuration(run.duration_ms)}</strong></div><div><span>轮次</span><strong>{Math.max(1, run.attempt_count)} / {Math.max(1, attempts.length || run.attempt_count)}</strong></div><div><span>输入 Token</span><strong>{run.telemetry_status === "unavailable" ? "N/A" : formatNumber(run.tokens_input)}</strong></div><div><span>输出 Token</span><strong>{run.telemetry_status === "unavailable" ? "N/A" : formatNumber(run.tokens_output)}</strong></div></div><small className="ab-runtime-note">遥测：{run.telemetry_status === "unavailable" ? "Agent 未上报，不参与 Token 效率扣分" : run.telemetry_status ?? "历史未知"}</small></section>
-          <section className="ab-context-block"><label>RUNTIME CONDITION</label><div className="ab-runtime-ledger"><div><span>思考强度</span><strong>{run.requested_reasoning_effort?.toUpperCase() ?? "DEFAULT"} → {run.effective_reasoning_effort?.toUpperCase() ?? "N/A"}</strong></div><div><span>映射状态</span><strong className={run.effort_verified ? "verified" : "unverified"}>{run.effort_verified ? "已验证" : "未验证"}</strong></div><div><span>映射来源</span><strong>{effortSourceNames[run.effort_source ?? ""] ?? run.effort_source ?? "历史未知"}</strong></div><div><span>实际路由</span><strong>{String(runtimeIdentity.agent_provider ?? runtimeIdentity.model_provider ?? "—")} / {String(runtimeIdentity.model_name ?? run.model_name)}</strong></div><div><span>Agent 版本</span><strong>{String(runtimeIdentity.runner_version ?? "未上报")}</strong></div>{run.failure_class && <div className="failure"><span>失败分类</span><strong>{failureClassNames[run.failure_class] ?? run.failure_class}</strong></div>}</div></section>
+          <section className="ab-context-block"><label>RUNTIME CONDITION</label><div className="ab-runtime-ledger"><div><span>思考强度</span><strong>{run.requested_reasoning_effort?.toUpperCase() ?? "DEFAULT"} → {run.effective_reasoning_effort?.toUpperCase() ?? "N/A"}</strong></div><div><span>映射状态</span><strong className={run.effort_verified ? "verified" : "unverified"}>{run.effort_verified ? "已验证" : "未验证"}</strong></div><div><span>映射来源</span><strong>{effortSourceNames[run.effort_source ?? ""] ?? run.effort_source ?? "历史未知"}</strong></div>{Boolean(runtimeIdentity.requested_agent_mode) && <div><span>Harness 模式</span><strong>{String(runtimeIdentity.requested_agent_mode)} → {String(runtimeIdentity.effective_agent_mode ?? "待执行")}</strong></div>}{Boolean(runtimeIdentity.requested_agent_mode) && <div><span>Preset 审计</span><strong className={Boolean(runtimeIdentity.agent_mode_verified) ? "verified" : "unverified"}>{Boolean(runtimeIdentity.agent_mode_verified) ? `${String(runtimeIdentity.agent_mode_source ?? "unknown")} · ${String(runtimeIdentity.agent_mode_sha256 ?? "").slice(0, 12)}` : "未验证"}</strong></div>}<div><span>实际路由</span><strong>{String(runtimeIdentity.agent_provider ?? runtimeIdentity.model_provider ?? "—")} / {String(runtimeIdentity.model_name ?? run.model_name)}</strong></div><div><span>Agent 版本</span><strong>{String(runtimeIdentity.runner_version ?? "未上报")}</strong></div>{run.failure_class && <div className="failure"><span>失败分类</span><strong>{failureClassNames[run.failure_class] ?? run.failure_class}</strong></div>}</div></section>
           <section className="ab-context-block"><label>EVENT TRACE</label>{eventTrace.length ? eventTrace.map((event) => <div className={`ab-context-event${event.event_type.includes("failed") || event.event_type.includes("retry") ? " warn" : ""}`} key={event.id}><strong>{eventNames[event.event_type] ?? event.event_type}</strong><span>{typeof event.payload.summary === "string" ? event.payload.summary : `EVENT #${event.seq}`}</span></div>) : <div className="ab-muted">没有结构化事件记录</div>}</section>
           <section className="ab-context-block"><label>ARTIFACTS</label>{run.artifacts.length ? run.artifacts.slice(0, 6).map((artifact) => <a className="ab-artifact-row" key={artifact.id} href={downloadUrl(`/runs/${run.id}/artifacts/${artifact.id}`)}><FileCode2 size={13} /><span>{artifact.path} · {formatNumber(artifact.size)} B</span><b>查看</b></a>) : <div className="ab-muted">没有文件产物</div>}</section>
           {run.final_answer && <section className="ab-context-block"><label>FINAL ANSWER</label><pre className="ab-final-answer">{run.final_answer}</pre></section>}

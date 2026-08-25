@@ -161,10 +161,10 @@ def _discover_deepseek_harness() -> tuple[list[dict[str, Any]], list[dict[str, A
     ]
     effort_label = {"off": "快速", "high": "标准", "max": "极限"}[default_effort]
     warnings.append(
-        "Harness 为 Developer Preview；headless 运行使用 settings.yaml 中的默认模型，"
+        "Harness 为 Developer Preview；settings.yaml 当前默认模型仅作为目录默认项，"
         f"全局推理档位为 {effort_label}（{default_effort.upper()}）。"
-        "AgentBench 运行时可通过隔离配置按任务覆盖推理档位，不会改写全局设置；"
-        "模型身份仍以 Harness 当前默认项为准。"
+        "AgentBench 运行时会通过隔离配置按任务覆盖 Provider、模型与推理档位，"
+        "不会改写 Harness 全局设置。"
     )
     return models, providers, warnings
 

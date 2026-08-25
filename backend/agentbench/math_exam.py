@@ -9,6 +9,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .math_rubric import (
+    RUBRIC_SCHEMA,
+    normalize_rubric,
+    structured_rubric_config,
+)
+
 MATH_EXAM_ID = "postgraduate-math-1"
 MAX_PDF_BYTES = 80 * 1024 * 1024
 QUESTION_RE = re.compile(r"(?m)^\s*(?:第\s*)?(\d{1,2})\s*[.、．)]\s*")
@@ -114,6 +120,65 @@ def _rubric_template(number: int) -> dict[str, Any]:
     }
 
 
+def _structured_solution_rubric(question: dict[str, Any], year: int) -> dict[str, Any] | None:
+    """Build a private structured rubric when the reviewer supplied scoring points.
+
+    Imported papers intentionally start without scoring points.  We do not infer
+    official point values from prose obligations: until a reviewer or source
+    researcher supplies ``max_points`` and provenance, the case stays on the legacy
+    compatibility path and remains visibly unverified.
+    """
+
+    points = question.get("scoring_points")
+    if not points:
+        rubric = question.get("rubric")
+        points = rubric.get("scoring_points") if isinstance(rubric, dict) else None
+    if not points:
+        return None
+    source = question.get("rubric_source")
+    if not isinstance(source, dict):
+        rubric = question.get("rubric")
+        source = rubric.get("rubric_source") if isinstance(rubric, dict) else None
+    source = dict(source or {})
+    version = str(
+        question.get("rubric_version")
+        or (question.get("rubric") or {}).get("rubric_version", "")
+        or source.get("version")
+        or f"{year}.math1.q{int(question.get('number') or 0):02d}.unversioned"
+    )
+    source.setdefault("source_id", f"math1-{year}-q{int(question.get('number') or 0):02d}")
+    source.setdefault("version", version)
+    source.setdefault("source_tier", question.get("source_tier") or "unverified")
+    source.setdefault("verification_status", "unverified")
+    if question.get("source_tier") and source.get("source_tier") != question.get("source_tier"):
+        raise ValueError("rubric_source.source_tier_mismatch")
+    rubric = structured_rubric_config(
+        version=version,
+        source=source,
+        scoring_points=points,
+        alternate_paths=question.get("alternate_paths") or [],
+        allow_new_solutions=bool(question.get("allow_new_solutions", True)),
+        low_confidence_threshold=float(question.get("low_confidence_threshold", 0.70)),
+        judge_disagreement_threshold=float(
+            question.get("judge_disagreement_threshold", 12.0)
+        ),
+    )
+    # These are private judge context fields.  public_definition() removes them
+    # before a case is exposed to candidate Agents.
+    rubric["reference_answer"] = question.get("answer")
+    rubric["accepted_answers"] = list(question.get("accepted_answers") or [])
+    rubric["solution_obligations"] = list(question.get("solution_obligations") or [])
+    rubric["question_points"] = float(question.get("points") or 0)
+    rubric["rubric_protocol"] = RUBRIC_SCHEMA
+    question_points = float(question.get("points") or 0)
+    if question_points and abs(float(rubric["max_points"]) - question_points) > 1e-6:
+        raise ValueError(
+            "rubric_points_total_mismatch:"
+            f"{rubric['max_points']}!={question_points}"
+        )
+    return normalize_rubric(rubric)
+
+
 def build_question_drafts(page_texts: list[str]) -> list[dict[str, Any]]:
     detected: dict[int, dict[str, Any]] = {}
     current_number: int | None = None
@@ -152,6 +217,11 @@ def build_question_drafts(page_texts: list[str]) -> list[dict[str, Any]]:
                 "answer": None,
                 "accepted_answers": [],
                 "solution_obligations": [],
+                "rubric_version": None,
+                "rubric_source": None,
+                "source_tier": "unverified",
+                "scoring_points": [],
+                "alternate_paths": [],
                 "rubric": _rubric_template(number),
                 "review_status": "needs_review",
             }
@@ -336,6 +406,14 @@ def update_math_question(
         "accepted_answers",
         "variables",
         "solution_obligations",
+        "rubric_version",
+        "rubric_source",
+        "source_tier",
+        "scoring_points",
+        "alternate_paths",
+        "allow_new_solutions",
+        "low_confidence_threshold",
+        "judge_disagreement_threshold",
         "review_status",
     }
     for key, value in changes.items():
@@ -343,6 +421,10 @@ def update_math_question(
             continue
         if isinstance(value, str):
             value = value.strip()
+        elif key in {"scoring_points", "alternate_paths", "rubric_source"}:
+            # These fields are structured objects.  Do not coerce nested dicts to
+            # strings as the legacy list sanitizer does for answer text.
+            value = json.loads(json.dumps(value, ensure_ascii=False))
         elif isinstance(value, list):
             value = [str(item).strip() for item in value if str(item).strip()]
         question[key] = value
@@ -354,6 +436,15 @@ def update_math_question(
             raise ValueError("confirmed_question_requires_answer")
         if question.get("type") == "solution" and not question.get("solution_obligations"):
             raise ValueError("confirmed_solution_requires_obligations")
+        if question.get("type") == "solution" and question.get("scoring_points"):
+            if not question.get("rubric_version") or not question.get("rubric_source"):
+                raise ValueError("confirmed_solution_requires_rubric_source")
+            try:
+                rubric = _structured_solution_rubric(question, int(manifest.get("year") or 0))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid_solution_rubric:{exc}") from exc
+            if rubric is None:
+                raise ValueError("confirmed_solution_requires_scoring_points")
     all_confirmed = len(manifest.get("questions", [])) == 22 and all(
         item.get("review_status") == "confirmed" for item in manifest.get("questions", [])
     )
@@ -377,6 +468,13 @@ def validate_publishable_math_import(manifest: dict[str, Any]) -> None:
             raise ValueError(f"math_question_{number}_missing_answer")
         if question.get("type") == "solution" and not question.get("solution_obligations"):
             raise ValueError(f"math_question_{number}_missing_obligations")
+        if question.get("type") == "solution" and question.get("scoring_points"):
+            if not question.get("rubric_version") or not question.get("rubric_source"):
+                raise ValueError(f"math_question_{number}_missing_rubric_source")
+            try:
+                _structured_solution_rubric(question, int(manifest.get("year") or 0))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"math_question_{number}_invalid_rubric:{exc}") from exc
 
 
 def build_published_math_cases(manifest: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
@@ -416,46 +514,70 @@ def build_published_math_cases(manifest: dict[str, Any]) -> dict[str, list[dict[
                 validators = [{"type": "symbolic_json", "weight": 100, "config": {"fields": fields}}]
                 response_rule = '{"answer":"化简后的最终表达式"}'
             else:
-                answer_kind = str(question.get("answer_kind") or "expression")
-                objective_weight = max(0, min(100, int(question.get("objective_weight", 40))))
-                fields = {
-                    "final_answer": {
-                        "kind": answer_kind,
-                        "expected": question["answer"],
-                        "accepted": accepted,
-                        "variables": variables,
-                        "weight": 1,
+                structured_rubric = _structured_solution_rubric(question, year)
+                if structured_rubric is not None:
+                    # A structured rubric has one score-bearing validator.  The
+                    # anonymous judge returns only point awards; the backend derives
+                    # the 0-100 question quality from max_points.  There is no hidden
+                    # symbolic-vs-AI 40/60 split on this path.
+                    validators = [
+                        {
+                            "type": "ai_rubric",
+                            "weight": 100,
+                            "config": structured_rubric,
+                        }
+                    ]
+                    response_rule = (
+                        '{"final_answer":"最终结论","solution":"完整、可复核的推导"}'
+                    )
+                else:
+                    # Legacy imported definitions keep their exact old weighting so
+                    # historical runs remain reproducible.  New papers should supply
+                    # scoring_points and therefore never enter this branch.
+                    answer_kind = str(question.get("answer_kind") or "expression")
+                    objective_weight = max(
+                        0, min(100, int(question.get("objective_weight", 40)))
+                    )
+                    fields = {
+                        "final_answer": {
+                            "kind": answer_kind,
+                            "expected": question["answer"],
+                            "accepted": accepted,
+                            "variables": variables,
+                            "weight": 1,
+                        }
                     }
-                }
-                validators = []
-                if objective_weight:
+                    validators = []
+                    if objective_weight:
+                        validators.append(
+                            {
+                                "type": "symbolic_json",
+                                "weight": objective_weight,
+                                "config": {"fields": fields},
+                            }
+                        )
                     validators.append(
                         {
-                            "type": "symbolic_json",
-                            "weight": objective_weight,
-                            "config": {"fields": fields},
+                            "type": "ai_rubric",
+                            "weight": 100 - objective_weight,
+                            "config": {
+                                "reference_answer": question["answer"],
+                                "accepted_answers": accepted,
+                                "solution_obligations": question.get("solution_obligations") or [],
+                                "dimensions": [
+                                    "建模或定理选择正确",
+                                    "关键变换与中间结论有效",
+                                    "使用条件、定义域、边界或分支完整",
+                                    "推导可复核且最终结论一致",
+                                ],
+                                "alternate_solutions": "允许任意逻辑有效的等价解法，不得因路径不同扣分。",
+                                "error_carry_forward": "前一步独立错误导致的后续机械结果不重复扣分，保留此前正确方法分。",
+                            },
                         }
                     )
-                validators.append(
-                    {
-                        "type": "ai_rubric",
-                        "weight": 100 - objective_weight,
-                        "config": {
-                            "reference_answer": question["answer"],
-                            "accepted_answers": accepted,
-                            "solution_obligations": question.get("solution_obligations") or [],
-                            "dimensions": [
-                                "建模或定理选择正确",
-                                "关键变换与中间结论有效",
-                                "使用条件、定义域、边界或分支完整",
-                                "推导可复核且最终结论一致",
-                            ],
-                            "alternate_solutions": "允许任意逻辑有效的等价解法，不得因路径不同扣分。",
-                            "error_carry_forward": "前一步独立错误导致的后续机械结果不重复扣分，保留此前正确方法分。",
-                        },
-                    }
-                )
-                response_rule = '{"final_answer":"最终结论","solution":"完整、可复核的推导"}'
+                    response_rule = (
+                        '{"final_answer":"最终结论","solution":"完整、可复核的推导"}'
+                    )
             lane_name = "闭卷推理" if lane == "closed-book" else "工具增强"
             instruction = (
                 f"你正在参加 {year} 年考研数学（一）{lane_name}测试。\n\n"
@@ -496,6 +618,26 @@ def build_published_math_cases(manifest: dict[str, Any]) -> dict[str, list[dict[
                             "source_pages": question.get("source_pages") or [],
                             "native_agent_compatible": lane != "closed-book",
                             "private_validation": True,
+                            "rubric_protocol": (
+                                structured_rubric.get("rubric_protocol", "legacy-v1")
+                                if kind == "solution" and structured_rubric is not None
+                                else "legacy-v1"
+                            ),
+                            "rubric_version": (
+                                structured_rubric.get("rubric_version")
+                                if kind == "solution" and structured_rubric is not None
+                                else None
+                            ),
+                            "rubric_source": (
+                                structured_rubric.get("rubric_source")
+                                if kind == "solution" and structured_rubric is not None
+                                else None
+                            ),
+                            "source_tier": (
+                                structured_rubric.get("source_tier")
+                                if kind == "solution" and structured_rubric is not None
+                                else "unverified"
+                            ),
                         },
                     },
                 }

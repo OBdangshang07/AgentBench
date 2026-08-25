@@ -66,7 +66,15 @@ function CreateExperiment({ initialSuiteId = "", onClose, onSaved }: { initialSu
   const estimatedRuns = (selectedSuite?.case_count ?? 0) * participants.length * repetitions;
   const frontendSuite = Boolean(selectedSuite && /Xnmk (Library )?前端/.test(selectedSuite.name));
   const estimatedMinutes = selectedSuite?.case_count ? Math.round(selectedSuite.case_count * (frontendSuite ? 110 : 8) / Math.max(1, concurrency)) : 0;
-  const participantReady = participants.every((item) => item.model_id && item.runner_id);
+  const participantIsReady = (participant: Participant) => {
+    if (!participant.model_id || !participant.runner_id) return false;
+    const runner = runners.data?.find((item) => item.id === participant.runner_id);
+    if (runner?.runner_type !== "deepseek_harness") return true;
+    const modeId = participant.agent_mode ?? runner.adapter?.default_agent_mode ?? "standard";
+    const modes = runner.adapter?.agent_modes ?? [];
+    return modes.length === 0 || modes.some((mode) => mode.id === modeId && mode.available);
+  };
+  const participantReady = participants.every(participantIsReady);
   const fairnessReady = !strictFairness || (reasoningPolicy !== "native" && participants.every((participant) => {
     const runner = runners.data?.find((item) => item.id === participant.runner_id);
     return !participant.runner_id || runner?.adapter?.reasoning_control?.supported !== false;
@@ -112,7 +120,9 @@ function CreateExperiment({ initialSuiteId = "", onClose, onSaved }: { initialSu
             {participants.slice(0, 3).map((participant, index) => {
               const model = models.data?.find((item) => item.id === participant.model_id);
               const runner = runners.data?.find((item) => item.id === participant.runner_id);
-              return <GraphNode key={index} className={`participant-${index}`} selected={selectedNode === `participant-${index}`} onClick={() => setSelectedNode(`participant-${index}`)} label={`PARTICIPANT ${String(index + 1).padStart(2, "0")}`} icon={<Bot size={15} />} title={model?.name ?? "选择参测模型"} detail={`${runner?.name ?? "选择 Agent"} · ${runner?.capability.installed ? "已检测" : "待配置"}`} footerLeft={runner?.runner_type ?? "MODEL × AGENT"} footerRight={participant.model_id && participant.runner_id ? "READY" : "WAIT"} />;
+              const mode = runner?.adapter?.agent_modes?.find((item) => item.id === participant.agent_mode);
+              const modeDetail = runner?.runner_type === "deepseek_harness" ? ` · ${mode?.name ?? "标准模式"}` : "";
+              return <GraphNode key={index} className={`participant-${index}`} selected={selectedNode === `participant-${index}`} onClick={() => setSelectedNode(`participant-${index}`)} label={`PARTICIPANT ${String(index + 1).padStart(2, "0")}`} icon={<Bot size={15} />} title={model?.name ?? "选择参测模型"} detail={`${runner?.name ?? "选择 Agent"}${modeDetail} · ${runner?.capability.installed ? "已检测" : "待配置"}`} footerLeft={runner?.runner_type ?? "MODEL × AGENT"} footerRight={participantIsReady(participant) ? "READY" : "WAIT"} />;
             })}
             <GraphNode className="judge" selected={selectedNode === "judge"} onClick={() => setSelectedNode("judge")} label={frontendSuite ? "HUMAN REVIEW" : "JUDGE"} icon={<ShieldCheck size={15} />} title={frontendSuite ? "纯人工评分" : judgeModel?.name ?? "确定性评分优先"} detail={frontendSuite ? "逐项 Rubric · 草稿与审计" : `${judgeRunner?.name ?? "未启用裁判 Agent"} · 匿名评审`} footerLeft="RUBRIC ONLY" footerRight={frontendSuite ? "REQUIRED" : judgeModel ? "READY" : "OPTIONAL"} />
             <GraphNode className="policy" selected={selectedNode === "policy"} onClick={() => setSelectedNode("policy")} label="RUN POLICY" icon={<Play size={15} />} title={reasoningPolicy === "maximum" ? "MAX 极限条件" : reasoningPolicy === "standard" ? "High 标准条件" : reasoningPolicy === "native" ? "Agent 原生条件" : `${reasoningEffort.toUpperCase()} 自定义条件`} detail={`并发 ${concurrency} · 重复 ${repetitions}\n${strictFairness ? "严格公平" : "允许非标准映射"}`} footerLeft={`${estimatedRuns} RUNS`} footerRight="READY" />
@@ -128,7 +138,24 @@ function CreateExperiment({ initialSuiteId = "", onClose, onSaved }: { initialSu
             <div className="ab-form-section-label">PARTICIPANTS</div>
             {participants.map((participant, index) => {
               const runner = runners.data?.find((item) => item.id === participant.runner_id);
-              return <section className="ab-participant-config" key={index}><header><strong>参测者 {String(index + 1).padStart(2, "0")}</strong><span className={participant.model_id && participant.runner_id ? "ready" : ""}>{participant.model_id && participant.runner_id ? "● READY" : "○ WAIT"}</span>{participants.length > 1 && <button type="button" onClick={() => setParticipants((items) => items.filter((_, position) => position !== index))}><Trash2 size={12} /></button>}</header><select required aria-label={`参测者 ${index + 1} 模型`} value={participant.model_id} onChange={(event) => updateParticipant(index, { model_id: event.target.value })}><option value="" disabled>选择模型</option>{models.data?.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select><select required aria-label={`参测者 ${index + 1} Agent`} value={participant.runner_id} onChange={(event) => updateParticipant(index, { runner_id: event.target.value })}><option value="" disabled>选择 Agent</option>{runners.data?.map((item) => <option key={item.id} value={item.id}>{item.name}{!item.capability.installed ? " · 未检测" : ""}</option>)}</select><small>{runner?.capability.installed ? `✓ ${runner.name} 已就绪` : "选择后检查本机执行环境"}</small>{runner?.adapter?.reasoning_control && <small className={runner.adapter.reasoning_control.verified ? "ab-condition-ok" : "ab-condition-warn"}>{runner.adapter.reasoning_control.note}</small>}</section>;
+              const harnessModes = runner?.adapter?.agent_modes ?? [];
+              const selectedModeId = participant.agent_mode ?? runner?.adapter?.default_agent_mode ?? "standard";
+              const selectedMode = harnessModes.find((mode) => mode.id === selectedModeId);
+              return <section className="ab-participant-config" key={index}>
+                <header><strong>参测者 {String(index + 1).padStart(2, "0")}</strong><span className={participantIsReady(participant) ? "ready" : ""}>{participantIsReady(participant) ? "● READY" : "○ WAIT"}</span>{participants.length > 1 && <button type="button" onClick={() => setParticipants((items) => items.filter((_, position) => position !== index))}><Trash2 size={12} /></button>}</header>
+                <select required aria-label={`参测者 ${index + 1} 模型`} value={participant.model_id} onChange={(event) => updateParticipant(index, { model_id: event.target.value })}><option value="" disabled>选择模型</option>{models.data?.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select>
+                <select required aria-label={`参测者 ${index + 1} Agent`} value={participant.runner_id} onChange={(event) => {
+                  const nextRunner = runners.data?.find((item) => item.id === event.target.value);
+                  const availableModes = nextRunner?.adapter?.agent_modes?.filter((mode) => mode.available) ?? [];
+                  const preferred = nextRunner?.adapter?.default_agent_mode ?? "standard";
+                  const nextMode = nextRunner?.runner_type === "deepseek_harness"
+                    ? availableModes.find((mode) => mode.id === preferred)?.id ?? availableModes[0]?.id ?? preferred
+                    : undefined;
+                  updateParticipant(index, { runner_id: event.target.value, agent_mode: nextMode });
+                }}><option value="" disabled>选择 Agent</option>{runners.data?.map((item) => <option key={item.id} value={item.id}>{item.name}{!item.capability.installed ? " · 未检测" : ""}</option>)}</select>
+                {runner?.runner_type === "deepseek_harness" && <div className="ab-agent-mode-field"><span>Harness 模式</span><select required aria-label={`参测者 ${index + 1} Harness 模式`} value={selectedModeId} onChange={(event) => updateParticipant(index, { agent_mode: event.target.value })}>{harnessModes.map((mode) => <option key={mode.id} value={mode.id} disabled={!mode.available}>{mode.name}{mode.source === "user" ? " · 自定义" : " · 官方"}{mode.experimental ? " · 实验" : ""}{!mode.available ? " · 不可用" : ""}</option>)}</select><small className={selectedMode?.available === false ? "ab-condition-warn" : "ab-condition-ok"}>{selectedMode?.available === false ? selectedMode.error : `${selectedMode?.description ?? "按所选 preset 真实挂载工具与系统提示。"} 模式不拆分排行榜，详情会保留审计标记。`}</small></div>}
+                <small>{runner?.capability.installed ? `✓ ${runner.name} 已就绪` : "选择后检查本机执行环境"}</small>{runner?.adapter?.reasoning_control && <small className={runner.adapter.reasoning_control.verified ? "ab-condition-ok" : "ab-condition-warn"}>{runner.adapter.reasoning_control.note}</small>}
+              </section>;
             })}
             <button className="ab-add-participant" type="button" onClick={() => setParticipants((items) => [...items, { model_id: "", runner_id: "" }])}><Plus size={12} />添加参测组合</button>
             <div className="ab-form-section-label">REASONING CONDITION</div>

@@ -48,7 +48,7 @@ function renderRunPage(run: RunDetail) {
     const url = String(input);
     let value: unknown = {};
     if (url.endsWith("/health")) {
-        value = { name: "AgentBench Desktop", version: "5.2.3" };
+        value = { name: "AgentBench Desktop", version: "5.2.6" };
     } else if (url.includes("/runs?experiment_id=")) {
       value = [run];
     } else if (url.includes("/runs/run-1")) {
@@ -70,7 +70,7 @@ function renderRunPage(run: RunDetail) {
 function renderRunPageWithNotifications(run: RunDetail) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
-    const value = url.includes("/runs?experiment_id=") ? [run] : url.includes("/runs/run-1") ? run : { name: "AgentBench Desktop", version: "5.2.3" };
+    const value = url.includes("/runs?experiment_id=") ? [run] : url.includes("/runs/run-1") ? run : { name: "AgentBench Desktop", version: "5.2.6" };
     return { ok: true, status: 200, json: async () => value } as Response;
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -155,11 +155,18 @@ describe("RunDetail exam question card", () => {
         agent_provider: "deepseek-pro",
         model_name: "deepseek-pro",
         runner_version: "1.2.3",
+        requested_agent_mode: "anchored-standard",
+        effective_agent_mode: "anchored-standard",
+        agent_mode_source: "user",
+        agent_mode_sha256: "abcdef1234567890",
+        agent_mode_verified: true,
       },
     }));
 
     expect(await screen.findByText("MAX → HIGH")).toBeInTheDocument();
     expect(screen.getByText("deepseek-pro / deepseek-pro")).toBeInTheDocument();
+    expect(screen.getByText("anchored-standard → anchored-standard")).toBeInTheDocument();
+    expect(screen.getByText("user · abcdef123456")).toBeInTheDocument();
     expect(screen.getByText(/Agent 未上报/)).toBeInTheDocument();
     expect(screen.getAllByText("N/A").length).toBeGreaterThan(0);
   });

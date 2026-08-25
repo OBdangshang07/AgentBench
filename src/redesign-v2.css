@@ -472,3 +472,37 @@ body { overflow: hidden; color: var(--ab-paper); background: var(--ab-ink); font
   .frontend-portfolio-hero { grid-template-columns: 1fr; }
   .frontend-portfolio-metrics { min-width: 0; border-left: 0; border-top: 1px solid var(--ab-line); padding-top: 18px; }
 }
+
+.ab-agent-mode-field { margin-top: 8px; padding: 8px; border: 1px solid #34402f; border-radius: 7px; background: #121810; }
+.ab-agent-mode-field > span { display: block; margin-bottom: 2px; color: #98a58d; font-size: 8px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.ab-agent-mode-field > select { border-color: #3b4934; background: #11170f; }
+.ab-agent-mode-field > small { display: block; margin-top: 6px; color: #7c886f; font-size: 8px; line-height: 1.5; }
+.ab-agent-mode-field > small.ab-condition-warn { color: #c79862; }
+.math-rubric-ledger {
+  margin-top: 18px;
+  padding: 18px;
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.12));
+  background: rgba(9, 16, 25, 0.48);
+}
+
+.math-rubric-source,
+.math-point-award {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.math-rubric-source { padding: 14px 0; }
+.math-rubric-source div,
+.math-point-award div { display: grid; gap: 4px; }
+.math-rubric-source small,
+.math-point-award small { color: var(--muted, #8c99a8); }
+.math-rubric-source > b { white-space: nowrap; }
+.math-rubric-source > b.verified { color: #70d6a3; }
+.math-rubric-source > b.unverified { color: #f0b868; }
+
+.math-point-awards { border-top: 1px solid var(--line, rgba(255, 255, 255, 0.12)); }
+.math-point-award { padding: 12px 0; border-bottom: 1px solid var(--line, rgba(255, 255, 255, 0.08)); }
+.math-point-award code { color: #7fc9ff; font-size: 11px; }
+.math-point-award > b { min-width: 70px; text-align: right; }

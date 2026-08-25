@@ -7,6 +7,20 @@ from .math_exam import MATH_EXAM_ID, build_published_math_cases
 SOURCE_FILENAME = "ab27a44c5f0cbe5e.pdf"
 SOURCE_SHA256 = "9ebd0eebbbfeef553880cb13af3528bbbb25630b86d7ed22fb5f9c85b0c659bf"
 SOURCE_PAGE_COUNT = 17
+RUBRIC_VERSION = "2025.math1.solution.expert-reconstructed.v1"
+RUBRIC_SOURCE = {
+    "source_id": "moe-policy-2025-plus-expert-reconstruction",
+    "version": RUBRIC_VERSION,
+    "source_tier": "expert_reconstructed",
+    "title": "2025 年考研数学（一）解答题专家重建评分量表",
+    "issuing_body": "AgentBench 专家重建；评卷制度依据为教育部、教育部教育考试院",
+    "url": "https://www.gov.cn/zhengce/zhengceku/202410/content_6978684.htm",
+    "accessed_at": "2026-08-26",
+    "page": "第七条、第四十条、第四十二条",
+    "evidence": "教育部规定全国统一命题科目由教育部教育考试院提供评分参考，省级专家组经试评拟定具体评卷细则；评分参考（指南）按国家秘密管理。公开来源未发现可核验的2025数学一逐题官方分值细则。",
+    "verification_status": "partially_verified",
+    "notes": "官方条文仅证明评卷制度与来源链；本量表的逐题分值由参考解答按踩点给分原则重建，不宣称为官方评分参考。",
+}
 
 
 def _question(
@@ -20,9 +34,47 @@ def _question(
     accepted: list[str] | None = None,
     variables: list[str] | None = None,
     obligations: list[str] | None = None,
+    mark_values: list[float] | None = None,
     answer_kind: str = "expression",
     objective_weight: int = 40,
+    rubric_version: str | None = None,
+    rubric_source: dict[str, Any] | None = None,
+    source_tier: str = "unverified",
+    scoring_points: list[dict[str, Any]] | None = None,
+    alternate_paths: list[dict[str, Any]] | None = None,
+    allow_new_solutions: bool = True,
+    low_confidence_threshold: float = 0.70,
+    judge_disagreement_threshold: float = 12.0,
 ) -> dict[str, Any]:
+    obligations = obligations or []
+    if mark_values is not None and len(mark_values) != len(obligations):
+        raise ValueError(f"question_{number}_mark_values_must_match_obligations")
+    generated_scoring_points = [
+        {
+            "point_id": f"q{number}.{index}",
+            "description": obligation,
+            "max_points": mark_values[index - 1],
+            "depends_on": [],
+            "mutually_exclusive_with": [],
+            "alternate_for": [],
+            "error_carry_forward": {
+                "enabled": True,
+                "rule": "前一步独立错误导致的后续机械结果不重复扣分；后续方法正确时保留相应方法分。",
+                "independent_work_credit": True,
+                "max_repeated_deduction": 0,
+            },
+            "evidence_required": ["考生作答中的对应公式、推导或结论"],
+        }
+        for index, obligation in enumerate(obligations, 1)
+    ] if mark_values is not None else []
+    effective_scoring_points = scoring_points if scoring_points is not None else generated_scoring_points
+    effective_version = rubric_version or (RUBRIC_VERSION if effective_scoring_points else None)
+    effective_source = rubric_source or (dict(RUBRIC_SOURCE) if effective_scoring_points else None)
+    effective_tier = (
+        source_tier
+        if source_tier != "unverified" or not effective_scoring_points
+        else "expert_reconstructed"
+    )
     return {
         "number": number,
         "type": kind,
@@ -33,9 +85,21 @@ def _question(
         "answer": answer,
         "accepted_answers": accepted or [],
         "variables": variables or [],
-        "solution_obligations": obligations or [],
+        "solution_obligations": obligations,
         "answer_kind": answer_kind,
         "objective_weight": objective_weight,
+        "rubric_version": effective_version,
+        "rubric_source": effective_source,
+        "source_tier": effective_tier,
+        "scoring_points": effective_scoring_points,
+        "alternate_paths": alternate_paths or [],
+        "allow_new_solutions": allow_new_solutions,
+        "low_confidence_threshold": (
+            max(low_confidence_threshold, 0.75)
+            if effective_scoring_points
+            else low_confidence_threshold
+        ),
+        "judge_disagreement_threshold": judge_disagreement_threshold,
         "review_status": "confirmed",
     }
 
@@ -249,6 +313,7 @@ D. X̄>1+√(2/n)Zα。
             "分别正确处理对数项与反正切项",
             "代入上下限并化简为 3ln2/10+π/10",
         ],
+        mark_values=[3, 4, 3],
     ),
     _question(
         18,
@@ -268,6 +333,7 @@ x^2 g_xx + xy g_xy + y^2 g_yy = 1，
             "由 g(x,x)=1 与 g_x(x,x)=2/x 得到 f(1)=1、f'(1)=2",
             "求解常微分方程并得到 f(u)=1/2(ln u)^2+2ln u+1",
         ],
+        mark_values=[3, 3, 2, 4],
     ),
     _question(
         19,
@@ -287,6 +353,7 @@ x^2 g_xx + xy g_xy + y^2 g_yy = 1，
             "必要性方向在相邻区间应用拉格朗日中值定理",
             "由中值点次序与 f' 严格递增推出两段割线斜率严格不等式",
         ],
+        mark_values=[3, 3, 3, 3],
     ),
     _question(
         20,
@@ -304,6 +371,7 @@ I=∬_(Σ1) x dy dz + (y+1) dz dx + (z+2) dx dy。
             "对闭合曲面正确应用高斯公式并计算体积分",
             "正确计算补面通量并作差得到 √2π/4-1",
         ],
+        mark_values=[2, 3, 4, 3],
     ),
     _question(
         21,
@@ -324,6 +392,7 @@ I=∬_(Σ1) x dy dz + (y+1) dz dx + (z+2) dx dy。
             "在 a=3 时正确刻画 ker((A-I)^2) 并排除 α=0",
             "保证 β 非零，即 a1+a2≠2a3，并给出 β 的完整参数表达",
         ],
+        mark_values=[3, 3, 3, 3],
     ),
     _question(
         22,
@@ -346,6 +415,7 @@ Y=0（X≤100），Y=X-100（X>100）。
             "识别泊松稀疏化或等价地对条件二项分布求和",
             "得到 M~Poisson(2)，即 P(M=m)=2^m e^(-2)/m!，m=0,1,2,...",
         ],
+        mark_values=[3, 3, 3, 3],
     ),
 ]
 

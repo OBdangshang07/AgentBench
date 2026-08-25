@@ -50,6 +50,14 @@ def test_user_pdf_is_bundled_as_two_verified_22_question_suites():
     proof_validators = cases["closed-book"][18]["definition"]["validators"]
     assert [item["type"] for item in proof_validators] == ["ai_rubric"]
     assert proof_validators[0]["weight"] == 100
+    for question in manifest["questions"][16:]:
+        assert question["source_tier"] == "expert_reconstructed"
+        assert question["rubric_source"]["verification_status"] == "partially_verified"
+        assert sum(point["max_points"] for point in question["scoring_points"]) == question["points"]
+    q17_validator = cases["closed-book"][16]["definition"]["validators"]
+    assert [item["type"] for item in q17_validator] == ["ai_rubric"]
+    assert q17_validator[0]["weight"] == 100
+    assert q17_validator[0]["config"]["rubric_protocol"] == "agentbench.math-rubric/v1"
 
 
 def test_math_pdf_import_is_local_and_stays_in_review(settings):

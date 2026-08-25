@@ -85,10 +85,11 @@ export default function ExperimentDetail() {
   const finished = (summary?.completed ?? 0) + (summary?.failed ?? 0) + (summary?.blocked ?? 0);
   const progress = summary?.total ? Math.round((finished / summary.total) * 100) : 0;
   const completedRuns = runs.data?.filter((run) => run.score != null) ?? [];
+  const agentModeOf = (run: RunSummary) => String(run.runtime_identity?.effective_agent_mode ?? run.runtime_identity?.requested_agent_mode ?? "");
   const participantGroups = new Map<string, RunSummary[]>();
   const categoryGroups = new Map<string, RunSummary[]>();
   for (const run of runs.data ?? []) {
-    const participantKey = `${run.model_id}:${run.runner_id}`;
+    const participantKey = `${run.model_id}:${run.runner_id}:${agentModeOf(run)}`;
     participantGroups.set(participantKey, [...(participantGroups.get(participantKey) ?? []), run]);
     categoryGroups.set(run.category, [...(categoryGroups.get(run.category) ?? []), run]);
   }
@@ -97,9 +98,10 @@ export default function ExperimentDetail() {
     const objectiveScored = group.filter((run) => run.objective_score != null);
     const timeScored = group.filter((run) => run.time_score != null);
     return {
-      key: `${group[0].model_id}:${group[0].runner_id}`,
+      key: `${group[0].model_id}:${group[0].runner_id}:${agentModeOf(group[0])}`,
       name: group[0].model_name,
       runner: group[0].runner_name,
+      agentMode: agentModeOf(group[0]),
       score: scored.length ? scored.reduce((sum, run) => sum + Number(run.score), 0) / scored.length : null,
       objective: objectiveScored.length ? objectiveScored.reduce((sum, run) => sum + Number(run.objective_score), 0) / objectiveScored.length : null,
       time: timeScored.length ? timeScored.reduce((sum, run) => sum + Number(run.time_score), 0) / timeScored.length : null,
@@ -131,7 +133,7 @@ export default function ExperimentDetail() {
           <div className="card-header"><div><span className="section-kicker">PARTICIPANTS</span><h2>参测者对比</h2></div><BarChart3 size={18} /></div>
           <div className="participant-bars">
             {participantStats.map((stat, index) => <div className="participant-bar" key={stat.key}>
-              <span className="insight-rank">{index + 1}</span><div><strong>{stat.name}</strong><small>{stat.runner} · 成功率 {stat.success.toFixed(0)}%{stat.objective != null ? ` · 质量 ${stat.objective.toFixed(1)} · 时效 ${stat.time?.toFixed(1) ?? "—"}` : ""}</small></div><div className="score-track"><i style={{ width: `${stat.score ?? 0}%` }} /></div><Score value={stat.score} />
+              <span className="insight-rank">{index + 1}</span><div><strong>{stat.name}</strong><small>{stat.runner}{stat.agentMode ? ` · ${stat.agentMode}` : ""} · 成功率 {stat.success.toFixed(0)}%{stat.objective != null ? ` · 质量 ${stat.objective.toFixed(1)} · 时效 ${stat.time?.toFixed(1) ?? "—"}` : ""}</small></div><div className="score-track"><i style={{ width: `${stat.score ?? 0}%` }} /></div><Score value={stat.score} />
             </div>)}
           </div>
         </Card>
@@ -146,7 +148,7 @@ export default function ExperimentDetail() {
       <Card>
         <div className="card-header"><div><span className="section-kicker">RUN MATRIX</span><h2>运行任务</h2></div><button className="icon-button" onClick={() => void runs.refresh()}><RotateCcw size={16} /></button></div>
         {runs.loading ? <LoadingBlock /> : runs.error || !runs.data ? <ErrorBlock message={runs.error ?? "运行列表读取失败"} /> : (
-          <div className="table-wrap run-table"><table><thead><tr><th>测试任务</th><th>参测组合</th><th>条件</th><th>重复 / 轮次</th><th>耗时</th><th>Token</th><th>综合 / 分项</th><th>状态 / 原因</th></tr></thead><tbody>{runs.data.map((run) => <tr key={run.id}><td><Link to={`/runs/${run.id}`} state={{ from: `/experiments/${item.id}` }}><strong>{run.test_title}</strong></Link><small>{run.category}</small></td><td><strong>{run.model_name}</strong><small>{run.runner_name}</small></td><td><span className={`lane lane-${run.effort_verified ? "unified" : "native"}`}>{run.effective_reasoning_effort?.toUpperCase() ?? "DEFAULT"}</span><small>{run.effort_verified ? "已验证" : "未验证映射"}</small></td><td>#{run.repetition}<small>{run.attempt_count > 1 ? `${run.attempt_count} 轮挑战` : "单轮"}</small></td><td>{formatDuration(run.duration_ms)}</td><td>{run.telemetry_status === "unavailable" ? "N/A" : formatNumber(run.tokens_input + run.tokens_output)}</td><td><Score value={run.score} />{run.objective_score != null && <small className="score-subline">质量 {run.objective_score.toFixed(1)} · 时效 {run.time_score?.toFixed(1) ?? "—"} · T效 {run.token_score?.toFixed(1) ?? "—"}</small>}</td><td><StatusBadge status={run.status} />{run.failure_class && <small className="run-error-preview">{failureClassNames[run.failure_class] ?? run.failure_class}</small>}{run.error_message && <small className="run-error-preview" title={run.error_message}>{run.error_code ? `${run.error_code} · ` : ""}{run.error_message}</small>}</td></tr>)}</tbody></table></div>
+          <div className="table-wrap run-table"><table><thead><tr><th>测试任务</th><th>参测组合</th><th>条件</th><th>重复 / 轮次</th><th>耗时</th><th>Token</th><th>综合 / 分项</th><th>状态 / 原因</th></tr></thead><tbody>{runs.data.map((run) => <tr key={run.id}><td><Link to={`/runs/${run.id}`} state={{ from: `/experiments/${item.id}` }}><strong>{run.test_title}</strong></Link><small>{run.category}</small></td><td><strong>{run.model_name}</strong><small>{run.runner_name}{agentModeOf(run) ? ` · ${agentModeOf(run)}` : ""}</small></td><td><span className={`lane lane-${run.effort_verified ? "unified" : "native"}`}>{run.effective_reasoning_effort?.toUpperCase() ?? "DEFAULT"}</span><small>{run.effort_verified ? "已验证" : "未验证映射"}</small></td><td>#{run.repetition}<small>{run.attempt_count > 1 ? `${run.attempt_count} 轮挑战` : "单轮"}</small></td><td>{formatDuration(run.duration_ms)}</td><td>{run.telemetry_status === "unavailable" ? "N/A" : formatNumber(run.tokens_input + run.tokens_output)}</td><td><Score value={run.score} />{run.objective_score != null && <small className="score-subline">质量 {run.objective_score.toFixed(1)} · 时效 {run.time_score?.toFixed(1) ?? "—"} · T效 {run.token_score?.toFixed(1) ?? "—"}</small>}</td><td><StatusBadge status={run.status} />{run.failure_class && <small className="run-error-preview">{failureClassNames[run.failure_class] ?? run.failure_class}</small>}{run.error_message && <small className="run-error-preview" title={run.error_message}>{run.error_code ? `${run.error_code} · ` : ""}{run.error_message}</small>}</td></tr>)}</tbody></table></div>
         )}
       </Card>
       </div>

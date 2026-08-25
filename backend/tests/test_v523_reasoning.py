@@ -40,7 +40,7 @@ def test_v15_schema_and_new_experiment_runtime_snapshot(settings) -> None:
         assert experiment["reasoning_effort"] == "max"
         assert experiment["strict_fairness"] is True
         assert experiment["judge_reasoning_effort"] == "xhigh"
-        assert experiment["runtime_config_version"] == "5.2.3"
+        assert experiment["runtime_config_version"] == "5.2.6"
 
         run = service.list_runs(experiment["id"])[0]
         assert run["requested_reasoning_effort"] == "max"

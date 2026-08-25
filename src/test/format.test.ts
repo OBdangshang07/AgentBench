@@ -3,7 +3,7 @@ import { formatDuration, statusLabel, statusTone } from "../lib/format";
 
 describe("display formatting", () => {
   it("keeps evaluation statuses explicit", () => {
-    expect(statusLabel.environment_unavailable).toBe("缺少沙箱");
+    expect(statusLabel.environment_unavailable).toBe("运行环境不可用");
     expect(statusTone("needs_review")).toBe("warning");
     expect(statusTone("completed")).toBe("success");
   });

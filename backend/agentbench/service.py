@@ -39,6 +39,15 @@ from .execution import (
     resolve_cli_install_plan,
     run_native_cli,
 )
+from .harness_modes import (
+    HARNESS_DEFAULT_MODE,
+    HARNESS_DRIVER_SOURCE,
+    HarnessModeUnavailableError,
+    harness_driver_sha256,
+    public_harness_modes,
+    render_harness_patch,
+    resolve_harness_mode,
+)
 from .math_exam import (
     MATH_EXAM_ID,
     build_published_math_cases,
@@ -48,6 +57,7 @@ from .math_exam import (
     mark_math_import_published,
     update_math_question,
 )
+from .math_rubric import rubric_json_schema, score_rubric
 from .mcp_runtime import McpRuntimeError, call_mcp_tool, probe_mcp
 from .model_clients import (
     AnthropicClient,
@@ -531,7 +541,16 @@ def public_definition(definition: dict[str, Any]) -> dict[str, Any]:
             "file_contains": {"text"},
             "json_file": {"expected"},
             "symbolic_json": {"fields"},
-            "ai_rubric": {"reference_answer", "accepted_answers", "solution_obligations"},
+            # Structured maths rubrics expose provenance, but keep the actual
+            # scoring-point descriptions and answer keys private from candidate
+            # Agents.  The judge evidence later records the version/source/awards.
+            "ai_rubric": {
+                "reference_answer",
+                "accepted_answers",
+                "solution_obligations",
+                "scoring_points",
+                "alternate_paths",
+            },
         }.get(kind, set())
         for key in sensitive_keys:
             hidden = config.pop(key, None) is not None or hidden
@@ -2324,9 +2343,13 @@ class EvaluationService:
         provider: str,
         model: str,
         requested_effort: str | None,
-    ) -> tuple[list[str], Path, str, str]:
+        agent_mode: str | None = None,
+        executable: str | None = "dsh",
+        mode_runtime: dict[str, Any] | None = None,
+    ) -> tuple[list[str], Path, str, str, dict[str, Any]]:
         """Create a per-run Harness settings overlay without mutating ~/.dsh."""
         effort, profile_label = _harness_reasoning_effort(requested_effort)
+        resolved_mode = mode_runtime or resolve_harness_mode(agent_mode, executable)
         configured_home = os.getenv("DSH_HOME", "").strip()
         harness_home = Path(configured_home).expanduser() if configured_home else Path.home() / ".dsh"
         source_settings = harness_home / "settings.yaml"
@@ -2354,15 +2377,17 @@ class EvaluationService:
         try:
             runtime_settings = runtime_root / "settings.yaml"
             runtime_patch = runtime_root / "cordis.patch.yml"
+            runtime_driver = runtime_root / "agentbench-headless-runner.mjs"
             runtime_settings.write_text(
                 yaml.safe_dump(settings, allow_unicode=True, sort_keys=False), encoding="utf-8"
             )
-            settings_path = str(runtime_settings).replace("\\", "/").replace("'", "''")
+            runtime_driver.write_text(HARNESS_DRIVER_SOURCE, encoding="utf-8")
             runtime_patch.write_text(
-                "- id: settings\n"
-                "  config:\n"
-                f"    path: '{settings_path}'\n"
-                "    watch: false\n",
+                render_harness_patch(
+                    settings_path=runtime_settings,
+                    driver_path=runtime_driver,
+                    mode=resolved_mode,
+                ),
                 encoding="utf-8",
             )
         except Exception:
@@ -2373,7 +2398,7 @@ class EvaluationService:
             configured_args.index("{prompt}") if "{prompt}" in configured_args else len(configured_args)
         )
         configured_args[prompt_index:prompt_index] = ["--patch", str(runtime_patch)]
-        return configured_args, runtime_root, effort, profile_label
+        return configured_args, runtime_root, effort, profile_label, resolved_mode
 
     @staticmethod
     def _studio_native_browser_options(
@@ -3556,6 +3581,11 @@ class EvaluationService:
             item["adapter"] = runner_adapter_capabilities(
                 str(item["runner_type"]), list(item.get("tools") or [])
             )
+            if item["runner_type"] == "deepseek_harness":
+                item["adapter"]["agent_modes"] = public_harness_modes(
+                    item.get("executable")
+                )
+                item["adapter"]["default_agent_mode"] = HARNESS_DEFAULT_MODE
             output.append(item)
         return output
 
@@ -4132,6 +4162,7 @@ class EvaluationService:
     # Experiments
     def create_experiment(self, value: ExperimentCreate) -> dict[str, Any]:
         self.get_suite(value.suite_id)
+        participants: list[dict[str, Any]] = []
         for participant in value.participants:
             model = self.get_model(participant.model_id)
             runner = self.database.fetch_one(
@@ -4141,9 +4172,16 @@ class EvaluationService:
                 raise KeyError("runner_not_found")
             if not model["enabled"] or not runner["enabled"]:
                 raise ValueError("Disabled models or runners cannot participate")
+            serialized = participant.model_dump(exclude_none=True)
+            if runner["runner_type"] == "deepseek_harness":
+                requested_mode = participant.agent_mode or HARNESS_DEFAULT_MODE
+                resolved_mode = resolve_harness_mode(requested_mode, runner.get("executable"))
+                serialized["agent_mode"] = resolved_mode["id"]
+            elif participant.agent_mode is not None:
+                raise ValueError("agent_mode 仅适用于 DeepSeek Harness")
+            participants.append(serialized)
         experiment_id = new_id()
         now = utc_now()
-        participants = [item.model_dump() for item in value.participants]
         requested_effort = None if value.reasoning_policy == "native" else (
             "high" if value.reasoning_policy == "standard" else
             "max" if value.reasoning_policy == "maximum" else value.reasoning_effort
@@ -4165,7 +4203,7 @@ class EvaluationService:
                     requested_effort,
                     int(value.strict_fairness),
                     value.judge_reasoning_effort,
-                    "5.2.3",
+                    "5.2.6",
                     now,
                 ),
             )
@@ -4205,6 +4243,15 @@ class EvaluationService:
                         "agent_provider": settings.get("agent_provider"),
                         "identity_verified": False,
                     }
+                    if runner["runner_type"] == "deepseek_harness":
+                        runtime_identity.update(
+                            {
+                                "requested_agent_mode": participant.get("agent_mode")
+                                or HARNESS_DEFAULT_MODE,
+                                "effective_agent_mode": None,
+                                "agent_mode_verified": False,
+                            }
+                        )
                     for case in cases:
                         connection.execute(
                             "INSERT INTO runs(id,experiment_id,test_case_id,model_id,runner_id,"
@@ -5206,6 +5253,66 @@ class EvaluationService:
                     "effort_verified": condition["verified"],
                 }
             )
+            if runner["runner_type"] == "deepseek_harness":
+                requested_mode = str(
+                    runtime_identity.get("requested_agent_mode") or HARNESS_DEFAULT_MODE
+                )
+                try:
+                    mode_runtime = resolve_harness_mode(
+                        requested_mode, runner.get("executable")
+                    )
+                except HarnessModeUnavailableError as exc:
+                    runtime_identity.update(
+                        {
+                            "requested_agent_mode": requested_mode,
+                            "effective_agent_mode": None,
+                            "agent_mode_verified": False,
+                            "agent_mode_error": str(exc),
+                        }
+                    )
+                    self.database.execute(
+                        "UPDATE runs SET status='environment_unavailable',"
+                        "requested_reasoning_effort=?,effective_reasoning_effort=?,"
+                        "effort_source=?,effort_verified=?,runtime_identity_json=?,"
+                        "error_code='harness_preset_unavailable',error_message=?,"
+                        "failure_class='runtime_environment_failure',"
+                        "telemetry_status='unavailable',attempt_count=0,passed=0,"
+                        "completed_at=? WHERE id=?",
+                        (
+                            condition["requested"],
+                            condition["effective"],
+                            condition["source"],
+                            int(condition["verified"]),
+                            json.dumps(runtime_identity, ensure_ascii=False),
+                            str(exc)[:2000],
+                            utc_now(),
+                            run_id,
+                        ),
+                    )
+                    event_sink(
+                        "run.failed",
+                        {
+                            "code": "harness_preset_unavailable",
+                            "message": str(exc)[:2000],
+                            "attempt_consumed": False,
+                            "phase": "runtime_config",
+                        },
+                    )
+                    return
+                runtime_identity.update(
+                    {
+                        "requested_agent_mode": requested_mode,
+                        "effective_agent_mode": mode_runtime["id"],
+                        "agent_mode_source": mode_runtime["source"],
+                        "agent_mode_sha256": mode_runtime["sha256"],
+                        "agent_mode_tools": mode_runtime["tools_mode"],
+                        "agent_mode_verified": True,
+                        "headless_driver": "agentbench-preset-v1",
+                        "headless_driver_sha256": harness_driver_sha256(),
+                    }
+                )
+                definition.setdefault("metadata", {})["agent_mode"] = mode_runtime["id"]
+                definition["metadata"]["_harness_mode_runtime"] = mode_runtime
             self.database.execute(
                 "UPDATE runs SET requested_reasoning_effort=?,effective_reasoning_effort=?,"
                 "effort_source=?,effort_verified=?,runtime_identity_json=? WHERE id=?",
@@ -5402,6 +5509,7 @@ class EvaluationService:
                         "native_cli_disabled",
                         "model_error",
                         "harness_model_not_active",
+                        "harness_preset_unavailable",
                     }
                     failure_class = self._failure_class(
                         result.error_code, result.error_message, phase="execution"
@@ -5810,6 +5918,7 @@ class EvaluationService:
             "native_cli_disabled",
             "model_error",
             "harness_model_not_active",
+            "harness_preset_unavailable",
             "internal_error",
         }:
             return "runtime_environment_failure"
@@ -5907,16 +6016,17 @@ class EvaluationService:
                 str(model.get("model_name") or ""),
             )
         harness_runtime_root: Path | None = None
-        harness_selection: tuple[str, str, str] | None = None
+        harness_selection: tuple[str, str, str, str, dict[str, Any] | None] | None = None
         if runner["runner_type"] == "deepseek_harness":
-            configured_provider, configured_model, configured_effort = (
+            _configured_provider, _configured_model, configured_effort = (
                 deepseek_harness_default_selection()
             )
-            requested_provider = str(model_settings.get("agent_provider") or configured_provider)
+            requested_provider = str(model_settings.get("agent_provider") or "").strip()
+            requested_model = str(model.get("model_name") or "").strip()
             if (
                 str(model.get("provider") or "") != "deepseek-harness"
-                or str(model.get("model_name") or "") != configured_model
-                or requested_provider != configured_provider
+                or not requested_provider
+                or not requested_model
             ):
                 return AgentResult(
                     False,
@@ -5925,9 +6035,8 @@ class EvaluationService:
                     self._empty_usage(),
                     0,
                     "harness_model_not_active",
-                    "DeepSeek Harness headless 模式使用 settings.yaml 的默认模型身份。"
-                    f"当前默认是 {configured_provider}/{configured_model}；请添加对应的 Harness 模型，"
-                    "或先在 dsh web 中切换默认模型。",
+                    "DeepSeek Harness 模型记录缺少有效的 Provider 或模型身份；"
+                    "请从 Harness 模型目录重新添加后再运行。",
                 )
             permission = str(metadata.get("permission_profile") or "workspace")
             native_environment["DSH_PERMISSION_MODE"] = {
@@ -5937,9 +6046,13 @@ class EvaluationService:
                 "full": "danger-full-access",
             }.get(permission, "workspace-write")
             harness_selection = (
-                configured_provider,
-                configured_model,
+                requested_provider,
+                requested_model,
                 str(metadata.get("reasoning_effort") or configured_effort),
+                str(metadata.get("agent_mode") or HARNESS_DEFAULT_MODE),
+                metadata.get("_harness_mode_runtime")
+                if isinstance(metadata.get("_harness_mode_runtime"), dict)
+                else None,
             )
         native_bridge_root: Path | None = None
         native_session_id = str(metadata.get("native_session_id") or "").strip()
@@ -6129,12 +6242,42 @@ class EvaluationService:
 
         try:
             if harness_selection is not None:
-                harness_provider, harness_model, requested_effort = harness_selection
-                args, harness_runtime_root, actual_effort, effort_profile = (
-                    self._prepare_harness_run_config(
-                        list(args), harness_provider, harness_model, requested_effort
+                (
+                    harness_provider,
+                    harness_model,
+                    requested_effort,
+                    requested_mode,
+                    mode_runtime,
+                ) = harness_selection
+                try:
+                    args, harness_runtime_root, actual_effort, effort_profile, actual_mode = (
+                        self._prepare_harness_run_config(
+                            list(args),
+                            harness_provider,
+                            harness_model,
+                            requested_effort,
+                            requested_mode,
+                            str(executable),
+                            mode_runtime,
+                        )
                     )
+                except HarnessModeUnavailableError as exc:
+                    return AgentResult(
+                        False,
+                        "",
+                        0,
+                        self._empty_usage(),
+                        0,
+                        "harness_preset_unavailable",
+                        str(exc),
+                    )
+                native_environment["AGENTBENCH_DSH_PACKAGE_ROOT"] = str(
+                    actual_mode["_package_root"]
                 )
+                native_environment["DSH_TOOLS_MODE"] = str(actual_mode["tools_mode"])
+                configured_dsh_home = os.getenv("DSH_HOME", "").strip()
+                if configured_dsh_home:
+                    native_environment["DSH_HOME"] = configured_dsh_home
                 event_sink(
                     "live.phase",
                     {
@@ -6147,6 +6290,9 @@ class EvaluationService:
                             f"实际模型 {harness_provider}/{harness_model}；"
                             "本次隔离配置不会修改 Harness 全局设置"
                         ),
+                        "agent_mode": actual_mode["id"],
+                        "agent_mode_name": actual_mode["name"],
+                        "preset_sha256": actual_mode["sha256"],
                         "status": "completed",
                     },
                 )
@@ -6730,10 +6876,28 @@ class EvaluationService:
                     continue
                 file_samples[path] = sample
                 sample_budget -= len(sample)
+            structured_protocol = bool(config.get("scoring_points"))
+            if structured_protocol:
+                rubric_schema = rubric_json_schema(config)
+                judge_instruction = (
+                    "This is a versioned postgraduate-mathematics marking rubric. "
+                    "Evaluate every scoring point independently, including partial credit. "
+                    "Return strict JSON matching RUBRIC_RESPONSE_SCHEMA. Do not add a score "
+                    "field and do not change max_points, rubric_version, or source_tier. "
+                    "The backend will deterministically sum awarded_points; your prose is "
+                    "evidence only. Mark solution_path as new when the derivation is valid "
+                    "but not represented by the reference/alternate paths, and use review_flags "
+                    "for uncertainty or any exceptional case.\n\n"
+                    f"RUBRIC_RESPONSE_SCHEMA:\n{json.dumps(rubric_schema, ensure_ascii=False)}"
+                )
+            else:
+                judge_instruction = (
+                    "This is a legacy rubric. Score the result from 0 to 100 using the rubric. "
+                    "Return strict JSON with keys score, summary, strengths, weaknesses, evidence."
+                )
             prompt = (
-                "You are an anonymous evaluator. The candidate identity is intentionally hidden. "
-                "Score the result from 0 to 100 using the rubric. Return strict JSON with keys "
-                "score, summary, strengths, weaknesses, evidence.\n\n"
+                "You are an anonymous evaluator. The candidate identity is intentionally hidden.\n"
+                f"{judge_instruction}\n\n"
                 f"TASK:\n{definition['instruction']}\n\nRUBRIC:\n{json.dumps(config, ensure_ascii=False)}\n\n"
                 f"FINAL ANSWER:\n{run.get('final_answer') or ''}\n\n"
                 f"WORKSPACE FILE SAMPLES:\n{json.dumps(file_samples, ensure_ascii=False)}"
@@ -6854,7 +7018,27 @@ class EvaluationService:
                         event_sink("run.judging", {"anonymous_slot": anonymous_slot})
                     response_text = invoke(cli_capture)
                     data = self._parse_json_object(response_text)
-                    score = min(100.0, max(0.0, float(data["score"])))
+                    structured_result = None
+                    review_status = "completed"
+                    validation_status = "passed"
+                    if structured_protocol:
+                        structured_result = score_rubric(data, config)
+                        score = structured_result.percentage
+                        review_status = "completed" if structured_result.status == "passed" else "needs_review"
+                        validation_status = "passed" if review_status == "completed" else "needs_review"
+                        data = {
+                            **data,
+                            "computed_score": score,
+                            "rubric_evaluation": structured_result.as_dict(),
+                            "rubric_source": structured_result.evidence.get("rubric_source"),
+                            "rubric_version": structured_result.evidence.get("rubric_version"),
+                            "source_tier": structured_result.evidence.get("source_tier"),
+                            "point_awards": structured_result.point_results,
+                            "review_status": review_status,
+                            "review_reasons": structured_result.review_flags,
+                        }
+                    else:
+                        score = min(100.0, max(0.0, float(data["score"])))
                 except (ModelClientError, ValueError, KeyError, json.JSONDecodeError) as exc:
                     failure_evidence = {
                         "reason": str(exc),
@@ -6866,25 +7050,34 @@ class EvaluationService:
                 data = {**data, "anonymous_slot": anonymous_slot}
                 event_sink(
                     "judge.completed",
-                    {"score": score, "anonymous_slot": anonymous_slot, "evidence": data},
+                    {
+                        "score": score,
+                        "anonymous_slot": anonymous_slot,
+                        "review_status": review_status,
+                        "review_reasons": (
+                            structured_result.review_flags if structured_result else []
+                        ),
+                        "evidence": data,
+                    },
                 )
                 self.database.execute(
                     "INSERT INTO judge_reviews(id,run_id,judge_model_id,judge_runner_id,score,"
                     "status,reasoning_effort,runtime_identity_json,evidence_json,created_at) "
-                    "VALUES (?,?,?,?,?,'completed',?,?,?,?)",
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (
                         new_id(),
                         run["id"],
                         judge_model_id,
                         judge_runner_id,
                         score,
+                        review_status,
                         judge_condition["effective"],
                         json.dumps(judge_runtime_identity, ensure_ascii=False),
                         json.dumps(data, ensure_ascii=False),
                         utc_now(),
                     ),
                 )
-                return ValidationResult("ai_rubric", weight, score, "passed", data)
+                return ValidationResult("ai_rubric", weight, score, validation_status, data)
             return ValidationResult("ai_rubric", weight, 0, "needs_review", failure_evidence)
 
         return callback
@@ -6951,6 +7144,11 @@ class EvaluationService:
                     "needs_review",
                     {
                         "reason": "Secondary anonymous judge did not return a valid review",
+                        "review_status": "needs_review",
+                        "review_reasons": ["secondary_judge_invalid"],
+                        "rubric_source": config.get("rubric_source"),
+                        "rubric_version": config.get("rubric_version"),
+                        "source_tier": config.get("source_tier"),
                         "reviews": [first.evidence, second.evidence],
                     },
                 )
@@ -6973,6 +7171,11 @@ class EvaluationService:
                         "needs_review",
                         {
                             "reason": "Anonymous judge disagreement exceeds threshold",
+                            "review_status": "needs_review",
+                            "review_reasons": ["judge_disagreement"],
+                            "rubric_source": config.get("rubric_source"),
+                            "rubric_version": config.get("rubric_version"),
+                            "source_tier": config.get("source_tier"),
                             "difference": round(difference, 2),
                             "threshold": disagreement_threshold,
                             "reviews": [item.evidence for item in reviews],
@@ -6987,17 +7190,73 @@ class EvaluationService:
                         "needs_review",
                         {
                             "reason": "Tiebreaker judge did not return a valid review",
+                            "review_status": "needs_review",
+                            "review_reasons": ["tiebreaker_judge_invalid"],
+                            "rubric_source": config.get("rubric_source"),
+                            "rubric_version": config.get("rubric_version"),
+                            "source_tier": config.get("source_tier"),
                             "reviews": [first.evidence, second.evidence, third.evidence],
                         },
                     )
                 reviews.append(third)
-            consensus_score = statistics.median(item.score for item in reviews)
+            point_sets = [
+                item.evidence.get("point_awards")
+                for item in reviews
+                if isinstance(item.evidence, dict)
+                and isinstance(item.evidence.get("point_awards"), list)
+            ]
+            consensus_points: list[dict[str, Any]] = []
+            if config.get("scoring_points") and len(point_sets) == len(reviews):
+                for point in config["scoring_points"]:
+                    point_id = str(point["point_id"])
+                    candidates = [
+                        next(
+                            (entry for entry in point_set if entry.get("point_id") == point_id),
+                            None,
+                        )
+                        for point_set in point_sets
+                    ]
+                    if all(isinstance(entry, dict) for entry in candidates):
+                        awarded = statistics.median(
+                            float(entry.get("awarded_points", 0)) for entry in candidates
+                        )
+                        consensus_points.append(
+                            {
+                                **candidates[0],
+                                "awarded_points": round(awarded, 6),
+                                "judge_awards": [
+                                    float(entry.get("awarded_points", 0)) for entry in candidates
+                                ],
+                            }
+                        )
+                max_total = sum(float(point["max_points"]) for point in config["scoring_points"])
+                consensus_score = (
+                    sum(float(point["awarded_points"]) for point in consensus_points)
+                    / max_total
+                    * 100
+                    if max_total and len(consensus_points) == len(config["scoring_points"])
+                    else statistics.median(item.score for item in reviews)
+                )
+            else:
+                consensus_score = statistics.median(item.score for item in reviews)
             evidence = {
                 "summary": "Anonymous multi-judge consensus",
                 "judge_count": len(reviews),
                 "scores": [round(item.score, 2) for item in reviews],
                 "spread": round(max(item.score for item in reviews) - min(item.score for item in reviews), 2),
                 "disagreement_threshold": disagreement_threshold,
+                "rubric_source": config.get("rubric_source"),
+                "rubric_version": config.get("rubric_version"),
+                "source_tier": config.get("source_tier"),
+                "review_status": "completed",
+                "review_reasons": [],
+                "consensus_method": (
+                    "per_point_median_then_deterministic_sum"
+                    if consensus_points
+                    else "median_question_score"
+                ),
+                "point_awards": consensus_points,
+                "point_awards_by_judge": point_sets,
                 "reviews": [item.evidence for item in reviews],
             }
             event_sink(
