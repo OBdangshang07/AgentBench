@@ -42,6 +42,7 @@ KIMI_RUNNER_ID = stable_id("runner", "kimi-code-cli")
 QODER_RUNNER_ID = stable_id("runner", "qoder-cli")
 CURSOR_RUNNER_ID = stable_id("runner", "cursor-cli")
 DEEPSEEK_HARNESS_RUNNER_ID = stable_id("runner", "deepseek-harness")
+ZCODE_RUNNER_ID = stable_id("runner", "zcode-cli")
 FULL_SUITE_ID = stable_id("suite", "v1-full")
 SMOKE_SUITE_ID = stable_id("suite", "v1-smoke")
 V2_FULL_SUITE_ID = stable_id("suite", "v2-full")
@@ -3069,6 +3070,26 @@ def seed_builtin_data(database: Database) -> None:
             "",
             ["native-cli", "filesystem", "shell"],
             False,
+        ),
+        (
+            ZCODE_RUNNER_ID,
+            "ZCode Agent",
+            "zcode_cli",
+            "zcode",
+            [
+                "{zcode_cli}",
+                "--json",
+                "--cwd",
+                "{workspace}",
+                "--mode",
+                "edit",
+                "--no-color",
+                "--prompt",
+                "{prompt}",
+            ],
+            "",
+            ["native-cli", "filesystem", "shell"],
+            True,
         ),
         (
             CUSTOM_RUNNER_ID,

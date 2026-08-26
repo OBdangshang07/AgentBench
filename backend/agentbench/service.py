@@ -38,6 +38,7 @@ from .execution import (
     native_cli_status,
     resolve_cli_install_plan,
     run_native_cli,
+    zcode_desktop_runtime,
 )
 from .harness_modes import (
     HARNESS_DEFAULT_MODE,
@@ -309,6 +310,7 @@ def runner_adapter_capabilities(runner_type: str, tools: list[str]) -> dict[str,
         "gemini_cli",
         "kimi_code_cli",
         "cursor_cli",
+        "zcode_cli",
     }
     maximum_condition = benchmark_reasoning_condition(runner_type, "maximum", "max")
     return {
@@ -437,6 +439,14 @@ def benchmark_reasoning_condition(
         effective, _ = _harness_reasoning_effort(requested)
         source = "mapped" if effective != requested else "direct"
         note = f"Harness 实际使用 {effective.upper()} 档"
+    elif runner_type == "zcode_cli":
+        effective = {
+            "medium": "high",
+            "xhigh": "max",
+        }.get(requested, requested)
+        source = "mapped" if effective != requested else "direct"
+        verified = False
+        note = "ZCode 将按所选模型公开的 LOW / HIGH / MAX Variant 在隔离配置中应用"
     elif runner_type == "qoder_cli" and requested in {"xhigh", "max"}:
         effective, source, note = "high", "capped", "Qoder 当前最高可验证档位为 High"
     elif runner_type == "kimi_code_cli":
@@ -2335,7 +2345,98 @@ class EvaluationService:
                 path = str(attachment.get("absolute_path") or "").strip()
                 if path:
                     configured[-1] = f"{configured[-1]}\n\nAttached file: {path}"
+        elif runner_type == "zcode_cli":
+            configured = cls._remove_cli_flags(configured, "--permission-mode")
+            zcode_mode = {
+                "readonly": "plan",
+                "workspace": "edit",
+                "standard": "build",
+                "full": "yolo",
+            }.get(permission_profile, "edit")
+            cls._replace_cli_option(configured, "--mode", zcode_mode)
+            for attachment in attachments:
+                path = str(attachment.get("absolute_path") or "").strip()
+                if path:
+                    prompt_index = (
+                        configured.index("{prompt}")
+                        if "{prompt}" in configured
+                        else len(configured)
+                    )
+                    configured[prompt_index:prompt_index] = ["--attach", path]
         return configured
+
+    def _prepare_zcode_run_config(
+        self,
+        provider_id: str,
+        model_id: str,
+        requested_effort: str | None,
+    ) -> tuple[Path, str, str]:
+        """Create a credential-containing, per-run ZCode home and remove it after use."""
+        runtime = zcode_desktop_runtime()
+        if not runtime:
+            raise RuntimeError("zcode_runtime_not_found")
+        source_path = Path(runtime["desktop_config"])
+        if not source_path.is_file() or source_path.stat().st_size > 5_000_000:
+            raise RuntimeError("zcode_desktop_config_missing")
+        try:
+            source = json.loads(source_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("zcode_desktop_config_invalid") from exc
+        providers = source.get("provider") if isinstance(source, dict) else None
+        selected_provider = (
+            providers.get(provider_id) if isinstance(providers, dict) else None
+        )
+        if not isinstance(selected_provider, dict) or selected_provider.get("enabled") is False:
+            raise RuntimeError("zcode_provider_not_available")
+        provider_models = selected_provider.get("models")
+        selected_model = (
+            provider_models.get(model_id) if isinstance(provider_models, dict) else None
+        )
+        if not isinstance(selected_model, dict):
+            raise RuntimeError("zcode_model_not_available")
+
+        model_config = copy.deepcopy(selected_model)
+        reasoning = (
+            model_config.get("reasoning")
+            if isinstance(model_config.get("reasoning"), dict)
+            else None
+        )
+        actual_effort = "native"
+        if reasoning is not None:
+            variants = [
+                str(item).strip().lower()
+                for item in reasoning.get("variants") or []
+                if str(item).strip()
+            ]
+            requested = str(requested_effort or "high").strip().lower()
+            mapped = {"medium": "high", "xhigh": "max"}.get(requested, requested)
+            if mapped in variants:
+                reasoning["defaultVariant"] = mapped
+                actual_effort = mapped
+            elif str(reasoning.get("defaultVariant") or "").lower() in variants:
+                actual_effort = str(reasoning["defaultVariant"]).lower()
+
+        provider_config = copy.deepcopy(selected_provider)
+        provider_config["models"] = {model_id: model_config}
+        isolated = {
+            "provider": {provider_id: provider_config},
+            "model": {
+                "main": f"{provider_id}/{model_id}",
+                "lite": f"{provider_id}/{model_id}",
+            },
+        }
+        runtime_base = (self.settings.data_dir / "native-runtime" / "zcode").resolve()
+        runtime_root = (runtime_base / uuid.uuid4().hex).resolve()
+        if not runtime_root.is_relative_to(runtime_base):
+            raise RuntimeError("zcode_runtime_path_invalid")
+        config_path = runtime_root / ".zcode" / "cli" / "config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=False)
+        config_path.write_text(
+            json.dumps(isolated, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        with suppress(OSError):
+            config_path.chmod(0o600)
+        return runtime_root, actual_effort, str(runtime["script"])
 
     def _prepare_harness_run_config(
         self,
@@ -6054,6 +6155,66 @@ class EvaluationService:
                 if isinstance(metadata.get("_harness_mode_runtime"), dict)
                 else None,
             )
+        zcode_runtime_root: Path | None = None
+        zcode_cli_script = ""
+        if runner["runner_type"] == "zcode_cli":
+            requested_provider = str(model_settings.get("agent_provider") or "").strip()
+            requested_model = str(model.get("model_name") or "").strip()
+            if (
+                str(model.get("provider") or "") != "zcode-cli"
+                or not requested_provider
+                or not requested_model
+            ):
+                return AgentResult(
+                    False,
+                    "",
+                    0,
+                    self._empty_usage(),
+                    0,
+                    "zcode_model_not_active",
+                    "ZCode 模型记录缺少有效的 Provider 或模型身份；"
+                    "请从 ZCode Agent 模型目录重新添加后再运行。",
+                )
+            try:
+                zcode_runtime_root, actual_zcode_effort, zcode_cli_script = (
+                    self._prepare_zcode_run_config(
+                        requested_provider,
+                        requested_model,
+                        str(metadata.get("reasoning_effort") or "high"),
+                    )
+                )
+            except RuntimeError as exc:
+                return AgentResult(
+                    False,
+                    "",
+                    0,
+                    self._empty_usage(),
+                    0,
+                    str(exc),
+                    "ZCode Desktop 的运行时、Provider 或模型配置当前不可用；"
+                    "请先在 ZCode 中完成登录与模型配置。",
+                )
+            native_environment.update(
+                {
+                    "ELECTRON_RUN_AS_NODE": "1",
+                    "USERPROFILE": str(zcode_runtime_root),
+                    "HOME": str(zcode_runtime_root),
+                }
+            )
+            event_sink(
+                "live.phase",
+                {
+                    "runner_type": "zcode_cli",
+                    "phase": "runtime_config",
+                    "summary": "ZCode 已应用隔离的模型与权限配置",
+                    "detail": (
+                        f"实际模型 {requested_provider}/{requested_model}；"
+                        f"推理 Variant {actual_zcode_effort.upper()}；"
+                        "不会改写 ZCode Desktop 全局设置"
+                    ),
+                    "status": "completed",
+                },
+            )
         native_bridge_root: Path | None = None
         native_session_id = str(metadata.get("native_session_id") or "").strip()
         if metadata.get("studio_session"):
@@ -6110,6 +6271,7 @@ class EvaluationService:
             "model_name": model["model_name"],
             "prompt": prompt,
             "workspace": str(workspace.root),
+            "zcode_cli": zcode_cli_script,
         }
         event_sink(
             "native_cli.started", {"runner_type": runner["runner_type"], "executable": executable}
@@ -6120,6 +6282,7 @@ class EvaluationService:
         live_text_stream = 0
         live_text_last_emit = 0.0
         live_text_last_length = 0
+        zcode_live_final_seen = False
 
         def workspace_state() -> dict[str, tuple[int, int]]:
             return _live_workspace_state(workspace.root)
@@ -6129,6 +6292,7 @@ class EvaluationService:
         def line_callback(stream_name: str, line: str) -> None:
             nonlocal live_line_count, live_text_buffer, live_text_stream
             nonlocal live_text_last_emit, live_text_last_length
+            nonlocal zcode_live_final_seen
             with live_lock:
                 live_line_count += 1
                 line_no = live_line_count
@@ -6167,6 +6331,8 @@ class EvaluationService:
                     )
                 return
             if event_type == "live.message":
+                if runner["runner_type"] == "zcode_cli":
+                    zcode_live_final_seen = True
                 text_value = str(payload.get("text") or "").strip()
                 with live_lock:
                     stream_id = f"native-message-{live_text_stream}"
@@ -6324,6 +6490,13 @@ class EvaluationService:
                 heartbeat_callback=heartbeat_callback,
             )
         finally:
+            if zcode_runtime_root is not None:
+                expected_zcode_root = (
+                    self.settings.data_dir / "native-runtime" / "zcode"
+                ).resolve()
+                resolved_zcode_root = zcode_runtime_root.resolve()
+                if resolved_zcode_root.is_relative_to(expected_zcode_root):
+                    shutil.rmtree(resolved_zcode_root, ignore_errors=True)
             if native_bridge_root is not None:
                 expected_root = (self.settings.data_dir / "native-bridges").resolve()
                 resolved_bridge_root = native_bridge_root.resolve()
@@ -6355,6 +6528,21 @@ class EvaluationService:
         final_answer, input_tokens, output_tokens, reported_cost, event_count = self._parse_native_output(
             runner["runner_type"], command_result.stdout, None
         )
+        if (
+            runner["runner_type"] == "zcode_cli"
+            and final_answer
+            and not zcode_live_final_seen
+        ):
+            event_sink(
+                "live.message",
+                {
+                    "runner_type": "zcode_cli",
+                    "stream": "stdout",
+                    "stream_id": f"native-message-{live_text_stream}",
+                    "text": _redact_viewer_text(final_answer, 6000),
+                    "status": "completed",
+                },
+            )
         usage = self._empty_usage()
         usage.input_tokens = input_tokens
         usage.output_tokens = output_tokens
@@ -6379,21 +6567,26 @@ class EvaluationService:
     @staticmethod
     def _extract_native_session_id(stdout: str) -> str | None:
         keys = ("session_id", "sessionId", "thread_id", "threadId", "conversation_id")
-        for line in stdout.splitlines():
-            with suppress(json.JSONDecodeError):
-                item = json.loads(line)
-                if not isinstance(item, dict):
-                    continue
-                sources = [item]
-                for name in ("item", "session", "thread", "result"):
-                    nested = item.get(name)
-                    if isinstance(nested, dict):
-                        sources.append(nested)
-                for source in sources:
-                    for key in keys:
-                        value = source.get(key)
-                        if isinstance(value, str) and 4 <= len(value) <= 240:
-                            return value
+        items: list[Any] = []
+        with suppress(json.JSONDecodeError):
+            items.append(json.loads(stdout))
+        if not items:
+            for line in stdout.splitlines():
+                with suppress(json.JSONDecodeError):
+                    items.append(json.loads(line))
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            sources = [item]
+            for name in ("item", "session", "thread", "result"):
+                nested = item.get(name)
+                if isinstance(nested, dict):
+                    sources.append(nested)
+            for source in sources:
+                for key in keys:
+                    value = source.get(key)
+                    if isinstance(value, str) and 4 <= len(value) <= 240:
+                        return value
         return None
 
     @staticmethod
@@ -6477,6 +6670,13 @@ class EvaluationService:
         )
         if isinstance(usage, dict) and usage:
             base["usage"] = EvaluationService._native_usage_values(usage)
+
+        if runner_type == "zcode_cli" and isinstance(item.get("response"), str):
+            return "live.message", {
+                **base,
+                "text": item["response"].strip(),
+                "status": "completed",
+            }
 
         def first_value(*names: str) -> Any:
             for source in sources:
@@ -6643,18 +6843,18 @@ class EvaluationService:
             return 0.0
 
         output_tokens = integer(
-            "output_tokens", "output", "completion_tokens", "completionTokens"
+            "output_tokens", "outputTokens", "output", "completion_tokens", "completionTokens"
         )
         if not any(
             name in usage
-            for name in ("output_tokens", "completion_tokens", "completionTokens")
+            for name in ("output_tokens", "outputTokens", "completion_tokens", "completionTokens")
         ):
             # OpenCode reports visible output and reasoning separately, while Reasonix's
             # completionTokens already includes its reasoningTokens.
             output_tokens += integer("reasoning", "reasoning_tokens", "reasoningTokens")
         return {
             "input_tokens": integer(
-                "input_tokens", "input", "prompt_tokens", "promptTokens"
+                "input_tokens", "inputTokens", "input", "prompt_tokens", "promptTokens"
             ),
             "output_tokens": output_tokens,
             "cost_usd": number("cost_usd", "costUSD", "costUsd", "cost"),
@@ -6685,12 +6885,17 @@ class EvaluationService:
         reported_cost: float | None = None
         cursor_deltas = ""
         count = 0
-        for raw_line in output.splitlines():
-            if not raw_line.strip():
-                continue
-            try:
-                item = json.loads(raw_line)
-            except json.JSONDecodeError:
+        parsed_items: list[Any] = []
+        with suppress(json.JSONDecodeError):
+            parsed_items.append(json.loads(output))
+        if not parsed_items:
+            for raw_line in output.splitlines():
+                if not raw_line.strip():
+                    continue
+                with suppress(json.JSONDecodeError):
+                    parsed_items.append(json.loads(raw_line))
+        for item in parsed_items:
+            if not isinstance(item, dict):
                 continue
             count += 1
             if event_sink is not None:
@@ -6709,7 +6914,9 @@ class EvaluationService:
             if isinstance(part, dict) and part.get("type") in {"text", "assistant_text"}:
                 final = str(part.get("text") or part.get("content") or final)
             response = item.get("response") or {}
-            if isinstance(response, dict):
+            if isinstance(response, str):
+                final = response
+            elif isinstance(response, dict):
                 final = str(response.get("output_text") or response.get("text") or final)
             message = item.get("message") or {}
             blocks = message.get("content") if isinstance(message, dict) else None
@@ -6759,6 +6966,9 @@ class EvaluationService:
             if raw_cost is not None:
                 with suppress(TypeError, ValueError):
                     reported_cost = max(reported_cost or 0.0, float(raw_cost))
+            if runner_type == "zcode_cli":
+                with suppress(TypeError, ValueError):
+                    count = max(count, int(item.get("eventCount") or 0))
         return final or cursor_deltas, input_tokens, output_tokens, reported_cost, count
 
     def _model_client(self, model: dict[str, Any], metadata: dict[str, Any]) -> ModelClient:

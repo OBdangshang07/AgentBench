@@ -28,7 +28,8 @@ export type ModelSource =
   | "kimi-code"
   | "qoder-cli"
   | "cursor-cli"
-  | "deepseek-harness";
+  | "deepseek-harness"
+  | "zcode-cli";
 
 export interface DiscoveredModel {
   id: string;
@@ -86,6 +87,7 @@ export interface Runner {
     | "qoder_cli"
     | "cursor_cli"
     | "deepseek_harness"
+    | "zcode_cli"
     | "command";
   executable?: string;
   args: string[];

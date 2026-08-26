@@ -18,6 +18,7 @@ const runnerMeta: Record<Runner["runner_type"], { label: string; description: st
   qoder_cli: { label: "原生编码 Agent", description: "通过 Qoder 国内版非交互 CLI（qoderclicn）执行；仅安装桌面 IDE 时会明确提示缺少自动评测 CLI。" },
   cursor_cli: { label: "原生编码 Agent", description: "通过 Cursor Agent CLI 的无头模式执行任务，支持账号模型目录、流式轨迹和原生会话恢复。" },
   deepseek_harness: { label: "DeepSeek Agent Harness", description: "通过 DeepSeek Harness headless Profile 执行；模型读取 Harness 默认项，推理档位由 AgentBench 按任务隔离覆盖，当前为 Developer Preview。" },
+  zcode_cli: { label: "智谱编码 Agent", description: "直接调用官方 ZCode Desktop 内置无头运行时；按任务隔离 Provider、模型、推理档位与权限配置。" },
   command: { label: "兼容适配器", description: "使用参数数组接入任意非交互 CLI，不经过 Shell 字符串拼接。" },
 };
 
@@ -38,6 +39,7 @@ const modelSources: Array<{
   { value: "qoder-cli", label: "Qoder", description: "识别 Qoder 国内版非交互 CLI（qoderclicn）；桌面版不会被误当成 CLI", runnerType: "qoder_cli" },
   { value: "cursor-cli", label: "Cursor Agent", description: "调用 Cursor 账号模型目录，支持官方 CLI 快捷安装", runnerType: "cursor_cli" },
   { value: "deepseek-harness", label: "DeepSeek Harness", description: "读取默认模型、Provider 与真实推理档位；运行时可选快速 / 标准 / 极限", runnerType: "deepseek_harness" },
+  { value: "zcode-cli", label: "ZCode Agent", description: "读取官方 ZCode Desktop 模型目录；运行时使用隔离配置，不改写桌面端设置", runnerType: "zcode_cli" },
 ];
 
 function discoveryValue(model: DiscoveredModel): string {

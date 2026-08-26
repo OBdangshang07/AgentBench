@@ -323,6 +323,23 @@ CLI_INSTALL_RECIPES: dict[str, dict[str, Any]] = {
         "command": "npm install -g @deepseek-ai/dsh",
         "source": "npm 官方包 · @deepseek-ai/dsh（Developer Preview）",
     },
+    "zcode_cli": {
+        "manager": "winget",
+        "manager_candidates": ["winget.exe", "winget"],
+        "args": [
+            "install",
+            "--id",
+            "ZhipuAI.ZCode",
+            "--exact",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+        ],
+        "command": (
+            "winget install --id ZhipuAI.ZCode --exact "
+            "--accept-package-agreements --accept-source-agreements"
+        ),
+        "source": "Windows Package Manager · 智谱 ZCode 官方桌面客户端",
+    },
 }
 
 MANUAL_INSTALL_GUIDANCE = {
@@ -340,6 +357,7 @@ INSTALL_COMMAND_BY_EXECUTABLE = {
     "qoderclicn": CLI_INSTALL_RECIPES["qoder_cli"]["command"],
     "agent": CLI_INSTALL_RECIPES["cursor_cli"]["command"],
     "dsh": CLI_INSTALL_RECIPES["deepseek_harness"]["command"],
+    "zcode": CLI_INSTALL_RECIPES["zcode_cli"]["command"],
 }
 
 
@@ -429,6 +447,29 @@ def _qoder_desktop_path() -> Path | None:
     return next((item for item in candidates if item and item.is_file()), None)
 
 
+def zcode_desktop_runtime() -> dict[str, str] | None:
+    """Locate the official headless runtime bundled with ZCode Desktop."""
+    local_app_data = os.getenv("LOCALAPPDATA")
+    program_files = os.getenv("PROGRAMFILES")
+    candidates = [
+        Path(local_app_data) / "Programs" / "ZCode" if local_app_data else None,
+        Path(program_files) / "ZCode" if program_files else None,
+    ]
+    for root in candidates:
+        if root is None:
+            continue
+        executable = root / "ZCode.exe"
+        script = root / "resources" / "glm" / "zcode.cjs"
+        if executable.is_file() and script.is_file():
+            desktop_config = Path.home() / ".zcode" / "v2" / "config.json"
+            return {
+                "executable": str(executable),
+                "script": str(script),
+                "desktop_config": str(desktop_config),
+            }
+    return None
+
+
 def _codex_desktop_context(result: dict[str, Any]) -> dict[str, Any]:
     """Explain the common Windows Desktop-alias/standalone-CLI split honestly."""
     configured_home = os.getenv("CODEX_HOME")
@@ -483,6 +524,10 @@ def _native_cli_candidates(executable: str | None) -> list[str]:
     """
     if not executable:
         return []
+
+    if _executable_name(executable) == "zcode":
+        runtime = zcode_desktop_runtime()
+        return [runtime["executable"]] if runtime else []
 
     raw = Path(executable)
     explicit_path = raw.is_absolute() or bool(raw.drive) or raw.parent != Path(".")
@@ -582,9 +627,22 @@ def native_cli_status(executable: str | None) -> dict[str, Any]:
 
     last_failure: dict[str, Any] | None = None
     for resolved in candidates:
+        version_args = [resolved, "--version"]
+        version_env = None
+        if _executable_name(executable) == "zcode":
+            runtime = zcode_desktop_runtime()
+            if not runtime:
+                continue
+            version_args = [resolved, runtime["script"], "--version"]
+            version_env = {**os.environ, "ELECTRON_RUN_AS_NODE": "1"}
         try:
             result = subprocess.run(
-                [resolved, "--version"], capture_output=True, text=True, timeout=5, check=False
+                version_args,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+                env=version_env,
             )
         except OSError as exc:
             last_failure = {
@@ -639,6 +697,16 @@ def native_cli_status(executable: str | None) -> dict[str, Any]:
                 "version": version or None,
                 "error": None,
             }
+            if _executable_name(executable) == "zcode":
+                runtime = zcode_desktop_runtime() or {}
+                status.update(
+                    {
+                        "desktop_installed": True,
+                        "desktop_executable": resolved,
+                        "runtime_script": runtime.get("script"),
+                        "config_path": runtime.get("desktop_config"),
+                    }
+                )
             if _executable_name(executable) == "reasonix" and "\\_npx\\" in resolved.lower():
                 status.update(
                     {

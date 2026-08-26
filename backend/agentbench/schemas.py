@@ -20,7 +20,7 @@ class ModelCreate(BaseModel):
     api_style: Literal["openai", "anthropic", "mock"] = "openai"
     api_key: str | None = Field(default=None, repr=False)
     agent_provider: str | None = Field(
-        default=None, max_length=100, pattern=r"^[A-Za-z0-9._-]+$"
+        default=None, max_length=100, pattern=r"^[A-Za-z0-9._:-]+$"
     )
     temperature: float = Field(default=0, ge=0, le=2)
     max_tokens: int = Field(default=4096, ge=64, le=200000)
@@ -41,6 +41,7 @@ class ModelDiscoveryRequest(BaseModel):
         "qoder-cli",
         "cursor-cli",
         "deepseek-harness",
+        "zcode-cli",
     ] = "api"
     provider: str = Field(default="openai-compatible", min_length=1, max_length=100)
     base_url: HttpUrl | None = None
@@ -73,6 +74,7 @@ class RunnerCreate(BaseModel):
         "qoder_cli",
         "cursor_cli",
         "deepseek_harness",
+        "zcode_cli",
         "command",
     ]
     executable: str | None = None

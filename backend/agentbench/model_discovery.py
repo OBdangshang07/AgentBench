@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 import httpx
 import yaml
 
-from .execution import native_cli_status
+from .execution import native_cli_status, zcode_desktop_runtime
 
 SOURCE_META: dict[str, tuple[str, str | None]] = {
     "api": ("API 接口", None),
@@ -28,6 +28,7 @@ SOURCE_META: dict[str, tuple[str, str | None]] = {
     "qoder-cli": ("Qoder", "qoderclicn"),
     "cursor-cli": ("Cursor Agent", "agent"),
     "deepseek-harness": ("DeepSeek Harness", "dsh"),
+    "zcode-cli": ("ZCode Agent", "zcode"),
 }
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -167,6 +168,81 @@ def _discover_deepseek_harness() -> tuple[list[dict[str, Any]], list[dict[str, A
         "不会改写 Harness 全局设置。"
     )
     return models, providers, warnings
+
+
+def _discover_zcode() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """Read ZCode Desktop's public model catalog without exposing provider secrets."""
+    runtime = zcode_desktop_runtime()
+    if not runtime:
+        return [], [], ["本机尚未检测到官方 ZCode Desktop 运行时"]
+    config_path = Path(runtime["desktop_config"])
+    config = _read_json(config_path)
+    if not isinstance(config, dict):
+        return [], [], [
+            f"尚未找到可解析的 ZCode Desktop 模型配置：{config_path}"
+        ]
+    raw_providers = config.get("provider")
+    if not isinstance(raw_providers, dict):
+        return [], [], ["ZCode Desktop 配置中没有可识别的 Provider 目录"]
+
+    providers: list[dict[str, Any]] = []
+    models: list[dict[str, Any]] = []
+    default_provider = ""
+    default_model = ""
+    for provider_id, raw_provider in raw_providers.items():
+        if not isinstance(raw_provider, dict) or raw_provider.get("enabled") is False:
+            continue
+        provider_key = str(provider_id).strip()
+        if not provider_key:
+            continue
+        raw_models = raw_provider.get("models")
+        if not isinstance(raw_models, dict) or not raw_models:
+            continue
+        provider_label = str(raw_provider.get("name") or provider_key).strip()
+        ranked: list[tuple[int, str, dict[str, Any]]] = []
+        for model_id, raw_model in raw_models.items():
+            model_key = str(model_id).strip()
+            if not model_key:
+                continue
+            details = raw_model if isinstance(raw_model, dict) else {}
+            zcode_meta = details.get("zcode") if isinstance(details.get("zcode"), dict) else {}
+            with suppress(TypeError, ValueError):
+                priority = int(zcode_meta.get("priority") or 0)
+                ranked.append((priority, model_key, details))
+                continue
+            ranked.append((0, model_key, details))
+        if not ranked:
+            continue
+        ranked.sort(key=lambda item: (-item[0], item[1].lower()))
+        if not default_provider:
+            default_provider, default_model = provider_key, ranked[0][1]
+        providers.append(
+            {
+                "id": provider_key,
+                "label": provider_label,
+                "is_default": provider_key == default_provider,
+            }
+        )
+        for _priority, model_key, details in ranked:
+            models.append(
+                _model_option(
+                    model_key,
+                    label=str(details.get("name") or model_key),
+                    provider_id=provider_key,
+                    provider_label=provider_label,
+                    source="ZCode Desktop 本机模型目录",
+                    configured=True,
+                    is_default=(
+                        provider_key == default_provider and model_key == default_model
+                    ),
+                )
+            )
+    if not models:
+        return [], [], ["ZCode Desktop 当前没有已启用且可评测的模型"]
+    return models, providers, [
+        "模型与 Provider 来自 ZCode Desktop 本机配置；API Key 不会返回前端。"
+        "AgentBench 每次运行使用隔离配置，不改写 ZCode 全局设置。"
+    ]
 
 
 def deepseek_harness_default_selection() -> tuple[str, str, str]:
@@ -931,6 +1007,8 @@ def discover_models(
         models, warnings = _discover_cursor(capability.get("executable"))
     elif source == "deepseek-harness":
         models, providers, warnings = _discover_deepseek_harness()
+    elif source == "zcode-cli":
+        models, providers, warnings = _discover_zcode()
     else:
         models = []
         warnings = [f"{source_label} 当前未提供稳定的模型目录命令，请手动输入模型 ID"]
