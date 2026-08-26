@@ -187,6 +187,7 @@ def _discover_zcode() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[
 
     providers: list[dict[str, Any]] = []
     models: list[dict[str, Any]] = []
+    unavailable_providers: list[str] = []
     default_provider = ""
     default_model = ""
     for provider_id, raw_provider in raw_providers.items():
@@ -194,6 +195,18 @@ def _discover_zcode() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[
             continue
         provider_key = str(provider_id).strip()
         if not provider_key:
+            continue
+        provider_options = (
+            raw_provider.get("options")
+            if isinstance(raw_provider.get("options"), dict)
+            else {}
+        )
+        if provider_options.get("apiKeyRequired") is True and not str(
+            provider_options.get("apiKey") or ""
+        ).strip():
+            unavailable_providers.append(
+                str(raw_provider.get("name") or provider_key).strip()
+            )
             continue
         raw_models = raw_provider.get("models")
         if not isinstance(raw_models, dict) or not raw_models:
@@ -238,11 +251,23 @@ def _discover_zcode() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[
                 )
             )
     if not models:
-        return [], [], ["ZCode Desktop 当前没有已启用且可评测的模型"]
-    return models, providers, [
+        warnings = ["ZCode Desktop 当前没有已启用且可评测的模型"]
+        if unavailable_providers:
+            warnings.append(
+                "以下 ZCode Provider 尚未完成凭据登录，已从可评测目录排除："
+                + "、".join(unavailable_providers)
+            )
+        return [], [], warnings
+    warnings = [
         "模型与 Provider 来自 ZCode Desktop 本机配置；API Key 不会返回前端。"
         "AgentBench 每次运行使用隔离配置，不改写 ZCode 全局设置。"
     ]
+    if unavailable_providers:
+        warnings.append(
+            "以下 ZCode Provider 尚未完成凭据登录，已从可评测目录排除："
+            + "、".join(unavailable_providers)
+        )
+    return models, providers, warnings
 
 
 def deepseek_harness_default_selection() -> tuple[str, str, str]:

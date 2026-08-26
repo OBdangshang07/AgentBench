@@ -5,8 +5,10 @@ import threading
 from pathlib import Path
 from subprocess import CompletedProcess
 
+from agentbench.agent import AgentResult
 from agentbench.execution import CommandResult, Workspace, native_cli_status
 from agentbench.model_discovery import discover_models
+from agentbench.schemas import ModelCreate
 from agentbench.service import EvaluationService, runner_adapter_capabilities
 
 
@@ -95,6 +97,38 @@ def test_zcode_discovery_reads_catalog_without_exposing_keys(monkeypatch, tmp_pa
     assert "OTHER-SECRET" not in json.dumps(result)
 
 
+def test_zcode_discovery_excludes_provider_missing_required_credentials(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config = tmp_path / "config.json"
+    provider = _desktop_config()["provider"]["builtin:zai"]
+    provider["name"] = "Z.ai - Coding Plan"
+    provider["options"]["apiKey"] = ""
+    provider["options"]["apiKeyRequired"] = True
+    config.write_text(
+        json.dumps({"provider": {"builtin:zai-coding-plan": provider}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "agentbench.model_discovery.zcode_desktop_runtime",
+        lambda: {
+            "executable": "ZCode.exe",
+            "script": "zcode.cjs",
+            "desktop_config": str(config),
+        },
+    )
+    monkeypatch.setattr(
+        "agentbench.model_discovery.native_cli_status",
+        lambda _name: {"installed": True, "executable": "ZCode.exe", "version": "0.16.3"},
+    )
+
+    result = discover_models(source="zcode-cli")
+
+    assert result["models"] == []
+    assert result["providers"] == []
+    assert any("尚未完成凭据登录" in warning for warning in result["warnings"])
+
+
 def test_zcode_run_config_is_isolated_and_maps_reasoning(settings, tmp_path, monkeypatch) -> None:
     source = tmp_path / "desktop-config.json"
     original = json.dumps(_desktop_config())
@@ -127,6 +161,40 @@ def test_zcode_run_config_is_isolated_and_maps_reasoning(settings, tmp_path, mon
             == "max"
         )
         assert source.read_text(encoding="utf-8") == original
+    finally:
+        service.close()
+
+
+def test_zcode_run_config_explicitly_enables_implicit_desktop_provider(
+    settings, tmp_path, monkeypatch
+) -> None:
+    provider = _desktop_config()["provider"]["builtin:zai"]
+    provider.pop("enabled")
+    source = tmp_path / "desktop-config.json"
+    source.write_text(
+        json.dumps({"provider": {"builtin:zai-coding-plan": provider}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "agentbench.service.zcode_desktop_runtime",
+        lambda: {
+            "executable": "ZCode.exe",
+            "script": "zcode.cjs",
+            "desktop_config": str(source),
+        },
+    )
+    service = EvaluationService(settings)
+    try:
+        runtime_root, _effort, _script = service._prepare_zcode_run_config(
+            "builtin:zai-coding-plan", "GLM-5.3-Flash", "high"
+        )
+        isolated = json.loads(
+            (runtime_root / ".zcode" / "cli" / "config.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        assert isolated["provider"]["builtin:zai-coding-plan"]["enabled"] is True
     finally:
         service.close()
 
@@ -250,3 +318,56 @@ def test_zcode_result_event_becomes_live_message() -> None:
     assert payload["text"] == "OK"
     assert payload["usage"]["input_tokens"] == 10
     assert payload["usage"]["output_tokens"] == 2
+
+
+def test_zcode_model_test_uses_native_runner(settings, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    service = EvaluationService(settings)
+    monkeypatch.setattr(service, "_native_cli_allowed", lambda: True)
+    monkeypatch.setattr(service, "_check_runner", lambda _runner: ([], []))
+
+    def fake_run_native_agent(
+        runner, model, definition, workspace, _event_sink, _cancel_event
+    ):
+        captured.update(
+            {
+                "runner": runner,
+                "model": model,
+                "definition": definition,
+                "workspace": workspace,
+            }
+        )
+        return AgentResult(
+            True,
+            "AGENTBENCH-OK",
+            1,
+            service._empty_usage(),
+            12,
+        )
+
+    monkeypatch.setattr(service, "_run_native_agent", fake_run_native_agent)
+    try:
+        service.update_settings({"allow_native_cli": True})
+        model = service.create_model(
+            ModelCreate(
+                name="ZCode smoke",
+                provider="zcode-cli",
+                model_name="GLM-5.3-Flash",
+                agent_provider="builtin:zai",
+            )
+        )
+
+        result = service.test_model(model["id"])
+
+        assert result["ok"] is True
+        assert result["runner_type"] == "zcode_cli"
+        assert captured["runner"]["runner_type"] == "zcode_cli"
+        assert captured["model"]["provider"] == "zcode-cli"
+        assert captured["definition"]["instruction"] == (
+            "Return exactly AGENTBENCH-OK and nothing else."
+        )
+        workspace = captured["workspace"]
+        assert isinstance(workspace, Workspace)
+        assert not workspace.root.exists()
+    finally:
+        service.close()

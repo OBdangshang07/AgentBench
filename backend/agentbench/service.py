@@ -2388,6 +2388,15 @@ class EvaluationService:
         )
         if not isinstance(selected_provider, dict) or selected_provider.get("enabled") is False:
             raise RuntimeError("zcode_provider_not_available")
+        provider_options = (
+            selected_provider.get("options")
+            if isinstance(selected_provider.get("options"), dict)
+            else {}
+        )
+        if provider_options.get("apiKeyRequired") is True and not str(
+            provider_options.get("apiKey") or ""
+        ).strip():
+            raise RuntimeError("zcode_provider_credentials_missing")
         provider_models = selected_provider.get("models")
         selected_model = (
             provider_models.get(model_id) if isinstance(provider_models, dict) else None
@@ -2417,6 +2426,9 @@ class EvaluationService:
                 actual_effort = str(reasoning["defaultVariant"]).lower()
 
         provider_config = copy.deepcopy(selected_provider)
+        # Desktop treats a missing enabled flag as active, but the headless CLI's
+        # isolated config requires the selected provider to be explicitly enabled.
+        provider_config["enabled"] = True
         provider_config["models"] = {model_id: model_config}
         isolated = {
             "provider": {provider_id: provider_config},
@@ -3584,6 +3596,7 @@ class EvaluationService:
             "qoder-cli": "qoder_cli",
             "cursor-cli": "cursor_cli",
             "deepseek-harness": "deepseek_harness",
+            "zcode-cli": "zcode_cli",
         }
         runner_type = cli_runners.get(model["provider"])
         if runner_type:
@@ -6184,15 +6197,22 @@ class EvaluationService:
                     )
                 )
             except RuntimeError as exc:
+                error_code = str(exc)
+                error_message = (
+                    "所选 ZCode Provider 尚未完成凭据登录。请先在 ZCode Desktop "
+                    "连接该 Coding Plan，或重新添加一个已配置 API Key 的 Provider。"
+                    if error_code == "zcode_provider_credentials_missing"
+                    else "ZCode Desktop 的运行时、Provider 或模型配置当前不可用；"
+                    "请先在 ZCode 中完成登录与模型配置。"
+                )
                 return AgentResult(
                     False,
                     "",
                     0,
                     self._empty_usage(),
                     0,
-                    str(exc),
-                    "ZCode Desktop 的运行时、Provider 或模型配置当前不可用；"
-                    "请先在 ZCode 中完成登录与模型配置。",
+                    error_code,
+                    error_message,
                 )
             native_environment.update(
                 {
