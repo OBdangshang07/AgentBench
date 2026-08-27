@@ -58,6 +58,7 @@ def _answer(config: dict, *, awards: list[float], confidence: float = 1.0) -> di
                 "rationale": "可复核",
                 "propagated_error": False,
                 "independent_work": True,
+                "defect_severity": "none",
             }
             for point, award in zip(config["scoring_points"], awards, strict=True)
         ],
@@ -107,6 +108,7 @@ def test_error_carry_forward_preserves_independent_later_work():
 
 def test_low_confidence_and_new_solution_are_review_flags_with_provisional_score():
     config = _config()
+    config["allow_new_solutions"] = False
     answer = _answer(config, awards=[3, 2, 3], confidence=0.4)
     answer["solution_path"] = "new"
     result = score_rubric(answer, config)
@@ -118,6 +120,18 @@ def test_low_confidence_and_new_solution_are_review_flags_with_provisional_score
     assert result.point_results[0]["max_points"] == 3
 
 
+def test_allowed_new_solution_with_complete_confident_points_passes():
+    config = _config()
+    answer = _answer(config, awards=[3, 4, 3])
+    answer["solution_path"] = "new"
+
+    result = score_rubric(answer, config)
+
+    assert result.status == "passed"
+    assert result.percentage == 100
+    assert "new_solution" not in result.review_flags
+
+
 def test_judge_disagreement_is_recorded_without_changing_arithmetic():
     config = _config()
     result = score_rubric(_answer(config, awards=[3, 4, 3]), config, disagreement=True)
@@ -125,6 +139,32 @@ def test_judge_disagreement_is_recorded_without_changing_arithmetic():
     assert result.status == "needs_review"
     assert result.percentage == 100
     assert "judge_disagreement" in result.review_flags
+
+
+def test_benign_judge_notes_are_audited_without_forcing_manual_review():
+    config = _config()
+    answer = _answer(config, awards=[3, 4, 3])
+    answer["review_flags"] = [
+        "candidate_noted_bash_unavailable_manual_verification_only",
+        "candidate_self_noted_typo:formatting only",
+    ]
+
+    result = score_rubric(answer, config)
+
+    assert result.status == "passed"
+    assert result.review_flags == []
+    assert result.evidence["judge_review_notes"] == answer["review_flags"]
+
+
+def test_low_point_confidence_is_a_controlled_review_trigger():
+    config = _config()
+    answer = _answer(config, awards=[3, 4, 3])
+    answer["points"][1]["confidence"] = 0.4
+
+    result = score_rubric(answer, config)
+
+    assert result.status == "needs_review"
+    assert "low_point_confidence" in result.review_flags
 
 
 def test_mutually_exclusive_alternate_paths_use_best_route_as_denominator():
@@ -164,6 +204,74 @@ def test_rubric_json_schema_is_point_specific_and_legacy_is_explicit():
     legacy = normalize_rubric({"reference_answer": "x", "weight": 100})
     assert legacy["rubric_protocol"] == "legacy-v1"
     assert legacy["source_tier"] == "unverified"
+
+
+def test_strict_exam_rounds_down_and_forces_defect_deductions():
+    config = structured_rubric_config(
+        version="strict-v2",
+        source={"source_id": "strict", "source_tier": "expert_reconstructed"},
+        scoring_points=[
+            {"point_id": "proof", "description": "完整证明", "max_points": 3},
+            {"point_id": "result", "description": "最终结论", "max_points": 2},
+        ],
+        marking_mode="strict_exam",
+        point_increment=0.5,
+        minor_defect_deduction=0.5,
+        major_defect_deduction=1.0,
+        full_credit_confidence=0.9,
+        required_judges=2,
+    )
+    answer = _answer(config, awards=[2.9, 2], confidence=0.95)
+    answer["points"][0]["status"] = "partial"
+    answer["points"][0]["defect_severity"] = "minor"
+
+    result = score_rubric(answer, config)
+
+    assert result.status == "passed"
+    assert result.awarded_points == 4.5
+    assert result.point_results[0]["awarded_points"] == 2.5
+    assert "rounded_down_to_point_increment" in result.point_results[0]["strict_adjustments"]
+    assert config["required_judges"] == 2
+    schema = rubric_json_schema(config)
+    assert "defect_severity" in schema["properties"]["points"]["items"]["required"]
+
+
+def test_strict_exam_full_score_guard_deducts_unresolved_logical_gap():
+    config = structured_rubric_config(
+        version="strict-v2",
+        source={"source_id": "strict", "source_tier": "expert_reconstructed"},
+        scoring_points=[{"point_id": "proof", "description": "完整证明", "max_points": 3}],
+        marking_mode="strict_exam",
+        required_judges=2,
+    )
+    answer = _answer(config, awards=[3], confidence=0.95)
+    answer["review_flags"] = ["论证衔接存在可修补缺口"]
+    answer["points"][0]["defect_severity"] = "minor"
+
+    result = score_rubric(answer, config)
+
+    assert result.status == "passed"
+    assert result.awarded_points == 2.5
+    assert "minor_defect_minimum_deduction" in result.point_results[0]["strict_adjustments"]
+
+
+def test_strict_exam_presentation_note_does_not_manufacture_deduction():
+    config = structured_rubric_config(
+        version="strict-v3",
+        source={"source_id": "strict", "source_tier": "expert_reconstructed"},
+        scoring_points=[{"point_id": "proof", "description": "完整证明", "max_points": 3}],
+        marking_mode="strict_exam",
+        required_judges=2,
+    )
+    answer = _answer(config, awards=[3], confidence=0.95)
+    answer["review_flags"] = ["附加小数校验末位舍入差，不影响精确推导"]
+    answer["points"][0]["defect_severity"] = "presentation"
+
+    result = score_rubric(answer, config)
+
+    assert result.status == "passed"
+    assert result.awarded_points == 3.0
+    assert result.evidence["strict_question_adjustment"] is None
 
 
 def test_rubric_rejects_unknown_dependency_and_version_mismatch():

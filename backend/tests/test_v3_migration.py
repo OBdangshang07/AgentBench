@@ -286,6 +286,74 @@ def test_anonymous_multi_judge_consensus_and_disagreement(settings, monkeypatch)
         service.close()
 
 
+def test_strict_exam_multi_judge_uses_conservative_per_point_award(settings, monkeypatch) -> None:
+    service = EvaluationService(settings)
+    try:
+        service.update_settings(
+            {
+                "judge_model_id": "judge-primary",
+                "judge_runner_id": "runner-primary",
+                "judge_model_id_secondary": "judge-secondary",
+                "judge_runner_id_secondary": "runner-secondary",
+                "judge_disagreement_threshold": 12,
+            }
+        )
+        awards = {"primary": 9.5, "secondary": 9.0}
+
+        def fake_single(*_args, anonymous_slot="primary", **_kwargs):
+            def callback(_config, weight):
+                award = awards[anonymous_slot]
+                return ValidationResult(
+                    "ai_rubric",
+                    weight,
+                    award * 10,
+                    "passed",
+                    {
+                        "anonymous_slot": anonymous_slot,
+                        "point_awards": [
+                            {
+                                "point_id": "proof",
+                                "awarded_points": award,
+                                "max_points": 10,
+                                "status": "partial" if award < 10 else "met",
+                                "defect_severity": "minor" if award < 10 else "none",
+                            }
+                        ],
+                    },
+                )
+
+            return callback
+
+        monkeypatch.setattr(service, "_single_judge_callback", fake_single)
+        callback = service._judge_callback(
+            {"id": "run", "model_id": "candidate"},
+            {"validators": [{"type": "ai_rubric"}]},
+            object(),
+            lambda *_args: None,
+        )
+        assert callback is not None
+        result = callback(
+            {
+                "marking_mode": "strict_exam",
+                "required_judges": 2,
+                "judge_disagreement_threshold": 6,
+                "scoring_points": [
+                    {"point_id": "proof", "description": "完整证明", "max_points": 10}
+                ],
+            },
+            100,
+        )
+
+        assert result.status == "passed"
+        assert result.score == 90.0
+        assert result.evidence["consensus_method"] == (
+            "per_point_conservative_minimum_then_deterministic_sum"
+        )
+        assert result.evidence["point_awards"][0]["judge_awards"] == [9.5, 9.0]
+    finally:
+        service.close()
+
+
 def test_symbolic_json_accepts_equivalent_math_and_awards_partial_credit(tmp_path) -> None:
     engine = ScoringEngine(DockerExecutor(executable="missing-docker"))
     workspace = Workspace(tmp_path / "workspace")
@@ -397,6 +465,7 @@ def test_symbolic_json_accepts_common_final_equation_notation_but_rejects_wrong_
     workspace = Workspace(tmp_path / "workspace-natural-math")
     examples = [
         ("4/3 - 2 sin 1", "4/3 - 2*sin(1)", 100.0),
+        ("4/3 - 2sin1", "4/3 - 2*sin(1)", 100.0),
         (
             "∫_0^1 1/[(x+1)(x^2-2x+2)] dx = (3 ln 2 + π) / 10",
             "3*log(2)/10 + pi/10",

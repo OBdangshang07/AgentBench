@@ -20,6 +20,8 @@ src-tauri/resources/backend/*.exe
 src-tauri/resources/backend/_internal/
 backend/build/
 backend/dist/
+backend/agentbench/private_validator_bundles/*.abpv
+private_validator_sources/
 *.spec.local
 *.spec
 .env

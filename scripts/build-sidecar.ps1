@@ -3,6 +3,14 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $projectRoot
 $version = (Get-Content ".\package.json" -Raw | ConvertFrom-Json).version
 $sidecarName = "agentbench-backend-$version"
+$privateValidatorRoot = ".\backend\agentbench\private_validator_bundles"
+$privateValidatorArgs = @()
+if (Test-Path $privateValidatorRoot) {
+  $privateValidatorArgs = @(
+    "--add-data",
+    "$privateValidatorRoot;agentbench\private_validator_bundles"
+  )
+}
 
 $packagingPython = ".packaging-venv\Scripts\python.exe"
 if (-not (Test-Path $packagingPython)) {
@@ -24,6 +32,7 @@ if ($LASTEXITCODE -ne 0) {
   --collect-all winpty `
   --add-data "backend\agentbench\ncre_assets;agentbench\ncre_assets" `
   --add-data "backend\agentbench\frontend_suite_assets;agentbench\frontend_suite_assets" `
+  @privateValidatorArgs `
   ".\backend\agentbench_entry.py"
 if ($LASTEXITCODE -ne 0) {
   throw "PyInstaller failed with exit code $LASTEXITCODE"

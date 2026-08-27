@@ -797,7 +797,7 @@ export default function AgentFlow() {
   return (
     <div className={`v4-flow-workbench ${libraryOpen ? "library-open" : "library-closed"} ${inspectorOpen ? "inspector-open" : "inspector-closed"}`}>
       {libraryOpen && <aside className="v4-flow-library">
-        <header><strong>节点库</strong><small>CLICK TO ADD</small></header>
+        <header><strong>节点库</strong><small>点击添加到画布</small></header>
         {libraryGroups.map((group) => (
           <section key={group.label}>
             <label>{group.label}</label>
@@ -813,13 +813,13 @@ export default function AgentFlow() {
       <section className="v4-flow-canvas">
         <header>
           <button className="v4-icon-button v5-flow-panel-toggle" type="button" title={libraryOpen ? "收起节点库" : "显示节点库"} aria-label={libraryOpen ? "收起节点库" : "显示节点库"} onClick={() => setLibraryOpen((value) => !value)}>{libraryOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}</button>
-          <div className="v5-flow-title"><strong>{draft?.name ?? "选择或创建 Agent Flow"}</strong><small>{selected?.status ?? "DRAFT"} · {draft?.nodes.length ?? 0} NODES · {saveLabels[saveState]}</small></div>
+          <div className="v5-flow-title"><strong>{draft?.name ?? "选择或创建自动化 Flow"}</strong><small>{selected?.status ?? "草稿"} · {draft?.nodes.length ?? 0} 个节点 · {saveLabels[saveState]}</small></div>
           <span className={`v4-status ${["failed", "interrupted"].includes(selected?.status ?? "") ? "amber" : "green"}`}><i />{selected?.status?.toUpperCase() ?? "READY"}</span>
           <div className="v5-flow-toolbar">
             <button className="v4-icon-button" type="button" disabled={!historyStack.length || active} title="撤销 Ctrl+Z" onClick={undo}><Undo2 size={15} /></button>
             <button className="v4-icon-button" type="button" disabled={!futureStack.length || active} title="重做 Ctrl+Y" onClick={redo}><Redo2 size={15} /></button>
             <button className="v4-button secondary" type="button" disabled={!selected || active} onClick={() => { setInspectorTab("validation"); void validateDraft(); }}><ListChecks size={15} />验证</button>
-            <button className="v4-button secondary" type="button" disabled={!selected || active || saving} onClick={() => void dryRun()}><FlaskConical size={15} />Dry Run</button>
+            <button className="v4-button secondary" type="button" disabled={!selected || active || saving} onClick={() => void dryRun()}><FlaskConical size={15} />试运行</button>
             <button className="v4-button secondary" type="button" disabled={!selected || active || saving || !dirty} onClick={() => void save()}><Save size={15} />{saving ? "保存中" : "保存"}</button>
             <button className={`v4-button ${active ? "secondary" : "primary"}`} type="button" disabled={!selected || saving} onClick={() => void toggleRun()}>{active ? <CircleStop size={16} /> : <Play size={16} />}{active ? "停止" : "运行"}</button>
             <button className="v4-icon-button danger" type="button" disabled={!selected || active} title="删除工作流" onClick={() => void removeFlow()}><Trash2 size={16} /></button>
@@ -884,10 +884,10 @@ export default function AgentFlow() {
               </article>
             ))}
           </div>
-          {!draft && <div className="v4-empty"><GitFork size={30} /><strong>还没有 Agent Flow</strong><span>创建后即可编辑节点、连线、条件与执行预算</span><button className="v4-button primary" type="button" onClick={() => setModalOpen(true)}><Plus size={16} />新建工作流</button></div>}
+          {!draft && <div className="v4-empty"><GitFork size={30} /><strong>创建第一个自动化 Flow</strong><span>先从模板开始，再按需要调整节点、条件和执行预算。</span><button className="v4-button primary" type="button" onClick={() => setModalOpen(true)}><Plus size={16} />选择模板</button></div>}
           {draft && <div className="v5-flow-minimap" aria-label="Flow 小地图"><svg viewBox={`0 0 ${stageSize.width} ${stageSize.height}`}>{draft.nodes.map((node) => <rect key={node.id} className={node.status} x={node.position_x} y={node.position_y} width="225" height="108" rx="10" />)}</svg></div>}
         </div>
-        <footer><span><i />拖动节点端口创建连线；拖动画布平移；修改会自动保存版本</span><div><button type="button" title="缩小" onClick={() => setZoom((value) => Math.max(0.4, Number((value - .1).toFixed(2))))}><ZoomOut size={14} /></button><b>{Math.round(zoom * 100)}%</b><button type="button" title="放大" onClick={() => setZoom((value) => Math.min(1.6, Number((value + .1).toFixed(2))))}><ZoomIn size={14} /></button><button type="button" title="适应画布" onClick={fitCanvas}><Scan size={14} /></button></div><b>{draft?.edges.length ?? 0} EDGES</b></footer>
+        <footer><span><i />拖动节点端口创建连接；修改会自动保存，可以随时恢复历史版本</span><div><button type="button" title="缩小" onClick={() => setZoom((value) => Math.max(0.4, Number((value - .1).toFixed(2))))}><ZoomOut size={14} /></button><b>{Math.round(zoom * 100)}%</b><button type="button" title="放大" onClick={() => setZoom((value) => Math.min(1.6, Number((value + .1).toFixed(2))))}><ZoomIn size={14} /></button><button type="button" title="适应画布" onClick={fitCanvas}><Scan size={14} /></button></div><b>{draft?.edges.length ?? 0} 条连接</b></footer>
       </section>
 
       {inspectorOpen && <aside className="v4-flow-inspector">
@@ -955,7 +955,7 @@ export default function AgentFlow() {
       {modalOpen && (
         <div className="v4-modal-backdrop" onMouseDown={() => setModalOpen(false)}>
           <form className="v4-modal v5-flow-create-modal" onSubmit={create} onMouseDown={(event) => event.stopPropagation()}>
-            <header><div><strong>新建 Agent Flow</strong><small>从经过验证的结构开始，再自由编辑节点、连接、数据与失败策略</small></div><button type="button" onClick={() => setModalOpen(false)}><X size={18} /></button></header>
+            <header><div><strong>新建自动化 Flow</strong><small>选择最接近目标的模板，然后再调整节点、连接和失败策略</small></div><button type="button" aria-label="关闭" onClick={() => setModalOpen(false)}><X size={18} /></button></header>
             <div className="v5-flow-create-body">
               <section className="v5-flow-template-picker">
                 <label><LayoutTemplate size={13} />选择起点</label>

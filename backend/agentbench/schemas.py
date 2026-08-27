@@ -153,6 +153,12 @@ class MathQuestionUpdate(BaseModel):
     allow_new_solutions: bool | None = None
     low_confidence_threshold: float | None = Field(default=None, ge=0, le=1)
     judge_disagreement_threshold: float | None = Field(default=None, ge=0, le=100)
+    marking_mode: Literal["standard", "strict_exam"] | None = None
+    point_increment: float | None = Field(default=None, gt=0, le=10)
+    minor_defect_deduction: float | None = Field(default=None, gt=0, le=10)
+    major_defect_deduction: float | None = Field(default=None, gt=0, le=20)
+    full_credit_confidence: float | None = Field(default=None, ge=0, le=1)
+    required_judges: int | None = Field(default=None, ge=1, le=3)
     review_status: Literal["needs_review", "confirmed"] | None = None
 
 

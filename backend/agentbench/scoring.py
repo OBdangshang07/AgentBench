@@ -13,7 +13,14 @@ from typing import Any
 
 import jsonschema
 
-from .execution import DockerExecutor, Workspace, WorkspaceViolation, safe_workspace_path
+from .execution import (
+    CommandResult,
+    DockerExecutor,
+    Workspace,
+    WorkspaceViolation,
+    safe_workspace_path,
+)
+from .private_validators import PrivateValidatorError, PrivateValidatorStore
 
 JudgeCallback = Callable[[dict[str, Any], float], "ValidationResult"]
 
@@ -98,6 +105,15 @@ def _normalize_symbolic_candidate(candidate: Any) -> str:
     )
     text = re.sub(r"√\s*\(([^()]*)\)", r"sqrt(\1)", text)
     text = re.sub(r"√\s*([A-Za-z0-9]+)", r"sqrt(\1)", text)
+    # Chinese exam answers commonly omit both the multiplication sign and
+    # parentheses around a one-token function argument (for example
+    # ``2sin1`` or ``cos pi``). SymPy otherwise reads ``sin1`` as an unknown
+    # symbol and turns a mathematically correct answer into a parser failure.
+    text = re.sub(
+        r"(?<![A-Za-z_])(sin|cos|exp|log|ln)\s*(?!\()([0-9]+(?:/[0-9]+)?|pi|[A-Za-z_][A-Za-z0-9_]*)",
+        r"\1(\2)",
+        text,
+    )
     # A final-answer field often contains a label or the complete equation.  Only
     # the right-hand side is the candidate expression being compared.
     if "=" in text:
@@ -128,8 +144,13 @@ class ScoreResult:
 
 
 class ScoringEngine:
-    def __init__(self, docker: DockerExecutor):
+    def __init__(
+        self,
+        docker: DockerExecutor,
+        private_validators: PrivateValidatorStore | None = None,
+    ):
         self.docker = docker
+        self.private_validators = private_validators
 
     def score(
         self,
@@ -200,9 +221,12 @@ class ScoringEngine:
                 }
             results.extend(produced)
 
+        score_basis = str((definition.get("metadata") or {}).get("score_basis") or "balanced")
+        quality_only = score_basis == "backend_quality"
+        quality_weight = 100.0 if quality_only else QUALITY_WEIGHT
         declared_weight = sum(item.weight for item in results)
         if declared_weight:
-            quality_scale = QUALITY_WEIGHT / declared_weight
+            quality_scale = quality_weight / declared_weight
             for item in results:
                 item.evidence = {
                     **item.evidence,
@@ -226,7 +250,7 @@ class ScoringEngine:
         results.append(
             ValidationResult(
                 "time_efficiency",
-                TIME_WEIGHT,
+                0.0 if quality_only else TIME_WEIGHT,
                 round(time_score, 2),
                 "passed",
                 {
@@ -248,7 +272,7 @@ class ScoringEngine:
         results.append(
             ValidationResult(
                 "step_efficiency",
-                STEP_WEIGHT,
+                0.0 if quality_only else STEP_WEIGHT,
                 round(step_score, 2),
                 "passed",
                 {
@@ -276,7 +300,7 @@ class ScoringEngine:
         results.append(
             ValidationResult(
                 "token_efficiency",
-                TOKEN_WEIGHT,
+                0.0 if quality_only else TOKEN_WEIGHT,
                 round(token_score, 2),
                 "passed" if tokens_reported else "partial",
                 {
@@ -295,15 +319,65 @@ class ScoringEngine:
                 },
             )
         )
-        dimensions = self._dimensions(results, scoring_profile)
         if any(item.status == "environment_unavailable" for item in results):
+            dimensions = self._dimensions(results, scoring_profile)
             return ScoreResult(None, "environment_unavailable", results, dimensions)
         if any(item.status == "needs_review" for item in results):
+            dimensions = self._dimensions(results, scoring_profile)
             return ScoreResult(None, "needs_review", results, dimensions)
         total_weight = sum(item.weight for item in results)
         total = (
             sum(item.score * item.weight for item in results) / total_weight if total_weight else 0
         )
+        applied_caps: list[dict[str, Any]] = []
+        for item in results:
+            raw_caps = item.evidence.get("score_caps")
+            if not isinstance(raw_caps, list):
+                continue
+            for raw_cap in raw_caps:
+                if not isinstance(raw_cap, dict):
+                    continue
+                try:
+                    maximum = min(100.0, max(0.0, float(raw_cap["max_score"])))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                applied_caps.append(
+                    {
+                        "key": str(raw_cap.get("key") or "hard_gate"),
+                        "max_score": maximum,
+                        "reason": str(raw_cap.get("reason") or "触发严重错误评分上限"),
+                    }
+                )
+        score_before_cap = round(total, 2)
+        if applied_caps:
+            total = min(total, min(item["max_score"] for item in applied_caps))
+            results.append(
+                ValidationResult(
+                    "hard_gate",
+                    0.0,
+                    round(total, 2),
+                    "failed",
+                    {
+                        "score_before_cap": score_before_cap,
+                        "applied_score_cap": round(total, 2),
+                        "failures": applied_caps,
+                        "score_basis": score_basis,
+                    },
+                )
+            )
+        dimensions = self._dimensions(results, scoring_profile)
+        if applied_caps:
+            for dimension in dimensions:
+                if dimension.validator_type != "objective_quality":
+                    continue
+                dimension.evidence = {
+                    **dimension.evidence,
+                    "score_before_cap": dimension.score,
+                    "applied_score_cap": round(total, 2),
+                    "hard_failures": applied_caps,
+                }
+                dimension.score = min(dimension.score, round(total, 2))
+                dimension.status = "partial" if dimension.score > 0 else "failed"
         return ScoreResult(round(total, 2), "scored", results, dimensions)
 
     def _validate(
@@ -417,12 +491,24 @@ class ScoringEngine:
                 )
             if kind == "command":
                 limits = definition.get("limits") or {}
-                result = self._command_result(workspace, config, limits)
-                if result.error_code == "sandbox_unavailable":
+                result, private_provenance = self._command_result(workspace, config, limits)
+                if result.error_code in {
+                    "sandbox_unavailable",
+                    "private_validator_unavailable",
+                }:
                     return ValidationResult(
-                        kind, weight, 0, "environment_unavailable", result.as_dict()
+                        kind,
+                        weight,
+                        0,
+                        "environment_unavailable",
+                        {**result.as_dict(), "private_validator": private_provenance},
                     )
-                return self._boolean(kind, weight, result.ok, result.as_dict())
+                return self._boolean(
+                    kind,
+                    weight,
+                    result.ok,
+                    {**result.as_dict(), "private_validator": private_provenance},
+                )
             return ValidationResult(kind, weight, 0, "error", {"reason": "Unknown validator"})
         except (
             OSError,
@@ -780,13 +866,36 @@ class ScoringEngine:
         workspace: Workspace,
         config: dict[str, Any],
         limits: dict[str, Any],
-    ):
+    ) -> tuple[CommandResult, dict[str, Any]]:
         private_files = config.get("private_files")
+        private_reference = config.get("private_validator_ref")
+        private_provenance: dict[str, Any] = {}
         private_root: str | None = None
         if private_files is not None and not isinstance(private_files, dict):
             raise ValueError("private_files must be an object")
+        if private_files and private_reference:
+            return (
+                CommandResult(
+                    False,
+                    None,
+                    "",
+                    "A validator cannot declare private_files and private_validator_ref together",
+                    0,
+                    "private_validator_unavailable",
+                ),
+                private_provenance,
+            )
         try:
-            command = str(config["command"])
+            command = str(config.get("command") or "")
+            if private_reference:
+                if self.private_validators is None:
+                    raise PrivateValidatorError("private validator store is not configured")
+                resolved = self.private_validators.resolve(private_reference)
+                private_files = resolved.files
+                private_provenance = resolved.provenance
+                command = resolved.command
+            if not command:
+                raise PrivateValidatorError("private validator command is missing")
             if private_files:
                 private_root = f".agentbench-private-{uuid.uuid4().hex}"
                 for relative, content in private_files.items():
@@ -794,12 +903,36 @@ class ScoringEngine:
                         raise ValueError("Private validator files must contain text paths")
                     workspace.write_file(f"{private_root}/{relative}", content)
                 command = command.replace("{private_root}", private_root)
-            return self.docker.run(
-                workspace,
-                command,
-                str(limits.get("docker_image", "python:3.12-alpine")),
-                timeout=min(int(limits.get("validator_timeout_seconds", 180)), 600),
-                network=str(limits.get("network", "disabled")),
+            validation_seed = str(limits.get("_validation_seed") or "")
+            if "{validation_seed}" in command:
+                if not re.fullmatch(r"[0-9a-f]{64}", validation_seed):
+                    raise PrivateValidatorError("validation seed is unavailable")
+                command = command.replace("{validation_seed}", validation_seed)
+            return (
+                self.docker.run(
+                    workspace,
+                    command,
+                    str(limits.get("docker_image", "python:3.12-alpine")),
+                    timeout=min(int(limits.get("validator_timeout_seconds", 180)), 1800),
+                    network=str(limits.get("network", "disabled")),
+                    cpus=float(limits.get("validator_cpus", 1.0)),
+                    memory=str(limits.get("validator_memory", "768m")),
+                    pids_limit=int(limits.get("validator_pids_limit", 128)),
+                    tmpfs_size=str(limits.get("validator_tmpfs", "128m")),
+                ),
+                private_provenance,
+            )
+        except PrivateValidatorError as exc:
+            return (
+                CommandResult(
+                    False,
+                    None,
+                    "",
+                    str(exc),
+                    0,
+                    "private_validator_unavailable",
+                ),
+                private_provenance,
             )
         finally:
             if private_root:
@@ -823,12 +956,20 @@ class ScoringEngine:
         not a consumed model attempt.
         """
         limits = definition.get("limits") or {}
-        result = self._command_result(workspace, config, limits)
-        evidence = result.as_dict()
-        if result.error_code == "sandbox_unavailable":
+        result, private_provenance = self._command_result(workspace, config, limits)
+        evidence = {**result.as_dict(), "private_validator": private_provenance}
+        if result.error_code in {"sandbox_unavailable", "private_validator_unavailable"}:
             return [
                 ValidationResult(
-                    "validator_platform", weight, 0, "environment_unavailable", evidence
+                    "validator_platform",
+                    weight,
+                    0,
+                    "environment_unavailable",
+                    {
+                        **evidence,
+                        "error_code": result.error_code,
+                        "reason": result.stderr or "私有验证环境不可用",
+                    },
                 )
             ]
 
@@ -906,9 +1047,30 @@ class ScoringEngine:
         if declared_weight <= 0:
             raise ValueError("command_metrics weights must be positive")
 
+        configured_caps = config.get("hard_caps") or []
+        reported_failures = payload.get("hard_failures") if isinstance(payload, dict) else None
+        failure_keys = {
+            str(item) for item in reported_failures
+        } if isinstance(reported_failures, list) else set()
+        score_caps: list[dict[str, Any]] = []
+        if isinstance(configured_caps, list):
+            for cap in configured_caps:
+                if not isinstance(cap, dict) or str(cap.get("key") or "") not in failure_keys:
+                    continue
+                try:
+                    maximum = min(100.0, max(0.0, float(cap["max_score"])))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                score_caps.append(
+                    {
+                        "key": str(cap["key"]),
+                        "max_score": maximum,
+                        "reason": str(cap.get("reason") or "触发严重错误评分上限"),
+                    }
+                )
         output: list[ValidationResult] = []
         detail = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
-        for item in declared:
+        for position, item in enumerate(declared):
             key = str(item["key"])
             name = str(item.get("name") or key)
             raw_value = metric_values.get(key, 0)
@@ -929,6 +1091,9 @@ class ScoringEngine:
                         "validator_stdout": result.stdout[-4000:],
                         "validator_stderr": result.stderr[-4000:],
                         "validator_exit_code": result.exit_code,
+                        "private_validator": private_provenance,
+                        "hard_failures": sorted(failure_keys) if position == 0 else [],
+                        "score_caps": score_caps if position == 0 else [],
                     },
                 )
             )

@@ -80,15 +80,15 @@ export default function Leaderboard() {
   return (
     <div className="ab-view ab-ledger-index-view">
       <header className="ab-view-header">
-        <div className="ab-view-title"><span className="ab-view-index">04 / EVIDENCE</span><div><h1>证据索引</h1><p>能力榜与考试榜采用独立口径；样本量、卷面结构与评分构成始终可见。</p></div></div>
-        <div className="ab-header-meta"><span className="ab-meta-pill"><i />{samples} {isExam ? "COMPLETE PAPERS" : "SCORED RUNS"}</span><span className="ab-meta-pill">${totalCost.toFixed(3)} COST</span></div>
+        <div className="ab-view-title"><span className="ab-view-index">能力评测</span><div><h1>排行与报告</h1><p>只比较运行条件一致的结果；样本量、评分口径和完整证据始终可见。</p></div></div>
+        <div className="ab-header-meta"><span className="ab-meta-pill"><i />{samples} {isExam ? "份完整试卷" : "次有效评分"}</span><span className="ab-meta-pill">费用 ${totalCost.toFixed(3)}</span></div>
       </header>
       <div className="ab-ledger-index-layout">
         <aside className="ab-lane-pane">
-          <div className="ab-pane-label">MODEL & AGENT</div>
+          <div className="ab-pane-label">Agent 与模型</div>
           <button className={board === "unified" ? "active" : ""} type="button" onClick={() => setBoard("unified")}><span><BarChart3 size={14} /></span><div><strong>统一 Agent 模型榜</strong><small>固定 Harness，仅替换模型</small></div></button>
           <button className={board === "native" ? "active" : ""} type="button" onClick={() => setBoard("native")}><span><ShieldCheck size={14} /></span><div><strong>原生 Agent 系统榜</strong><small>Runner 与模型整体计分</small></div></button>
-          <div className="ab-pane-label ab-exam-label">OFFICIAL EXAMS</div>
+          <div className="ab-pane-label ab-exam-label">完整考试</div>
           <button className={board === "math2025" ? "active" : ""} type="button" onClick={() => setBoard("math2025")}><span><BookOpenCheck size={14} /></span><div><strong>2025 考研数学（一）榜</strong><small>完整 22 题 · 官方 150 分</small></div></button>
           <button className={board === "ncre" ? "active" : ""} type="button" onClick={() => setBoard("ncre")}><span><FileSpreadsheet size={14} /></span><div><strong>NCRE 二级榜</strong><small>完整四部分 · 官方 100 分</small></div></button>
           <div className="ab-lane-note"><strong>ISOLATED BOARDS</strong><p>四个榜单独立排名。考试榜只纳入完整试卷，不将单题成绩外推成整卷。</p></div>

@@ -50,8 +50,15 @@ class _StdioMcp:
             encoding="utf-8",
             errors="replace",
             env=environment,
-            creationflags=(
-                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+            **(
+                {
+                    "creationflags": (
+                        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                        | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    )
+                }
+                if os.name == "nt"
+                else {}
             ),
             start_new_session=os.name != "nt",
         )

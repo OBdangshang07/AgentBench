@@ -60,12 +60,12 @@ export default function ModelsAndAgents() {
   return (
     <div className="ab-view ab-secondary-view ab-participants-view">
       <header className="ab-view-header">
-        <div className="ab-view-title"><span className="ab-view-index">05 / RUNTIME REGISTRY</span><div><h1>模型与 Agent</h1><p>一次配置，同时供 Agent Studio、Flow 工作流和模型测评使用。</p></div></div>
-        <div className="ab-header-meta"><span className="ab-meta-pill"><i />{models.data?.filter((model) => model.enabled).length ?? 0} MODELS · {runners.data?.filter((runner) => runner.capability.installed).length ?? 0} AGENTS READY</span><button className="ab-run-button" type="button" onClick={() => (tab === "models" ? setModelModal(true) : setRunnerModal(true))}><Plus size={14} />{tab === "models" ? "添加模型" : "添加 Runner"}</button></div>
+        <div className="ab-view-title"><span className="ab-view-index">资源与设置</span><div><h1>Agent 与模型</h1><p>模型提供推理能力，Agent 提供实际执行方式；一次配置即可用于会话、Flow 和评测。</p></div></div>
+        <div className="ab-header-meta"><span className="ab-meta-pill"><i />{models.data?.filter((model) => model.enabled).length ?? 0} 个模型 · {runners.data?.filter((runner) => runner.capability.installed).length ?? 0} 个 Agent 已就绪</span><button className="ab-run-button" type="button" onClick={() => (tab === "models" ? setModelModal(true) : setRunnerModal(true))}><Plus size={14} />{tab === "models" ? "添加模型" : "添加 Agent"}</button></div>
       </header>
       <div className="ab-secondary-layout">
         <aside className="ab-section-pane">
-          <div className="ab-pane-label">RUNTIME LAYERS</div>
+          <div className="ab-pane-label">资源类型</div>
           <button className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}><span><Cpu size={15} /></span><div><strong>模型目录</strong><small>推理身份、接口与计费</small></div><b>{models.data?.filter((model) => model.enabled).length ?? "—"}</b></button>
           <button className={tab === "runners" ? "active" : ""} onClick={() => setTab("runners")}><span><TerminalSquare size={15} /></span><div><strong>Agent 运行时</strong><small>工具链、登录与本机能力</small></div><b>{runners.data?.length ?? "—"}</b></button>
           <section className="ab-side-contract"><label>USED BY</label><strong>STUDIO · FLOW · BENCH</strong><p>日常任务使用项目默认组合；测评时再显式选择模型与 Agent，配置无需重复维护。</p></section>

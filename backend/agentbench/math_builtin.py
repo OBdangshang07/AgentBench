@@ -7,19 +7,31 @@ from .math_exam import MATH_EXAM_ID, build_published_math_cases
 SOURCE_FILENAME = "ab27a44c5f0cbe5e.pdf"
 SOURCE_SHA256 = "9ebd0eebbbfeef553880cb13af3528bbbb25630b86d7ed22fb5f9c85b0c659bf"
 SOURCE_PAGE_COUNT = 17
-RUBRIC_VERSION = "2025.math1.solution.expert-reconstructed.v1"
+RUBRIC_VERSION = "2025.math1.solution.strict-exam.v3"
 RUBRIC_SOURCE = {
     "source_id": "moe-policy-2025-plus-expert-reconstruction",
     "version": RUBRIC_VERSION,
     "source_tier": "expert_reconstructed",
-    "title": "2025 年考研数学（一）解答题专家重建评分量表",
+    "title": "2025 年考研数学（一）解答题严格专家重建评分量表",
     "issuing_body": "AgentBench 专家重建；评卷制度依据为教育部、教育部教育考试院",
     "url": "https://www.gov.cn/zhengce/zhengceku/202410/content_6978684.htm",
     "accessed_at": "2026-08-26",
     "page": "第七条、第四十条、第四十二条",
     "evidence": "教育部规定全国统一命题科目由教育部教育考试院提供评分参考，省级专家组经试评拟定具体评卷细则；评分参考（指南）按国家秘密管理。公开来源未发现可核验的2025数学一逐题官方分值细则。",
     "verification_status": "partially_verified",
-    "notes": "官方条文仅证明评卷制度与来源链；本量表的逐题分值由参考解答按踩点给分原则重建，不宣称为官方评分参考。",
+    "notes": "官方条文仅证明评卷制度与来源链；逐题评分点由参考解答按踩点给分原则重建。解答题卷面分值按数学一正式题型结构分配为10、10、10、10、15、15。严格制采用0.5分粒度、逻辑缺口强制扣分和至少双匿名裁判，不宣称为官方逐题评分参考。",
+}
+Q20_RUBRIC_VERSION = "2025.math1.solution.q20.corrected.strict-v4"
+Q20_RUBRIC_SOURCE = {
+    **RUBRIC_SOURCE,
+    "version": Q20_RUBRIC_VERSION,
+    "source_id": "2025-math1-q20-double-derived-correction",
+    "verification_status": "partially_verified",
+    "evidence": (
+        "第20题以高斯公式和直接参数化两条独立解析路线复核：旋转面为 "
+        "xy+yz+zx=0，截面半径平方为2/3，侧面通量为-2π/√3；修正旧重建值。"
+    ),
+    "notes": "本题逐点量表为专家重建；v2 修正了 v1 的参考答案与末评分点。",
 }
 
 
@@ -43,8 +55,14 @@ def _question(
     scoring_points: list[dict[str, Any]] | None = None,
     alternate_paths: list[dict[str, Any]] | None = None,
     allow_new_solutions: bool = True,
-    low_confidence_threshold: float = 0.70,
-    judge_disagreement_threshold: float = 12.0,
+    low_confidence_threshold: float = 0.75,
+    judge_disagreement_threshold: float = 4.0,
+    marking_mode: str = "strict_exam",
+    point_increment: float = 0.5,
+    minor_defect_deduction: float = 0.5,
+    major_defect_deduction: float = 1.0,
+    full_credit_confidence: float = 0.90,
+    required_judges: int = 2,
 ) -> dict[str, Any]:
     obligations = obligations or []
     if mark_values is not None and len(mark_values) != len(obligations):
@@ -100,6 +118,12 @@ def _question(
             else low_confidence_threshold
         ),
         "judge_disagreement_threshold": judge_disagreement_threshold,
+        "marking_mode": marking_mode,
+        "point_increment": point_increment,
+        "minor_defect_deduction": minor_defect_deduction,
+        "major_defect_deduction": major_defect_deduction,
+        "full_credit_confidence": full_credit_confidence,
+        "required_judges": required_judges,
         "review_status": "confirmed",
     }
 
@@ -318,7 +342,7 @@ D. X̄>1+√(2/n)Zα。
     _question(
         18,
         "solution",
-        12,
+        10,
         r"""
 已知函数 f(u) 在区间 (0,+∞) 内具有 2 阶导数，记 g(x,y)=f(x/y)。若
 x^2 g_xx + xy g_xy + y^2 g_yy = 1，
@@ -333,12 +357,12 @@ x^2 g_xx + xy g_xy + y^2 g_yy = 1，
             "由 g(x,x)=1 与 g_x(x,x)=2/x 得到 f(1)=1、f'(1)=2",
             "求解常微分方程并得到 f(u)=1/2(ln u)^2+2ln u+1",
         ],
-        mark_values=[3, 3, 2, 4],
+        mark_values=[2.5, 2.5, 2, 3],
     ),
     _question(
         19,
         "solution",
-        12,
+        10,
         r"""
 设函数 f(x) 在区间 (a,b) 内可导。证明：导函数 f'(x) 在 (a,b) 内严格单调增加的充分必要条件是，对 (a,b) 内任意 x1<x2<x3，均有
 [f(x2)-f(x1)]/(x2-x1) < [f(x3)-f(x2)]/(x3-x2)。
@@ -353,30 +377,34 @@ x^2 g_xx + xy g_xy + y^2 g_yy = 1，
             "必要性方向在相邻区间应用拉格朗日中值定理",
             "由中值点次序与 f' 严格递增推出两段割线斜率严格不等式",
         ],
-        mark_values=[3, 3, 3, 3],
+        mark_values=[2.5, 2.5, 2.5, 2.5],
     ),
     _question(
         20,
         "solution",
-        12,
+        10,
         r"""
 曲面 Σ 由直线 x=0,y=0 绕直线 x=t,y=t,z=t（t 为参数）旋转一周得到。Σ1 是 Σ 介于平面 x+y+z=0 与 x+y+z=1 之间部分的外侧。计算曲面侧积分
 I=∬_(Σ1) x dy dz + (y+1) dz dx + (z+2) dx dy。
 """,
-        "sqrt(2)*pi/4-1",
+        "-2*pi/sqrt(3)",
         [14, 15],
+        accepted=["-2*sqrt(3)*pi/3"],
         obligations=[
-            "识别旋转曲面为 (x-t)^2+(y-t)^2+(z-t)^2=3t^2 所描述的圆锥面",
+            "识别旋转曲面为 xy+yz+zx=0 所描述的圆锥面",
             "用平面 x+y+z=1 补面构成封闭区域并明确外侧方向",
             "对闭合曲面正确应用高斯公式并计算体积分",
-            "正确计算补面通量并作差得到 √2π/4-1",
+            "正确计算补面通量并作差得到 -2π/√3",
         ],
-        mark_values=[2, 3, 4, 3],
+        mark_values=[2, 2.5, 3, 2.5],
+        rubric_version=Q20_RUBRIC_VERSION,
+        rubric_source=Q20_RUBRIC_SOURCE,
+        source_tier="expert_reconstructed",
     ),
     _question(
         21,
         "solution",
-        12,
+        15,
         r"""
 设矩阵 A=[[0,-1,2],[-1,0,2],[-1,-1,a]]，已知 1 是 A 的特征多项式的重根。
 (1) 求 a 的值；
@@ -392,12 +420,12 @@ I=∬_(Σ1) x dy dz + (y+1) dz dx + (z+2) dx dy。
             "在 a=3 时正确刻画 ker((A-I)^2) 并排除 α=0",
             "保证 β 非零，即 a1+a2≠2a3，并给出 β 的完整参数表达",
         ],
-        mark_values=[3, 3, 3, 3],
+        mark_values=[4, 4, 3, 4],
     ),
     _question(
         22,
         "solution",
-        12,
+        15,
         r"""
 投保人的损失事件发生时，保险公司的赔付额 Y 与投保人的损失额 X 的关系为：
 Y=0（X≤100），Y=X-100（X>100）。
@@ -415,7 +443,7 @@ Y=0（X≤100），Y=X-100（X>100）。
             "识别泊松稀疏化或等价地对条件二项分布求和",
             "得到 M~Poisson(2)，即 P(M=m)=2^m e^(-2)/m!，m=0,1,2,...",
         ],
-        mark_values=[3, 3, 3, 3],
+        mark_values=[3.5, 4, 3.5, 4],
     ),
 ]
 

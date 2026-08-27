@@ -4,9 +4,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import Layout from "../components/Layout";
 import TestLibrary from "../pages/TestLibrary";
 
-const health = { name: "AgentBench Desktop", version: "5.2.6" };
+const health = { name: "AgentBench Desktop", version: "5.3.0" };
 const systemStatus = {
-  version: "5.2.6",
+  version: "5.3.0",
   data_dir: "C:/AgentBench",
   database: { path: "C:/AgentBench/agentbench.db", ready: true },
   docker: { installed: true, available: true, executable: "docker" },
@@ -59,7 +59,7 @@ describe("V3 evaluation OS information architecture", () => {
     expect(screen.getByText("工具增强")).toBeInTheDocument();
     expect(screen.queryByText("导入 PDF")).not.toBeInTheDocument();
     expect((await screen.findAllByText("推理样例")).length).toBeGreaterThan(0);
-    expect(screen.getByText("COLLECTIONS")).toBeInTheDocument();
+    expect(screen.getByText("按能力浏览")).toBeInTheDocument();
     expect(screen.getByText("VALIDATOR MAP")).toBeInTheDocument();
   });
 });

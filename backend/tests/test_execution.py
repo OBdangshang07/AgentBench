@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 from subprocess import CompletedProcess
 
@@ -130,6 +132,21 @@ def test_run_native_cli_delivers_long_stdin_text_without_argv(tmp_path):
     assert result.stdout == payload
 
 
+def test_run_native_cli_tolerates_child_closing_large_stdin_early(tmp_path):
+    workspace = Workspace(tmp_path / "stdin-closed-early")
+    result = run_native_cli(
+        executable=sys.executable,
+        args=["-c", "import os; os._exit(0)"],
+        workspace=workspace,
+        placeholders={},
+        extra_env={},
+        timeout=10,
+        stdin_text="x" * 2_000_000,
+    )
+
+    assert result.ok is True
+
+
 def test_run_native_cli_keeps_devnull_stdin_by_default(tmp_path):
     workspace = Workspace(tmp_path / "stdin-default")
     result = run_native_cli(
@@ -205,6 +222,26 @@ def test_native_cli_status_skips_an_unlaunchable_path_alias(monkeypatch):
         "version": "working-cli 2.0.0",
         "error": None,
     }
+
+
+def test_native_cli_status_hides_windows_console_for_version_probe(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr("agentbench.execution._native_cli_candidates", lambda _name: ["qoderclicn.cmd"])
+
+    def fake_run(args, **kwargs):
+        calls.append(kwargs)
+        return CompletedProcess(args, 0, "qoderclicn 1.0.0\n", "")
+
+    monkeypatch.setattr("agentbench.execution.subprocess.run", fake_run)
+
+    status = native_cli_status("qoderclicn")
+
+    assert status["installed"] is True
+    if os.name == "nt":
+        assert calls[0]["creationflags"] & subprocess.CREATE_NO_WINDOW
+    else:
+        assert "creationflags" not in calls[0]
 
 
 def test_cursor_status_rejects_an_unrelated_agent_command(monkeypatch):
@@ -361,6 +398,10 @@ def test_native_cli_run_skips_an_unlaunchable_path_alias(tmp_path, monkeypatch):
     assert result.ok is True
     assert result.stdout.strip() == "fallback-ok"
     assert launch_options["stdin"] == __import__("subprocess").DEVNULL
+    if os.name == "nt":
+        flags = launch_options["creationflags"]
+        assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
+        assert flags & subprocess.CREATE_NO_WINDOW
 
 
 def test_docker_executor_applies_isolation_flags(tmp_path, monkeypatch):
@@ -388,3 +429,21 @@ def test_docker_executor_applies_isolation_flags(tmp_path, monkeypatch):
     ] == ["--cap-drop", "ALL"]
     assert "no-new-privileges" in command
     assert str(workspace.root) in " ".join(command)
+
+
+def test_docker_executor_checks_exact_local_image(monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run(args, **_kwargs):
+        calls.append(args)
+        return CompletedProcess(args, 0 if args[-1] == "present:1" else 1, "", "")
+
+    monkeypatch.setattr("agentbench.execution.subprocess.run", fake_run)
+    docker = DockerExecutor(executable="docker")
+
+    assert docker.image_available("present:1") is True
+    assert docker.image_available("missing:1") is False
+    assert calls == [
+        ["docker", "image", "inspect", "present:1"],
+        ["docker", "image", "inspect", "missing:1"],
+    ]

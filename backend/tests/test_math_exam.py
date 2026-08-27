@@ -29,7 +29,7 @@ def test_math_question_drafts_keep_official_150_point_structure():
     assert sum(item["points"] for item in drafts if item["type"] == "choice") == 50
     assert sum(item["points"] for item in drafts if item["type"] == "fill") == 30
     assert sum(item["points"] for item in drafts if item["type"] == "solution") == 70
-    assert [item["points"] for item in drafts[16:]] == [10, 12, 12, 12, 12, 12]
+    assert [item["points"] for item in drafts[16:]] == [10, 10, 10, 10, 15, 15]
     assert drafts[16]["rubric"]["validators"][0]["weight"] == 40
     assert drafts[16]["rubric"]["validators"][1]["weight"] == 60
 
@@ -42,11 +42,15 @@ def test_user_pdf_is_bundled_as_two_verified_22_question_suites():
     assert manifest["source"]["page_count"] == 17
     assert len(manifest["questions"]) == 22
     assert sum(item["points"] for item in manifest["questions"]) == 150
-    assert [item["points"] for item in manifest["questions"][16:]] == [10, 12, 12, 12, 12, 12]
+    assert [item["points"] for item in manifest["questions"][16:]] == [10, 10, 10, 10, 15, 15]
     assert len(cases["closed-book"]) == 22
     assert len(cases["tool-augmented"]) == 22
     assert cases["closed-book"][0]["definition"]["tools"] == []
     assert cases["tool-augmented"][0]["definition"]["tools"]
+    for case in cases["tool-augmented"][:10]:
+        instruction = case["definition"]["instruction"]
+        assert '{"answer":"A"}' not in instruction
+        assert '{"answer":"选项字母"}' in instruction
     proof_validators = cases["closed-book"][18]["definition"]["validators"]
     assert [item["type"] for item in proof_validators] == ["ai_rubric"]
     assert proof_validators[0]["weight"] == 100
@@ -58,6 +62,10 @@ def test_user_pdf_is_bundled_as_two_verified_22_question_suites():
     assert [item["type"] for item in q17_validator] == ["ai_rubric"]
     assert q17_validator[0]["weight"] == 100
     assert q17_validator[0]["config"]["rubric_protocol"] == "agentbench.math-rubric/v1"
+    assert q17_validator[0]["config"]["marking_mode"] == "strict_exam"
+    assert q17_validator[0]["config"]["point_increment"] == 0.5
+    assert q17_validator[0]["config"]["required_judges"] == 2
+    assert q17_validator[0]["config"]["judge_disagreement_threshold"] == 4.0
 
 
 def test_math_pdf_import_is_local_and_stays_in_review(settings):

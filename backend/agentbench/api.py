@@ -845,9 +845,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         experiment_id: str,
         svc: Service,
         scope: str = Query(default="structured", pattern="^(structured|all)$"),
+        reuse_judge: bool = Query(default=False),
     ) -> dict[str, Any]:
         svc.get_experiment(experiment_id)
-        return svc.rejudge_experiment(experiment_id, scope=scope)
+        return svc.rejudge_experiment(
+            experiment_id, scope=scope, reuse_judge=reuse_judge
+        )
 
     @app.get("/api/v1/experiments/{experiment_id}/export")
     def export_experiment(
@@ -890,16 +893,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/v1/runs/{run_id}/rejudge")
     def rejudge_run(run_id: str, svc: Service) -> dict[str, Any]:
-        row = svc.database.fetch_one(
-            "SELECT status,final_answer FROM runs WHERE id=?", (run_id,)
-        )
+        row = svc.database.fetch_one("SELECT id FROM runs WHERE id=?", (run_id,))
         if not row:
             raise HTTPException(status_code=404, detail="run_not_found")
-        if row["status"] not in {"needs_review", "completed"}:
-            raise HTTPException(status_code=409, detail="run_not_rejudgeable")
-        if not (row["final_answer"] or "").strip():
-            raise HTTPException(status_code=409, detail="run_has_no_final_answer")
-        return svc.rejudge_run(run_id)
+        try:
+            return svc.rejudge_run(run_id)
+        except ValueError as exc:
+            if str(exc) in {"run_not_rejudgeable", "run_has_no_final_answer"}:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise
 
     @app.post("/api/v1/runs/{run_id}/manual-score")
     def manual_score(run_id: str, payload: ManualScoreUpdate, svc: Service) -> dict[str, Any]:

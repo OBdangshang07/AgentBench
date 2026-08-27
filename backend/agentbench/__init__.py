@@ -1,3 +1,3 @@
 """AgentBench Desktop local evaluation service."""
 
-__version__ = "5.2.6"
+__version__ = "5.3.0"

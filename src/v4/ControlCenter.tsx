@@ -10,12 +10,12 @@ import {
   FolderKanban,
   GitFork,
   ListTodo,
-  Play,
+  MessageSquarePlus,
+  Plus,
   ShieldAlert,
   Sparkles,
   Unplug,
   X,
-  Zap,
 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
@@ -35,6 +35,31 @@ function relativeTime(value: string | null | undefined) {
   return `${Math.floor(seconds / 86400)} 天前`;
 }
 
+function failureSummary(value: string | null | undefined) {
+  if (!value) return "会话意外中断，打开查看原因和可恢复操作。";
+  let summary: unknown = value.trim();
+  for (let depth = 0; depth < 2; depth += 1) {
+    if (typeof summary !== "string" || !summary.trim().startsWith("{")) break;
+    try {
+      const parsed = JSON.parse(summary) as Record<string, unknown>;
+      summary = parsed.message ?? parsed.error ?? parsed.result ?? parsed.detail ?? summary;
+    } catch {
+      break;
+    }
+  }
+  const readable = String(summary).replace(/\\n/g, " ").replace(/\s+/g, " ").trim();
+  return readable.length > 180 ? `${readable.slice(0, 177)}…` : readable;
+}
+
+const sessionStatus: Record<string, string> = {
+  queued: "排队中",
+  running: "执行中",
+  waiting_approval: "等待审批",
+  completed: "已完成",
+  failed: "失败",
+  interrupted: "已中断",
+};
+
 export default function ControlCenter() {
   const navigate = useNavigate();
   const { data, loading, error, refresh } = useApi<StudioDashboardData>("/studio/dashboard", 3_000);
@@ -42,138 +67,103 @@ export default function ControlCenter() {
   async function decide(approval: ApprovalRequest, decision: "allow_once" | "deny") {
     await api(`/approvals/${approval.id}/decision`, {
       method: "POST",
-      body: JSON.stringify({ decision, reason: "在控制中心处理" }),
+      body: JSON.stringify({ decision, reason: "在首页处理" }),
     });
     await refresh();
   }
 
+  const hasProjects = (data?.project_count ?? 0) > 0;
+  const hasRuntime = (data?.runtime_health?.models_enabled ?? 0) > 0 && (data?.runtime_health?.runners_enabled ?? 0) > 0;
+  const nextAction = (data?.pending_approvals ?? 0) > 0
+    ? { eyebrow: "需要你的决定", title: `处理 ${data?.pending_approvals} 个待审批操作`, detail: "Agent 已暂停在安全边界，处理后会继续执行。", to: "#pending-approvals", label: "查看审批", icon: ShieldAlert }
+    : (data?.active_sessions ?? 0) > 0
+      ? { eyebrow: "工作正在进行", title: `继续查看 ${data?.active_sessions} 个运行中会话`, detail: "查看公开进度、工具调用和文件变更。", to: "/studio", label: "查看运行", icon: Activity }
+      : !hasRuntime
+        ? { eyebrow: "首次使用 · 第 1 步", title: "准备 Agent 与模型", detail: "检查本机 CLI、登录状态和可用模型。", to: "/models", label: "检查运行环境", icon: Cpu }
+        : !hasProjects
+          ? { eyebrow: "首次使用 · 第 2 步", title: "添加一个本地项目", detail: "只授权 Agent 本次工作真正需要的目录。", to: "/projects?new=1", label: "添加项目", icon: FolderKanban }
+          : { eyebrow: "一切就绪", title: "开始一项新的 Agent 工作", detail: "选择项目、Agent 和模型，然后直接描述目标。", to: "/studio?new=1", label: "开始新会话", icon: Sparkles };
+  const NextIcon = nextAction.icon;
+
   return (
-    <div className="v4-page v4-control-page">
-      <header className="v4-page-head">
-        <div><span>LOCAL AGENT COMMAND</span><h1>控制中心</h1><p>统一观察项目、会话、审批和 Agent Runtime 状态，所有操作都在本机完成。</p></div>
-        <div><Link className="v4-button secondary" to="/flows"><GitFork size={16} />新建工作流</Link><Link className="v4-button primary" to="/studio"><Sparkles size={16} />新建 Agent 会话</Link></div>
+    <div className="v4-page v4-control-page v53-home">
+      <header className="v4-page-head v53-page-head">
+        <div><span>本地 Agent 工作台</span><h1>今天要做什么？</h1><p>继续正在进行的工作，处理阻塞，或从一个项目开始新任务。</p></div>
+        <div><Link className="v4-button secondary" to="/projects?new=1"><Plus size={16} />添加项目</Link><Link className="v4-button primary" to="/studio?new=1"><MessageSquarePlus size={16} />开始新会话</Link></div>
       </header>
 
-      {error && <div className="v4-error">{error}<button type="button" onClick={() => void refresh()}>重试</button></div>}
+      {error && <div className="v4-error" role="alert"><CircleAlert size={16} />无法读取工作台数据：{error}<button type="button" onClick={() => void refresh()}>重试</button></div>}
 
-      <section className="v4-command-grid">
-        <article className="v4-panel v4-hero-panel">
-          <div className="v4-hero-copy">
-            <span><i />Agent Runtime 5.0</span>
-            <h2>把所有 Agent 放进一个<br /><em>真正可操作的工作台。</em></h2>
-            <p>在统一界面中对话、审阅文件、批准命令、观察终端，并把任务交给不同 Agent 协同完成。</p>
-            <div><Link className="v4-button primary" to="/studio"><Play size={16} />进入 Agent Studio</Link><Link className="v4-button secondary" to="/projects"><FolderKanban size={16} />选择项目</Link><small><b>{data?.active_sessions ?? 0} 个</b> Agent 正在本机运行</small></div>
-          </div>
-          <div className="v4-orbit" aria-hidden="true"><i /><b /><em /><span /></div>
+      <section className="v53-home-lead">
+        <article className="v53-next-action">
+          <span className="v53-next-icon"><NextIcon size={22} /></span>
+          <div><small>{nextAction.eyebrow}</small><h2>{nextAction.title}</h2><p>{nextAction.detail}</p></div>
+          {nextAction.to.startsWith("#")
+            ? <a className="v4-button primary" href={nextAction.to}>{nextAction.label}<ArrowRight size={15} /></a>
+            : <Link className="v4-button primary" to={nextAction.to}>{nextAction.label}<ArrowRight size={15} /></Link>}
         </article>
-
-        <article className="v4-panel v4-approval-panel" id="pending-approvals">
-          <header className="v4-panel-head"><div><strong>待你处理</strong><small>{data?.pending_approvals ?? 0} 个权限请求</small></div><span className="v4-status amber"><i />REVIEW</span></header>
-          {data?.pending_approvals_list?.length ? (
-            <div className="v4-approval-list">
-              {data.pending_approvals_list.slice(0, 2).map((approval) => (
-                <section key={approval.id} className="v4-approval-card">
-                  <header><ShieldAlert size={17} /><strong>{approval.title}</strong><small>{approval.risk_level.toUpperCase()}</small></header>
-                  <p>{approval.description || "Agent 请求执行一项受保护的操作。"}</p>
-                  <code>{String(approval.request.command ?? approval.request.path ?? approval.request_type)}</code>
-                  <div><button type="button" className="deny" onClick={() => void decide(approval, "deny")}><X size={14} />拒绝</button><button type="button" className="allow" onClick={() => void decide(approval, "allow_once")}><Check size={14} />允许一次</button></div>
-                </section>
-              ))}
-            </div>
-          ) : <div className="v4-empty compact"><Check size={22} /><strong>没有待处理审批</strong><span>受保护操作会在这里等待你的决定</span></div>}
-        </article>
+        <nav className="v53-quick-actions" aria-label="常用操作">
+          <Link to="/studio?new=1"><Sparkles size={18} /><span><strong>新会话</strong><small>直接交代一项工作</small></span></Link>
+          <Link to="/tasks?new=1"><ListTodo size={18} /><span><strong>新任务</strong><small>建立可追踪工作项</small></span></Link>
+          <Link to="/flows?new=1"><GitFork size={18} /><span><strong>自动化</strong><small>编排重复流程</small></span></Link>
+          <Link to="/benchmarks"><Activity size={18} /><span><strong>能力评测</strong><small>比较 Agent 与模型</small></span></Link>
+        </nav>
       </section>
 
-      <section className="v4-metrics">
-        <article><header><span>活跃会话</span><Bot size={16} /></header><strong>{String(data?.active_sessions ?? 0).padStart(2, "0")}</strong><small>{data?.session_count ?? 0} 个历史会话</small></article>
-        <article><header><span>开放任务</span><Zap size={16} /></header><strong>{String(data?.open_tasks ?? 0).padStart(2, "0")}</strong><small>{data?.completed_tasks ?? 0} 个已完成</small></article>
-        <article><header><span>Token 使用</span><Clock3 size={16} /></header><strong>{compact(data?.total_tokens ?? 0)}</strong><small>跨全部 Studio 会话</small></article>
-        <article><header><span>本地运行费用</span><Coins size={16} /></header><strong>${(data?.total_cost ?? 0).toFixed(2)}</strong><small>按模型公开价格估算</small></article>
-      </section>
-
-      <section className="v4-dashboard-lower">
-        <article className="v4-panel">
-          <header className="v4-panel-head"><div><strong>正在运行</strong><small>Agent 活动与项目进度</small></div><Link to="/studio">查看 Studio <ArrowRight size={14} /></Link></header>
-          <div className="v4-run-list">
-            {data?.active_sessions_list?.length ? data.active_sessions_list.map((session) => (
-              <button key={session.id} type="button" onClick={() => navigate(`/studio/${session.id}`)}>
-                <span className="v4-agent-avatar">{session.runner_name?.slice(0, 2).toUpperCase() || "AI"}</span>
-                <span><strong>{session.title}</strong><small>{session.runner_name} · {session.model_name}</small></span>
-                <span><strong>{session.project_name}</strong><small>{session.summary || "Agent 正在处理任务"}</small></span>
-                <span className={`v4-status ${session.status === "waiting_approval" ? "amber" : "green"}`}><i />{session.status}</span>
-                <time>{relativeTime(session.updated_at)}</time>
-              </button>
-            )) : <div className="v4-empty compact"><Bot size={22} /><strong>{loading ? "正在读取 Runtime…" : "当前没有运行中的 Agent"}</strong><span>进入 Agent Studio 开始一个本地会话</span></div>}
-          </div>
+      <section className="v53-home-main">
+        <article className="v4-panel v53-attention" id="pending-approvals">
+          <header className="v4-panel-head"><div><strong>需要你处理</strong><small>审批、失败与中断会优先出现在这里</small></div>{(data?.pending_approvals ?? 0) > 0 && <span className="v4-status amber"><i />{data?.pending_approvals} 项待处理</span>}</header>
+          {data?.pending_approvals_list?.length ? <div className="v53-approval-list">
+            {data.pending_approvals_list.slice(0, 3).map((approval) => <section key={approval.id} className="v53-approval-row">
+              <span className={`risk ${approval.risk_level}`}><ShieldAlert size={17} /></span>
+              <div><strong>{approval.title}</strong><p>{approval.description || "Agent 请求执行一项受保护的操作。"}</p><code>{String(approval.request.command ?? approval.request.path ?? approval.request_type)}</code></div>
+              <small>{approval.risk_level === "high" ? "高风险" : approval.risk_level === "medium" ? "需确认" : "低风险"}</small>
+              <div className="actions"><button type="button" className="deny" onClick={() => void decide(approval, "deny")}><X size={14} />拒绝</button><button type="button" className="allow" onClick={() => void decide(approval, "allow_once")}><Check size={14} />仅允许这一次</button></div>
+            </section>)}
+          </div> : data?.recent_failures?.length ? <div className="v53-failure-list">
+            {data.recent_failures.slice(0, 3).map((failure) => <button key={failure.id} type="button" onClick={() => navigate(`/studio/${failure.id}`)}><CircleAlert size={17} /><span><strong>{failure.title}</strong><small>{failure.project_name} · {relativeTime(failure.updated_at)}</small><p>{failureSummary(failure.error_message)}</p></span><ArrowRight size={14} /></button>)}
+          </div> : <div className="v4-empty compact"><Check size={22} /><strong>目前没有阻塞</strong><span>需要审批、失败或中断的工作会优先显示在这里</span></div>}
         </article>
 
-        <article className="v4-panel">
-          <header className="v4-panel-head"><div><strong>最近项目</strong><small>已授权的本地工作区</small></div><Link to="/projects">全部项目 <ArrowRight size={14} /></Link></header>
-          <div className="v4-project-strip">
-            {data?.recent_projects?.slice(0, 2).map((project) => (
-              <button key={project.id} type="button" onClick={() => navigate(`/projects/${project.id}`)}>
-                <span><FolderKanban size={18} /></span><strong>{project.name}</strong><small>{project.branch || "local"}</small><p>{project.description || project.root_path}</p><footer><b>{project.session_count} 会话</b><time>{relativeTime(project.last_opened_at)}</time></footer>
-              </button>
-            ))}
-            {!data?.recent_projects?.length && <div className="v4-empty compact"><FolderKanban size={22} /><strong>还没有项目</strong><span>添加本地目录后即可交给 Agent 操作</span></div>}
+        <article className="v4-panel v53-running-work">
+          <header className="v4-panel-head"><div><strong>继续工作</strong><small>最近更新的会话与项目</small></div><Link to="/studio">全部会话 <ArrowRight size={14} /></Link></header>
+          <div className="v53-session-list">
+            {data?.active_sessions_list?.length ? data.active_sessions_list.slice(0, 4).map((session) => <button key={session.id} type="button" onClick={() => navigate(`/studio/${session.id}`)}>
+              <span className="v4-agent-avatar">{session.runner_name?.slice(0, 2).toUpperCase() || "AI"}</span>
+              <span><strong>{session.title}</strong><small>{session.project_name} · {session.runner_name}</small><p>{session.summary || "Agent 正在处理任务"}</p></span>
+              <em className={session.status === "waiting_approval" ? "attention" : "running"}>{sessionStatus[session.status] ?? session.status}</em><time>{relativeTime(session.updated_at)}</time>
+            </button>) : data?.recent_projects?.length ? data.recent_projects.slice(0, 3).map((project) => <button key={project.id} type="button" onClick={() => navigate(`/projects/${project.id}`)}>
+              <span className="v4-agent-avatar project"><FolderKanban size={17} /></span><span><strong>{project.name}</strong><small>{project.branch || "本地项目"}</small><p>{project.description || project.root_path}</p></span><em>{project.session_count} 个会话</em><time>{relativeTime(project.last_opened_at)}</time>
+            </button>) : <div className="v4-empty compact"><FolderKanban size={22} /><strong>{loading ? "正在读取本地工作…" : "还没有可以继续的工作"}</strong><span>添加一个项目，然后开始第一轮会话</span></div>}
           </div>
         </article>
       </section>
 
-      <section className="v5-control-activity">
-        <article className="v4-panel v5-unified-activity">
-          <header className="v4-panel-head"><div><strong>统一活动流</strong><small>会话、任务与 Flow 的可验证进度</small></div><span className="v4-status green"><i />LIVE</span></header>
+      <section className="v53-home-secondary">
+        <article className="v4-panel v53-work-queue">
+          <header className="v4-panel-head"><div><strong>任务与自动化</strong><small>可以离开页面持续执行的工作</small></div><Link to="/tasks">打开任务中心 <ArrowRight size={14} /></Link></header>
           <div>
-            {data?.activity?.length ? data.activity.slice(0, 12).map((item) => {
-              const Icon = item.source_type === "session" ? Bot : item.source_type === "task" ? ListTodo : GitFork;
-              return <button key={item.id} type="button" onClick={() => navigate(item.href)}>
-                <span className={`v5-activity-icon ${item.status}`}><Icon size={15} /></span>
-                <span><strong>{item.summary}</strong><small>{item.source_title} · {item.project_name || "本地工作区"}</small></span>
-                <b>{item.source_type === "session" ? "SESSION" : item.source_type === "task" ? "TASK" : "FLOW"}</b>
-                <time>{relativeTime(item.created_at)}</time>
-                <ArrowRight size={13} />
-              </button>;
-            }) : <div className="v4-empty compact"><Activity size={22} /><strong>还没有运行活动</strong><span>Agent、任务和 Flow 的进度会汇总到这里</span></div>}
+            {data?.active_tasks_list?.slice(0, 4).map((task) => <button key={`task-${task.id}`} type="button" onClick={() => navigate(`/tasks/${task.id}`)}><span><ListTodo size={15} /></span><div><strong>{task.title}</strong><small>{task.project_name || "未绑定项目"}</small></div><b className={task.status === "approval" ? "attention" : "running"}>{task.status === "approval" ? "等待审批" : "执行中"}</b></button>)}
+            {data?.active_flows_list?.slice(0, 3).map((flow) => <button key={`flow-${flow.id}`} type="button" onClick={() => navigate(`/flows?flow=${flow.id}`)}><span><GitFork size={15} /></span><div><strong>{flow.name}</strong><small>{flow.project_name || "未绑定项目"} · {flow.completed_nodes}/{flow.node_count} 节点</small></div><b className="running">运行中</b></button>)}
+            {!data?.active_tasks_list?.length && !data?.active_flows_list?.length && <div className="v4-empty compact"><Check size={22} /><strong>当前没有后台工作</strong><span>需要追踪进度或重复执行时，可以创建任务或 Flow</span></div>}
           </div>
         </article>
 
-        <article className="v4-panel v5-active-work">
-          <header className="v4-panel-head"><div><strong>当前工作队列</strong><small>离开页面也能掌握执行状态</small></div><Link to="/tasks">任务中心 <ArrowRight size={14} /></Link></header>
-          <div>
-            {data?.active_tasks_list?.map((task) => <button key={`task-${task.id}`} type="button" onClick={() => navigate(`/tasks/${task.id}`)}>
-              <span><ListTodo size={15} /></span><div><strong>{task.title}</strong><small>{task.project_name || "未绑定项目"} · {task.priority.toUpperCase()}</small></div><b className={task.status === "approval" ? "attention" : "running"}>{task.status}</b>
-            </button>)}
-            {data?.active_flows_list?.map((flow) => <button key={`flow-${flow.id}`} type="button" onClick={() => navigate(`/flows?flow=${flow.id}`)}>
-              <span><GitFork size={15} /></span><div><strong>{flow.name}</strong><small>{flow.project_name || "未绑定项目"} · {flow.completed_nodes}/{flow.node_count} 节点</small></div><b className="running">{flow.status}</b>
-            </button>)}
-            {!data?.active_tasks_list?.length && !data?.active_flows_list?.length && <div className="v4-empty compact"><Check size={22} /><strong>工作队列为空</strong><span>后台任务和 Flow 运行时会显示在这里</span></div>}
-          </div>
-        </article>
-      </section>
-
-      <section className="v5-observability-grid">
-        <article className="v4-panel v5-runtime-health">
-          <header className="v4-panel-head"><div><strong>运行环境摘要</strong><small>模型、Agent 与 MCP 配置状态</small></div><Link to="/models">管理运行时 <ArrowRight size={14} /></Link></header>
+        <article className="v4-panel v53-runtime-summary">
+          <header className="v4-panel-head"><div><strong>运行准备</strong><small>开始工作前需要的本地资源</small></div><Link to="/settings">管理资源 <ArrowRight size={14} /></Link></header>
           <div className="v5-health-grid">
-            <Link to="/models"><Cpu size={18} /><span><strong>{data?.runtime_health?.models_enabled ?? 0} 个模型</strong><small>可供 Studio、Flow 与测评选择</small></span><i className={(data?.runtime_health?.models_enabled ?? 0) > 0 ? "healthy" : "warning"} /></Link>
-            <Link to="/models"><Bot size={18} /><span><strong>{data?.runtime_health?.runners_enabled ?? 0} 个 Agent</strong><small>进入运行时页可执行真实能力检测</small></span><i className={(data?.runtime_health?.runners_enabled ?? 0) > 0 ? "healthy" : "warning"} /></Link>
-            <Link to="/tools"><Unplug size={18} /><span><strong>{data?.runtime_health?.mcp_healthy ?? 0} / {data?.runtime_health?.mcp_enabled ?? 0} MCP 健康</strong><small>{(data?.runtime_health?.mcp_error ?? 0) > 0 ? `${data?.runtime_health?.mcp_error} 个连接需要处理` : "工具连接没有已知错误"}</small></span><i className={(data?.runtime_health?.mcp_error ?? 0) > 0 ? "danger" : (data?.runtime_health?.mcp_enabled ?? 0) > 0 ? "healthy" : "muted"} /></Link>
+            <Link to="/models"><Cpu size={18} /><span><strong>{data?.runtime_health?.models_enabled ?? 0} 个模型</strong><small>用于会话、Flow 与评测</small></span><i className={(data?.runtime_health?.models_enabled ?? 0) > 0 ? "healthy" : "warning"} /></Link>
+            <Link to="/models"><Bot size={18} /><span><strong>{data?.runtime_health?.runners_enabled ?? 0} 个 Agent</strong><small>本机已启用的执行入口</small></span><i className={(data?.runtime_health?.runners_enabled ?? 0) > 0 ? "healthy" : "warning"} /></Link>
+            <Link to="/tools"><Unplug size={18} /><span><strong>{data?.runtime_health?.mcp_healthy ?? 0} / {data?.runtime_health?.mcp_enabled ?? 0} 个工具连接正常</strong><small>{(data?.runtime_health?.mcp_error ?? 0) > 0 ? `${data?.runtime_health?.mcp_error} 个连接需要处理` : "没有已知连接错误"}</small></span><i className={(data?.runtime_health?.mcp_error ?? 0) > 0 ? "danger" : "healthy"} /></Link>
           </div>
         </article>
+      </section>
 
-        <article className="v4-panel v5-recent-failures">
-          <header className="v4-panel-head"><div><strong>最近需要关注</strong><small>失败或因重启中断的 Agent 会话</small></div><Link to="/studio">全部会话 <ArrowRight size={14} /></Link></header>
-          <div className="v5-failure-list">
-            {data?.recent_failures?.length ? data.recent_failures.map((failure) => (
-              <button key={failure.id} type="button" onClick={() => navigate(`/studio/${failure.id}`)}>
-                <CircleAlert size={17} />
-                <span><strong>{failure.title}</strong><small>{failure.project_name} · {failure.runner_name || "Agent"} · {relativeTime(failure.updated_at)}</small></span>
-                <p>{failure.error_message || (failure.status === "interrupted" ? "应用退出时任务仍在运行，可打开会话继续处理。" : "会话执行失败，打开查看公开进度与错误详情。")}</p>
-                <ArrowRight size={14} />
-              </button>
-            )) : <div className="v4-empty compact"><Check size={22} /><strong>最近没有 Agent 失败</strong><span>失败和意外中断会集中显示在这里</span></div>}
-          </div>
-        </article>
+      <section className="v53-home-stats" aria-label="使用概览">
+        <article><Clock3 size={15} /><span>历史会话</span><strong>{data?.session_count ?? 0}</strong></article>
+        <article><ListTodo size={15} /><span>已完成任务</span><strong>{data?.completed_tasks ?? 0}</strong></article>
+        <article><Activity size={15} /><span>Token 使用</span><strong>{compact(data?.total_tokens ?? 0)}</strong></article>
+        <article><Coins size={15} /><span>费用估算</span><strong>${(data?.total_cost ?? 0).toFixed(2)}</strong></article>
       </section>
     </div>
   );

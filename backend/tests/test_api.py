@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import json
+import sqlite3
+import threading
 import urllib.parse
 
 import pytest
@@ -40,12 +42,12 @@ def test_health_and_catalog_api(settings):
     with TestClient(create_app(settings)) as client:
         health = client.get("/api/v1/health")
         assert health.status_code == 200
-        assert health.json()["version"] == "5.2.6"
+        assert health.json()["version"] == "5.3.0"
         cases = client.get("/api/v1/test-cases").json()
         # 214 existing cases plus the two built-in 2025 Math I tracks
         # (22 questions each). The API must expose the bundled paper without
         # requiring a user-side PDF import.
-        assert len(cases) == 282
+        assert len(cases) == 284
         assert {item["difficulty"] for item in cases} == {1, 2, 3, 4, 5, 6}
         assert any(item["requires_docker"] for item in cases)
         assert any(item["requires_judge"] for item in cases)
@@ -195,6 +197,58 @@ def test_model_delete_archives_referenced_models_and_restore(settings):
         assert referenced["id"] in {
             model["id"] for model in client.get("/api/v1/models").json()
         }
+
+
+def test_retry_completed_run_reopens_experiment_before_dispatch(settings, monkeypatch):
+    dispatched = threading.Event()
+    observed: dict[str, str] = {}
+
+    def capture_dispatch(self, run_id, semaphore):
+        row = self.database.fetch_one(
+            "SELECT r.status AS run_status,e.status AS experiment_status "
+            "FROM runs r JOIN experiments e ON e.id=r.experiment_id WHERE r.id=?",
+            (run_id,),
+        )
+        observed.update(row or {})
+        dispatched.set()
+
+    monkeypatch.setattr(EvaluationService, "_run_with_semaphore", capture_dispatch)
+    with TestClient(create_app(settings)) as client:
+        created = client.post(
+            "/api/v1/experiments",
+            json={
+                "name": "Retry a terminal run",
+                "suite_id": SMOKE_SUITE_ID,
+                "participants": [
+                    {"model_id": MOCK_MODEL_ID, "runner_id": UNIFIED_RUNNER_ID}
+                ],
+                "repetitions": 1,
+                "concurrency": 2,
+            },
+        ).json()
+        with sqlite3.connect(settings.database_path) as connection:
+            run_id = connection.execute(
+                "SELECT id FROM runs WHERE experiment_id=? ORDER BY created_at LIMIT 1",
+                (created["id"],),
+            ).fetchone()[0]
+            connection.execute(
+                "UPDATE experiments SET status='completed',completed_at='done' WHERE id=?",
+                (created["id"],),
+            )
+            connection.execute(
+                "UPDATE runs SET status='completed',score=0,completed_at='done' WHERE id=?",
+                (run_id,),
+            )
+
+        response = client.post(f"/api/v1/runs/{run_id}/retry")
+        assert response.status_code == 200
+        assert dispatched.wait(2)
+        assert observed == {"run_status": "queued", "experiment_status": "running"}
+        with sqlite3.connect(settings.database_path) as connection:
+            status = connection.execute(
+                "SELECT status,completed_at FROM experiments WHERE id=?", (created["id"],)
+            ).fetchone()
+        assert status == ("running", None)
 
 
 def test_suite_cases_endpoint_returns_whitelisted_preview_only(settings):

@@ -312,6 +312,7 @@ export interface Suite {
   builtin: number;
   difficulty_min?: number;
   difficulty_max?: number;
+  estimated_minutes?: number;
   category_count?: number;
   docker_case_count?: number;
   judge_case_count?: number;
@@ -537,6 +538,13 @@ export interface RunDetail extends RunSummary {
   materials?: { name: string; size_bytes: number }[];
   runner_type: string;
   model_name: string;
+  validation_seed?: {
+    algorithm: "sha256" | string;
+    commitment: string;
+    seed?: string | null;
+    committed_at: string;
+    revealed_at?: string | null;
+  } | null;
   frontend?: {
     difficulty: number;
     source_repository: string;

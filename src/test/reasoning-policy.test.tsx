@@ -14,7 +14,7 @@ describe("benchmark reasoning policy", () => {
     const bodies: Record<string, unknown>[] = [];
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.6" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.3.0" });
       if (url.endsWith("/models")) return json([{ id: "model-1", name: "DeepSeek V4 Pro", enabled: true }]);
       if (url.endsWith("/runners")) return json([{ id: "runner-1", name: "DeepSeek Harness", runner_type: "deepseek_harness", enabled: true, capability: { installed: true }, adapter: { default_agent_mode: "standard", agent_modes: [{ id: "standard", name: "标准模式", description: "完整工具集", source: "system", tools_mode: "native", experimental: false, available: true }, { id: "anchored-standard", name: "Anchored Standard", description: "先锚定再展开", source: "user", tools_mode: "native", experimental: true, available: true }], reasoning_control: { supported: true, verified: true, maximum: "max", note: "Harness 实际使用 MAX 档" } } }]);
       if (url.endsWith("/suites")) return json([{ id: "ultra", name: "Ultra 极限挑战", version: "3", case_count: 2, difficulty_min: 6, difficulty_max: 6 }]);
@@ -28,14 +28,19 @@ describe("benchmark reasoning policy", () => {
       return json({});
     });
 
-    render(<MemoryRouter initialEntries={["/experiments"]}><Routes><Route path="/experiments" element={<Experiments />} /><Route path="/experiments/:id" element={<div>experiment</div>} /></Routes></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/experiments?create=1"]}><Routes><Route path="/experiments" element={<Experiments />} /><Route path="/experiments/:id" element={<div>experiment</div>} /></Routes></MemoryRouter>);
 
-    await waitFor(() => expect(screen.getByRole("combobox", { name: "测评思考策略" })).toHaveValue("maximum"));
+    await screen.findByRole("heading", { name: "选择套件" });
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "评测名称" })).not.toHaveValue(""));
+    fireEvent.click(screen.getByRole("button", { name: /下一步/ }));
     fireEvent.change(screen.getByRole("combobox", { name: "参测者 1 模型" }), { target: { value: "model-1" } });
     fireEvent.change(screen.getByRole("combobox", { name: "参测者 1 Agent" }), { target: { value: "runner-1" } });
     fireEvent.change(screen.getByRole("combobox", { name: "参测者 1 Harness 模式" }), { target: { value: "anchored-standard" } });
+    fireEvent.click(screen.getByRole("button", { name: /下一步/ }));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "测评思考策略" })).toHaveValue("maximum"));
     fireEvent.change(screen.getByRole("combobox", { name: "匿名裁判思考强度" }), { target: { value: "xhigh" } });
-    fireEvent.click(screen.getByRole("button", { name: /验证并开始本地评测/ }));
+    fireEvent.click(screen.getByRole("button", { name: /下一步/ }));
+    fireEvent.click(screen.getByRole("button", { name: /通过预检并开始评测/ }));
 
     await waitFor(() => expect(bodies).toHaveLength(1));
     expect(bodies[0]).toMatchObject({

@@ -46,7 +46,7 @@ class Settings:
             log_level=os.getenv("AGENTBENCH_LOG_LEVEL", "INFO").upper(),
             allow_host_shell=_as_bool(os.getenv("AGENTBENCH_ALLOW_HOST_SHELL")),
             allow_native_cli=_as_bool(os.getenv("AGENTBENCH_ALLOW_NATIVE_CLI")),
-            max_workers=max(1, min(int(os.getenv("AGENTBENCH_MAX_WORKERS", "2")), 8)),
+            max_workers=max(1, min(int(os.getenv("AGENTBENCH_MAX_WORKERS", "4")), 8)),
         )
         settings.ensure_directories()
         return settings
@@ -60,5 +60,6 @@ class Settings:
             self.data_dir / "frontend-portfolios",
             self.data_dir / "review-evidence",
             self.data_dir / "chat-sessions",
+            self.data_dir / "private-validators",
         ):
             path.mkdir(parents=True, exist_ok=True)

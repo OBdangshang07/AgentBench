@@ -354,7 +354,7 @@ export default function Tasks() {
   return (
     <div className="v4-page v5-tasks-page">
       <header className="v4-page-head">
-        <div><span>AGENT TASK QUEUE</span><h1>任务中心</h1><p>从计划、执行、审批到结果回溯，在一个工作区管理完整的 Agent 生命周期。</p></div>
+        <div><span>任务与自动化</span><h1>任务</h1><p>把需要持续追踪的工作交给 Agent，并明确验收标准、阻塞和最终结果。</p></div>
         <div><button className="v4-button primary" type="button" onClick={openCreate}><Plus size={16} />新建任务</button></div>
       </header>
 
@@ -442,13 +442,15 @@ export default function Tasks() {
               <label className="full"><span>任务标题</span><input required value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label>
               <label className="full"><span>任务说明</span><textarea value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="说明目标、范围与关键约束" /></label>
               <label className="full v5-acceptance-input"><span>验收标准 <small>每行一项</small></span><textarea value={form.acceptance_criteria} onChange={(event) => setForm({ ...form, acceptance_criteria: event.target.value })} placeholder={"核心路径通过自动化测试\n关键操作具有明确反馈\n不修改任务范围外的文件"} /></label>
-              <label><span>项目</span><select value={form.project_id} onChange={(event) => { const project = projects?.find((item) => item.id === event.target.value); setForm({ ...form, project_id: event.target.value, runner_id: project?.default_runner_id ?? form.runner_id, model_id: project?.default_model_id ?? form.model_id }); }}><option value="">跨项目</option>{projects?.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
+              <label className="full"><span>工作项目</span><select value={form.project_id} onChange={(event) => { const project = projects?.find((item) => item.id === event.target.value); setForm({ ...form, project_id: event.target.value, runner_id: project?.default_runner_id ?? form.runner_id, model_id: project?.default_model_id ?? form.model_id }); }}><option value="">不绑定项目</option>{projects?.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><small>默认使用项目设置中的 Agent、模型和权限</small></label>
+              <details className="v53-session-advanced full"><summary><span><strong>调度与高级设置</strong><small>{priorityLabel(form.priority as StudioTask["priority"])}优先级 · {form.runner_id ? "自定义 Agent" : "项目默认 Agent"}</small></span><Filter size={15} /></summary><div className="v4-form-grid">
               <label><span>优先级</span><select value={form.priority} onChange={(event) => setForm({ ...form, priority: event.target.value })}><option value="low">低</option><option value="normal">普通</option><option value="high">高</option><option value="urgent">紧急</option></select></label>
               <label><span>Agent</span><select value={form.runner_id} onChange={(event) => setForm({ ...form, runner_id: event.target.value })}><option value="">使用项目默认值</option>{runners?.filter((item) => item.enabled).map((runner) => <option key={runner.id} value={runner.id}>{runner.name}</option>)}</select></label>
               <label><span>模型</span><select value={form.model_id} onChange={(event) => setForm({ ...form, model_id: event.target.value })}><option value="">使用项目默认值</option>{models?.filter((item) => item.enabled).map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>
               <label><span>截止时间</span><input type="datetime-local" value={form.due_at} onChange={(event) => setForm({ ...form, due_at: event.target.value })} /></label>
               <label><span>标签</span><input value={form.tags} onChange={(event) => setForm({ ...form, tags: event.target.value })} placeholder="前端, 高优先级" /></label>
               <fieldset className="full v5-dependency-picker"><legend>前置任务</legend>{(tasks ?? []).filter((task) => task.id !== editingId && (!form.project_id || task.project_id === form.project_id)).slice(0, 12).map((task) => <label key={task.id}><input type="checkbox" checked={form.depends_on.includes(task.id)} onChange={(event) => setForm({ ...form, depends_on: event.target.checked ? [...form.depends_on, task.id] : form.depends_on.filter((id) => id !== task.id) })} /><span>{task.title}<small>{taskStatusLabel(task.status)}</small></span></label>)}{!tasks?.length && <small>当前没有可选择的前置任务</small>}</fieldset>
+              </div></details>
               {selectedTask?.result_summary && <section className="full v5-task-result"><strong>最近结果</strong><p>{selectedTask.result_summary}</p>{selectedTask.session_id && <button type="button" onClick={() => navigate(`/studio/${selectedTask.session_id}`)}><ExternalLink size={13} />打开关联会话</button>}</section>}
             </div>
             {formError && <div className="v4-error">{formError}</div>}

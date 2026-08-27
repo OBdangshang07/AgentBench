@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 import httpx
 import yaml
 
-from .execution import native_cli_status, zcode_desktop_runtime
+from .execution import _hidden_console_options, native_cli_status, zcode_desktop_runtime
 
 SOURCE_META: dict[str, tuple[str, str | None]] = {
     "api": ("API 接口", None),
@@ -680,6 +680,7 @@ def _discover_opencode(executable: str | None) -> tuple[list[dict[str, Any]], li
             errors="replace",
             timeout=12,
             check=False,
+            **_hidden_console_options(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return [], ["OpenCode 模型目录读取失败，仍可手动输入模型 ID"]
@@ -693,6 +694,7 @@ def _discover_opencode(executable: str | None) -> tuple[list[dict[str, Any]], li
             errors="replace",
             timeout=8,
             check=False,
+            **_hidden_console_options(),
         )
         if auth_result.returncode == 0:
             configured_providers = set()
@@ -749,6 +751,7 @@ def _discover_reasonix(
             errors="replace",
             timeout=12,
             check=False,
+            **_hidden_console_options(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return [], [], ["Reasonix doctor 读取失败，仍可手动输入 Provider 名称"]
@@ -826,6 +829,7 @@ def _discover_headless_agent(
                     text=True,
                     timeout=12,
                     check=False,
+                    **_hidden_console_options(),
                 )
             except (OSError, subprocess.TimeoutExpired):
                 continue
@@ -920,6 +924,7 @@ def _discover_cursor(executable: str | None) -> tuple[list[dict[str, Any]], list
                 text=True,
                 timeout=12,
                 check=False,
+                **_hidden_console_options(),
             )
         except (OSError, subprocess.TimeoutExpired):
             result = None

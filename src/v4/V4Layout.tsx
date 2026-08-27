@@ -13,6 +13,7 @@ import {
   FolderKanban,
   FlaskConical,
   GitFork,
+  HelpCircle,
   ListTodo,
   LoaderCircle,
   MessageSquareText,
@@ -33,60 +34,81 @@ import { useApi } from "../lib/useApi";
 import type { SystemStatus } from "../types";
 import type { Project, StudioDashboardData, WorkspaceSearchResult } from "./types";
 
-const operationNavigation = [
-  { to: "/", label: "控制中心", icon: CircleGauge, end: true },
-  { to: "/projects", label: "项目中心", icon: FolderKanban },
-  { to: "/studio", label: "Agent Studio", icon: Sparkles },
-  { to: "/flows", label: "Agent Flow", icon: GitFork },
-  { to: "/tasks", label: "任务中心", icon: ListTodo },
+interface NavigationItem {
+  to: string;
+  label: string;
+  icon: typeof CircleGauge;
+  end?: boolean;
+  aliases?: string[];
+}
+
+const operationNavigation: NavigationItem[] = [
+  { to: "/", label: "首页", icon: CircleGauge, end: true },
+  { to: "/projects", label: "项目", icon: FolderKanban },
+  { to: "/studio", label: "会话", icon: Sparkles },
+  { to: "/tasks", label: "任务", icon: ListTodo, aliases: ["/flows"] },
+  { to: "/benchmarks", label: "能力评测", icon: FlaskConical, aliases: ["/library", "/experiments", "/leaderboard", "/profiles", "/runs"] },
+  { to: "/settings", label: "资源与设置", icon: Settings, aliases: ["/models", "/tools"] },
 ];
 
-const platformNavigation = [
-  { to: "/models", label: "模型与 Agent", icon: Bot },
+const workspaceSubNavigation: NavigationItem[] = [
+  { to: "/tasks", label: "任务中心", icon: ListTodo },
+  { to: "/flows", label: "自动化 Flow", icon: GitFork },
+];
+
+const benchmarkSubNavigation: NavigationItem[] = [
+  { to: "/benchmarks", label: "评测首页", icon: FlaskConical },
+  { to: "/library", label: "测试与套件", icon: Boxes },
+  { to: "/experiments", label: "运行记录", icon: Activity },
+  { to: "/leaderboard", label: "排行与报告", icon: CircleGauge },
+];
+
+const resourceSubNavigation: NavigationItem[] = [
+  { to: "/models", label: "Agent 与模型", icon: Bot },
   { to: "/tools", label: "工具与 MCP", icon: PlugZap },
-  { to: "/benchmarks", label: "Benchmarks", icon: FlaskConical },
   { to: "/settings", label: "本地设置", icon: Settings },
 ];
 
 const quickActions = [
-  { to: "/studio?new=1", label: "新建 Agent 会话", detail: "选择当前项目并开始一轮工作", icon: Sparkles },
+  { to: "/studio?new=1", label: "开始新会话", detail: "选择项目并把工作交给 Agent", icon: Sparkles },
   { to: "/tasks?new=1", label: "新建任务", detail: "创建可追踪、可重试的工作项", icon: ListTodo },
-  { to: "/flows?new=1", label: "新建 Agent Flow", detail: "编排多 Agent 与工具节点", icon: GitFork },
+  { to: "/flows?new=1", label: "新建自动化 Flow", detail: "编排多 Agent 与工具节点", icon: GitFork },
   { to: "/projects?new=1", label: "添加本地项目", detail: "授权一个新的工作目录", icon: FolderKanban },
 ];
 
 const pageNames: Array<[RegExp, string]> = [
-  [/^\/$/, "控制中心"],
-  [/^\/projects/, "项目中心"],
-  [/^\/studio/, "Agent Studio"],
-  [/^\/flows/, "Agent Flow"],
-  [/^\/tasks/, "任务中心"],
+  [/^\/$/, "首页"],
+  [/^\/projects/, "项目"],
+  [/^\/studio/, "会话"],
+  [/^\/flows/, "自动化 Flow"],
+  [/^\/tasks/, "任务"],
   [/^\/tools/, "工具与 MCP"],
   [/^\/models/, "模型与 Agent"],
-  [/^\/benchmarks|^\/library|^\/experiments|^\/leaderboard|^\/profiles|^\/runs/, "Benchmarks"],
-  [/^\/settings/, "本地设置"],
+  [/^\/benchmarks|^\/library|^\/experiments|^\/leaderboard|^\/profiles|^\/runs/, "能力评测"],
+  [/^\/settings|^\/models|^\/tools/, "资源与设置"],
 ];
 
 function Brand() {
   return (
     <Link className="v4-brand" to="/" aria-label="AgentBench 控制中心">
       <span className="v4-brand-mark"><img src={agentbenchMark} alt="" /></span>
-      <span><strong>AgentBench</strong><small>AGENT OPERATIONS</small></span>
-      <em>V5</em>
+      <span><strong>AgentBench</strong><small>本地 Agent 工作台</small></span>
+      <em>5.3</em>
     </Link>
   );
 }
 
-function NavigationGroup({ label, items }: { label: string; items: typeof operationNavigation }) {
+function NavigationGroup({ label, items, pathname }: { label: string; items: NavigationItem[]; pathname: string }) {
   return (
     <section className="v4-nav-group">
-      <header><span>{label}</span><small>{items.length} MODULES</small></header>
+      <header><span>{label}</span></header>
       <nav>
-        {items.map(({ to, label: itemLabel, icon: Icon, end }) => (
-          <NavLink key={to} to={to} end={end} className={({ isActive }) => isActive ? "active" : ""}>
+        {items.map((item) => {
+          const { to, label: itemLabel, icon: Icon, end } = item;
+          return <NavLink key={to} to={to} end={end} className={({ isActive }) => isActive || item.aliases?.some((path) => pathname.startsWith(path)) ? "active" : ""}>
             <Icon size={19} /><span>{itemLabel}</span>
-          </NavLink>
-        ))}
+          </NavLink>;
+        })}
       </nav>
     </section>
   );
@@ -121,8 +143,16 @@ export default function V4Layout() {
         : installed === 0
           ? { label: "等待配置", tone: "warning" }
           : { label: "运行正常", tone: "ready" };
-  const showOnboarding = onboardingOpen && Boolean(status && dashboard) && (installed === 0 || (dashboard?.project_count ?? 0) === 0);
+  const showOnboarding = onboardingOpen && Boolean(status && dashboard);
   const selectedProject = projects?.find((project) => project.id === ux.selectedProjectId) ?? projects?.[0];
+  const setupStep = installed === 0 ? 0 : (dashboard?.project_count ?? 0) === 0 ? 1 : 2;
+  const contextualNavigation = location.pathname.startsWith("/tasks") || location.pathname.startsWith("/flows")
+    ? workspaceSubNavigation
+    : /^\/(benchmarks|library|experiments|leaderboard|profiles|runs)/.test(location.pathname)
+      ? benchmarkSubNavigation
+      : /^\/(models|tools|settings)/.test(location.pathname)
+        ? resourceSubNavigation
+        : [];
 
   function dismissOnboarding() {
     window.localStorage.setItem("agentbench.v5.onboarding.done", "1");
@@ -167,8 +197,9 @@ export default function V4Layout() {
 
   const commandItems = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return [...operationNavigation, ...platformNavigation].filter((item) => (
-      !needle || item.label.toLowerCase().includes(needle)
+    return [...operationNavigation, ...workspaceSubNavigation, ...benchmarkSubNavigation, ...resourceSubNavigation].filter((item, index, items) => (
+      items.findIndex((candidate) => candidate.to === item.to) === index &&
+      (!needle || item.label.toLowerCase().includes(needle))
     ));
   }, [query]);
   const visibleActions = useMemo(() => {
@@ -197,27 +228,32 @@ export default function V4Layout() {
         <Brand />
         <button className="v5-shell-collapse" type="button" aria-label={sidebarCollapsed ? "展开主导航" : "收起主导航"} title={sidebarCollapsed ? "展开主导航" : "收起主导航"} onClick={() => setSidebarCollapsed((value) => !value)}>{sidebarCollapsed ? <ChevronsRight size={16} /> : <ChevronsLeft size={16} />}<span>{sidebarCollapsed ? "展开" : "收起导航"}</span></button>
         <div className="v4-nav-scroll">
-          <NavigationGroup label="OPERATIONS" items={operationNavigation} />
-          <NavigationGroup label="PLATFORM" items={platformNavigation} />
+          <NavigationGroup label="工作区" items={operationNavigation} pathname={location.pathname} />
         </div>
         <section className={`v4-runtime-card ${runtime.tone}`}>
-          <header><strong>Local Runtime</strong><span><i />{runtime.label}</span></header>
-          <div><span>Agent adapters</span><b>{installed} / {runners.length || "—"}</b></div>
-          <div><span>Active sessions</span><b>{dashboard?.active_sessions ?? 0}</b></div>
+          <header><strong>本地运行环境</strong><span><i />{runtime.label}</span></header>
+          <div><span>可用 Agent</span><b>{installed} / {runners.length || "—"}</b></div>
+          <div><span>运行中会话</span><b>{dashboard?.active_sessions ?? 0}</b></div>
           <div className="v4-runtime-bar"><i style={{ width: `${runners.length ? Math.round(installed / runners.length * 100) : 0}%` }} /></div>
+          <Link to="/models">检查与配置</Link>
         </section>
       </aside>
 
       <header className="v4-topbar">
-        <div className="v4-breadcrumb"><span>AGENTBENCH</span><ChevronRight size={13} /><strong>{title}</strong>{projects?.length ? <label className="v5-project-switcher" title={selectedProject?.root_path}><FolderKanban size={14} /><select aria-label="当前工作项目" value={selectedProject?.id ?? ""} onChange={(event) => ux.setSelectedProjectId(event.target.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label> : null}</div>
+        <div className="v4-breadcrumb"><span>工作台</span><ChevronRight size={13} /><strong>{title}</strong>{projects?.length ? <label className="v5-project-switcher" title={selectedProject?.root_path}><FolderKanban size={14} /><select aria-label="当前工作项目" value={selectedProject?.id ?? ""} onChange={(event) => ux.setSelectedProjectId(event.target.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label> : null}</div>
         <div className="v4-top-actions">
-          <button className="v4-command-trigger" type="button" onClick={() => setPaletteOpen(true)}><Search size={15} /><span>搜索项目、会话或运行命令</span><kbd>Ctrl K</kbd></button>
+          <button className="v4-command-trigger" type="button" onClick={() => setPaletteOpen(true)}><Search size={15} /><span>搜索或新建</span><kbd>Ctrl K</kbd></button>
           {(dashboard?.pending_approvals ?? 0) > 0 && <Link className="v5-approval-chip" to="/"><ShieldAlert size={15} /><span>{dashboard?.pending_approvals} 个操作等待审批</span></Link>}
           <Link className="v4-live-chip" to="/studio"><Activity size={15} /><span>{dashboard?.active_sessions ?? 0} 个会话运行中</span></Link>
           <button className="v5-density-toggle" type="button" title={`切换为${ux.density === "comfortable" ? "紧凑" : "舒适"}密度`} onClick={() => ux.setDensity(ux.density === "comfortable" ? "compact" : "comfortable")}><Boxes size={16} /><span>{ux.density === "comfortable" ? "舒适" : "紧凑"}</span></button>
+          <button className="v5-help-trigger" type="button" title="打开入门向导" aria-label="打开入门向导" onClick={() => setOnboardingOpen(true)}><HelpCircle size={17} /></button>
           <button className={`v5-notification-trigger ${ux.unreadCount ? "unread" : ""}`} type="button" aria-label={`通知中心，${ux.unreadCount} 条未读`} onClick={() => { const opening = !notificationsOpen; setNotificationsOpen(opening); if (opening) ux.markNotificationsRead(); }}><Bell size={17} />{ux.unreadCount > 0 && <b>{Math.min(99, ux.unreadCount)}</b>}</button>
         </div>
       </header>
+
+      {!!contextualNavigation.length && <nav className="v5-context-nav" aria-label={`${title}子导航`}>
+        {contextualNavigation.map(({ to, label, icon: Icon }) => <NavLink key={to} to={to} end={to === "/benchmarks" || to === "/tasks" || to === "/settings"}><Icon size={14} /><span>{label}</span></NavLink>)}
+      </nav>}
 
       <main className="v4-viewport"><Outlet /></main>
 
@@ -251,7 +287,7 @@ export default function V4Layout() {
                 {searchError && <div className="v5-palette-state error">搜索失败：{searchError}</div>}
               </div>
             )}
-            <footer><Command size={13} /> 本地数据 · Desktop {status?.version ?? "4.0 Preview"}</footer>
+            <footer><Command size={13} /> 数据仅保存在本机 · Desktop {status?.version ?? "5.3.0"}</footer>
           </section>
         </div>
       )}
@@ -264,13 +300,14 @@ export default function V4Layout() {
       {showOnboarding && (
         <div className="v4-modal-backdrop v5-onboarding-backdrop" onMouseDown={dismissOnboarding}>
           <section className="v5-onboarding" role="dialog" aria-modal="true" aria-labelledby="v5-onboarding-title" onMouseDown={(event) => event.stopPropagation()}>
-            <header><div><small>AGENTBENCH V5 · LOCAL FIRST</small><h2 id="v5-onboarding-title">三步开始第一个本地 Agent 任务</h2><p>配置只保存在这台设备。平台不会自动访问未授权目录。</p></div><button type="button" aria-label="关闭首次使用向导" onClick={dismissOnboarding}><X size={17} /></button></header>
+            <header><div><small>入门向导 · 第 {setupStep + 1} 步，共 3 步</small><h2 id="v5-onboarding-title">完成第一个本地 Agent 任务</h2><p>每一步都可以稍后继续。项目目录、模型配置和会话记录只保存在这台设备。</p></div><button type="button" aria-label="关闭入门向导" onClick={dismissOnboarding}><X size={17} /></button></header>
+            <div className="v5-onboarding-progress" aria-label={`入门进度 ${setupStep} / 3`}><i className={setupStep >= 1 ? "done" : "active"} /><i className={setupStep >= 2 ? "done" : setupStep === 1 ? "active" : ""} /><i className={setupStep === 2 ? "active" : ""} /></div>
             <div className="v5-onboarding-steps">
-              <Link to="/models" onClick={dismissOnboarding}><span className={installed > 0 ? "done" : "pending"}>{installed > 0 ? "✓" : "01"}</span><div><strong>检测 Agent 与模型</strong><p>{installed > 0 ? `已发现 ${installed} 个可运行 Agent` : "自动识别 CLI、登录状态和可选模型；支持快捷安装"}</p></div><TerminalSquare size={17} /></Link>
-              <Link to="/projects" onClick={dismissOnboarding}><span className={(dashboard?.project_count ?? 0) > 0 ? "done" : "pending"}>{(dashboard?.project_count ?? 0) > 0 ? "✓" : "02"}</span><div><strong>授权一个本地项目</strong><p>{(dashboard?.project_count ?? 0) > 0 ? `已有 ${dashboard?.project_count} 个项目` : "只授权需要操作的目录，并为项目设置默认 Agent"}</p></div><FolderKanban size={17} /></Link>
-              <Link to="/studio" onClick={dismissOnboarding}><span className="pending">03</span><div><strong>发送任务并观察执行</strong><p>附件、权限、审批、浏览器和终端都在同一个会话中</p></div><Sparkles size={17} /></Link>
+              <Link className={setupStep === 0 ? "current" : ""} to="/models" onClick={dismissOnboarding}><span className={installed > 0 ? "done" : "pending"}>{installed > 0 ? "✓" : "1"}</span><div><strong>准备 Agent 与模型</strong><p>{installed > 0 ? `已发现 ${installed} 个可运行 Agent` : "检查 CLI、登录状态与可用模型，并按提示完成配置"}</p></div><TerminalSquare size={17} /></Link>
+              <Link className={setupStep === 1 ? "current" : ""} to="/projects?new=1" onClick={dismissOnboarding}><span className={(dashboard?.project_count ?? 0) > 0 ? "done" : "pending"}>{(dashboard?.project_count ?? 0) > 0 ? "✓" : "2"}</span><div><strong>添加一个本地项目</strong><p>{(dashboard?.project_count ?? 0) > 0 ? `已有 ${dashboard?.project_count} 个项目可用` : "选择目录并确认 Agent 可以访问的范围"}</p></div><FolderKanban size={17} /></Link>
+              <Link className={setupStep === 2 ? "current" : ""} to="/studio?new=1" onClick={dismissOnboarding}><span className="pending">3</span><div><strong>发送第一个任务</strong><p>描述目标，确认运行配置，然后观察执行、审批与结果</p></div><Sparkles size={17} /></Link>
             </div>
-            <footer><button className="v4-button secondary" type="button" onClick={dismissOnboarding}>暂时跳过</button><Link className="v4-button primary" to={installed === 0 ? "/models" : "/projects"} onClick={dismissOnboarding}>开始配置<ArrowRight size={15} /></Link></footer>
+            <footer><button className="v4-button secondary" type="button" onClick={dismissOnboarding}>稍后继续</button><Link className="v4-button primary" to={setupStep === 0 ? "/models" : setupStep === 1 ? "/projects?new=1" : "/studio?new=1"} onClick={dismissOnboarding}>{setupStep === 2 ? "开始第一个任务" : "继续下一步"}<ArrowRight size={15} /></Link></footer>
           </section>
         </div>
       )}

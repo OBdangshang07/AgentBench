@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import threading
 from pathlib import Path
 from subprocess import CompletedProcess
+
+import pytest
 
 from agentbench.agent import AgentResult
 from agentbench.execution import CommandResult, Workspace, native_cli_status
@@ -70,6 +74,8 @@ def test_zcode_status_uses_official_desktop_runtime(monkeypatch, tmp_path: Path)
     assert status["runtime_script"] == str(script)
     assert calls[0][0] == [str(executable), str(script), "--version"]
     assert calls[0][1]["env"]["ELECTRON_RUN_AS_NODE"] == "1"
+    if os.name == "nt":
+        assert calls[0][1]["creationflags"] & subprocess.CREATE_NO_WINDOW
 
 
 def test_zcode_discovery_reads_catalog_without_exposing_keys(monkeypatch, tmp_path: Path) -> None:
@@ -217,8 +223,12 @@ def test_zcode_permissions_attachments_and_capabilities_are_honest() -> None:
     assert capability["visible_browser"] is False
 
 
-def test_zcode_native_run_uses_ephemeral_home_and_cleans_it(
-    settings, tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    ("declared_tools", "expected_mode"),
+    [(["filesystem", "shell"], "yolo"), (["filesystem"], "edit")],
+)
+def test_zcode_native_run_uses_task_scoped_permissions_and_cleans_ephemeral_home(
+    settings, tmp_path, monkeypatch, declared_tools, expected_mode
 ) -> None:
     source = tmp_path / "desktop-config.json"
     source.write_text(json.dumps(_desktop_config()), encoding="utf-8")
@@ -263,6 +273,7 @@ def test_zcode_native_run_uses_ephemeral_home_and_cleans_it(
             },
             {
                 "instruction": "Return OK",
+                "tools": declared_tools,
                 "limits": {"timeout_seconds": 30},
                 "metadata": {"reasoning_effort": "high"},
             },
@@ -274,6 +285,7 @@ def test_zcode_native_run_uses_ephemeral_home_and_cleans_it(
         assert result.ok is True
         assert result.final_answer == "OK"
         assert captured["extra_env"]["ELECTRON_RUN_AS_NODE"] == "1"
+        assert captured["args"][captured["args"].index("--mode") + 1] == expected_mode
         runtime_home = Path(captured["extra_env"]["USERPROFILE"])
         assert captured["placeholders"]["zcode_cli"] == "zcode.cjs"
         assert not runtime_home.exists()

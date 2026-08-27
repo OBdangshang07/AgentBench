@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import secrets as secure_random
 import shutil
 import statistics
 import subprocess
@@ -58,7 +59,7 @@ from .math_exam import (
     mark_math_import_published,
     update_math_question,
 )
-from .math_rubric import rubric_json_schema, score_rubric
+from .math_rubric import RUBRIC_SCHEMA, rubric_json_schema, score_rubric
 from .mcp_runtime import McpRuntimeError, call_mcp_tool, probe_mcp
 from .model_clients import (
     AnthropicClient,
@@ -68,6 +69,11 @@ from .model_clients import (
     OpenAICompatibleClient,
 )
 from .model_discovery import deepseek_harness_default_selection, discover_models
+from .private_validators import (
+    PrivateValidatorError,
+    PrivateValidatorStore,
+    install_private_validator_bundle,
+)
 from .reports import create_backup, export_experiment, restore_backup
 from .schemas import (
     ExperimentCreate,
@@ -543,6 +549,17 @@ def public_definition(definition: dict[str, Any]) -> dict[str, Any]:
         config = validator.get("config") or {}
         kind = str(validator.get("type") or "")
         hidden = config.pop("private_files", None) is not None
+        private_reference = config.get("private_validator_ref")
+        if private_reference is not None:
+            hidden = True
+            if isinstance(private_reference, dict):
+                config["private_validator_ref"] = {
+                    key: private_reference.get(key)
+                    for key in ("bundle_id", "version", "validator_id", "manifest_sha256")
+                    if private_reference.get(key) is not None
+                }
+            else:
+                config["private_validator_ref"] = {"invalid": True}
         sensitive_keys = {
             "exact_match": {"expected"},
             "contains": {"text"},
@@ -582,7 +599,19 @@ class EvaluationService:
         self.studio = StudioService(self.database, settings, self.secrets)
         self.browser = BrowserRuntime(settings.data_dir)
         self.docker = DockerExecutor()
-        self.scoring = ScoringEngine(self.docker)
+        bundled_validator_root = Path(__file__).resolve().parent / "private_validator_bundles"
+        for validator_bundle in bundled_validator_root.glob("*.abpv"):
+            try:
+                install_private_validator_bundle(
+                    validator_bundle,
+                    settings.data_dir / "private-validators",
+                )
+            except Exception:
+                logger.exception("Could not install private validator bundle %s", validator_bundle)
+        self.scoring = ScoringEngine(
+            self.docker,
+            PrivateValidatorStore(settings.data_dir / "private-validators"),
+        )
         self.executor = ThreadPoolExecutor(
             max_workers=settings.max_workers, thread_name_prefix="agentbench-run"
         )
@@ -602,6 +631,35 @@ class EvaluationService:
         self._preview_servers: dict[str, tuple[ThreadingHTTPServer, threading.Thread, str]] = {}
         self._state_lock = threading.RLock()
         self.recover_interrupted_runs()
+
+    def _validation_seed_for_run(
+        self, run_id: str, definition: dict[str, Any]
+    ) -> dict[str, str] | None:
+        uses_private_reference = any(
+            isinstance((validator.get("config") or {}).get("private_validator_ref"), dict)
+            for validator in definition.get("validators") or []
+        )
+        if not uses_private_reference:
+            return None
+        existing = self.database.fetch_one(
+            "SELECT seed_hex,commitment_sha256,revealed_at FROM run_validation_seeds "
+            "WHERE run_id=?",
+            (run_id,),
+        )
+        if existing:
+            return existing
+        seed_hex = secure_random.token_hex(32)
+        commitment = hashlib.sha256(bytes.fromhex(seed_hex)).hexdigest()
+        self.database.execute(
+            "INSERT OR IGNORE INTO run_validation_seeds("
+            "run_id,seed_hex,commitment_sha256,created_at) VALUES (?,?,?,?)",
+            (run_id, seed_hex, commitment, utc_now()),
+        )
+        return self.database.fetch_one(
+            "SELECT seed_hex,commitment_sha256,revealed_at FROM run_validation_seeds "
+            "WHERE run_id=?",
+            (run_id,),
+        )
 
     def _definition_for_run(self, run: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         """Return the immutable definition revision selected for a run.
@@ -2199,6 +2257,55 @@ class EvaluationService:
     def _remove_cli_flags(args: list[str], *flags: str) -> list[str]:
         blocked = set(flags)
         return [item for item in args if item not in blocked]
+
+    @classmethod
+    def _qoder_benchmark_options(cls, args: list[str]) -> list[str]:
+        """Keep benchmark runs isolated from personal Qoder skills and plugins."""
+        configured = list(args)
+        cls._replace_cli_option(configured, "--setting-sources", "")
+        cls._replace_cli_option(
+            configured,
+            "--mcp-config",
+            json.dumps({"mcpServers": {}}, separators=(",", ":")),
+        )
+        prompt_index = configured.index("{prompt}") if "{prompt}" in configured else len(configured)
+        for flag in (
+            "--strict-mcp-config",
+            "--disable-builtin-skills",
+            "--headless-fast-hooks",
+            "--no-session-persistence",
+        ):
+            if flag not in configured:
+                configured.insert(prompt_index, flag)
+                prompt_index += 1
+        return configured
+
+    def _prepare_qoder_run_config(self, source_root: Path | None = None) -> Path:
+        """Copy only Qoder login/model state into an ephemeral plugin-free config root."""
+        configured_source = os.getenv("QODER_CONFIG_DIR", "").strip()
+        source = (
+            source_root
+            or (Path(configured_source) if configured_source else Path.home() / ".qoder-cn")
+        ).resolve()
+        auth_source = source / ".auth"
+        if not (auth_source / "user").is_file():
+            raise RuntimeError("qoder_auth_unavailable")
+        runtime_root = (
+            self.settings.data_dir / "native-runtime" / "qoder" / new_id()
+        ).resolve()
+        runtime_root.mkdir(parents=True, exist_ok=False)
+        try:
+            shutil.copytree(auth_source, runtime_root / ".auth")
+            models_source = source / ".models"
+            if models_source.is_dir():
+                shutil.copytree(models_source, runtime_root / ".models")
+            installation_id = source / "installation_id"
+            if installation_id.is_file():
+                shutil.copy2(installation_id, runtime_root / "installation_id")
+        except Exception:
+            shutil.rmtree(runtime_root, ignore_errors=True)
+            raise
+        return runtime_root
 
     @classmethod
     def _studio_native_resume_options(
@@ -4205,6 +4312,7 @@ class EvaluationService:
                 (suite["id"],),
             )
             difficulties: list[int] = []
+            estimated_minutes = 0
             categories: set[str] = set()
             docker_cases = 0
             judge_cases = 0
@@ -4214,6 +4322,7 @@ class EvaluationService:
                 limits = definition.get("limits") or {}
                 validators = definition.get("validators") or []
                 difficulties.append(int(metadata.get("difficulty", 2)))
+                estimated_minutes += max(1, int(metadata.get("estimated_minutes", 5)))
                 categories.add(str(item["category"]))
                 docker_cases += int(
                     bool(limits.get("docker_image"))
@@ -4222,6 +4331,7 @@ class EvaluationService:
                 judge_cases += int(any(v.get("type") == "ai_rubric" for v in validators))
             suite["difficulty_min"] = min(difficulties, default=1)
             suite["difficulty_max"] = max(difficulties, default=1)
+            suite["estimated_minutes"] = estimated_minutes
             suite["category_count"] = len(categories)
             suite["docker_case_count"] = docker_cases
             suite["judge_case_count"] = judge_cases
@@ -4317,7 +4427,7 @@ class EvaluationService:
                     requested_effort,
                     int(value.strict_fairness),
                     value.judge_reasoning_effort,
-                    "5.2.6",
+                    "5.3.0",
                     now,
                 ),
             )
@@ -4630,10 +4740,35 @@ class EvaluationService:
         )
         if native_runners and native_incompatible:
             errors.append("所选闭卷测试要求完全禁用工具，仅允许统一 Agent 参测")
-        requires_docker = any(item.get("type") == "command" for item in validators)
+        requires_docker = any(
+            item.get("type") in {"command", "command_metrics"} for item in validators
+        )
         requires_judge = any(item.get("type") == "ai_rubric" for item in validators)
         if requires_docker and not self.docker.available:
             errors.append("所选测试集包含命令验证题，但 Docker Desktop 当前不可用")
+        if requires_docker and self.docker.available:
+            docker_images = {
+                str((_json(row["definition_json"], {}).get("limits") or {}).get("docker_image"))
+                for row in definitions
+                if (_json(row["definition_json"], {}).get("limits") or {}).get("docker_image")
+            }
+            for image in sorted(docker_images):
+                if not self.docker.image_available(image):
+                    errors.append(f"缺少验证镜像 {image}；请先运行对应的本地镜像构建脚本")
+
+        private_references = [
+            (item.get("config") or {}).get("private_validator_ref")
+            for item in validators
+            if (item.get("config") or {}).get("private_validator_ref") is not None
+        ]
+        private_store = self.scoring.private_validators
+        for reference in private_references:
+            try:
+                if private_store is None:
+                    raise PrivateValidatorError("private validator store is not configured")
+                private_store.resolve(reference)
+            except PrivateValidatorError as exc:
+                errors.append(f"私有验证包不可用或完整性校验失败：{exc}")
 
         judge_model_id = self.get_setting("judge_model_id")
         judge_runner_id = self.get_setting("judge_runner_id")
@@ -4706,6 +4841,7 @@ class EvaluationService:
                 "native_runners": len(native_runners),
                 "requires_docker": requires_docker,
                 "requires_judge": requires_judge,
+                "private_validators": len(private_references),
                 "manual_scoring": manual_only,
                 "reasoning_policy": experiment.get("reasoning_policy") or "historical",
                 "strict_fairness": bool(experiment.get("strict_fairness")),
@@ -4911,6 +5047,22 @@ class EvaluationService:
         row["passed"] = None if row["passed"] is None else bool(row["passed"])
         row["effort_verified"] = bool(row.get("effort_verified"))
         row["runtime_identity"] = _json(row.pop("runtime_identity_json", None), {})
+        seed_record = self.database.fetch_one(
+            "SELECT seed_hex,commitment_sha256,created_at,revealed_at "
+            "FROM run_validation_seeds WHERE run_id=?",
+            (run_id,),
+        )
+        row["validation_seed"] = (
+            {
+                "algorithm": "sha256",
+                "commitment": seed_record["commitment_sha256"],
+                "seed": seed_record["seed_hex"] if seed_record.get("revealed_at") else None,
+                "committed_at": seed_record["created_at"],
+                "revealed_at": seed_record.get("revealed_at"),
+            }
+            if seed_record
+            else None
+        )
         definition, revision = self._definition_for_run(row)
         raw_metadata = copy.deepcopy(definition.get("metadata") or {})
         raw_rubric = copy.deepcopy(definition.get("rubric") or {})
@@ -5005,6 +5157,13 @@ class EvaluationService:
         run = self.get_run(run_id)
         if run["status"] in {"preparing", "running", "validating", "judging"}:
             raise ValueError("run_is_active")
+        experiment = self.database.fetch_one(
+            "SELECT e.id,e.status,e.concurrency FROM experiments e "
+            "JOIN runs r ON r.experiment_id=e.id WHERE r.id=?",
+            (run_id,),
+        )
+        if not experiment:
+            raise KeyError("experiment_not_found")
         with self.database.transaction() as connection:
             connection.execute("DELETE FROM run_events WHERE run_id=?", (run_id,))
             connection.execute("DELETE FROM validator_results WHERE run_id=?", (run_id,))
@@ -5012,6 +5171,7 @@ class EvaluationService:
             connection.execute("DELETE FROM run_attempts WHERE run_id=?", (run_id,))
             connection.execute("DELETE FROM artifacts WHERE run_id=?", (run_id,))
             connection.execute("DELETE FROM judge_reviews WHERE run_id=?", (run_id,))
+            connection.execute("DELETE FROM run_validation_seeds WHERE run_id=?", (run_id,))
             connection.execute(
                 "UPDATE runs SET status='queued',final_answer=NULL,score=NULL,error_code=NULL,"
                 "error_message=NULL,tokens_input=0,tokens_output=0,cost_usd=0,"
@@ -5019,8 +5179,91 @@ class EvaluationService:
                 "started_at=NULL,completed_at=NULL WHERE id=?",
                 (run_id,),
             )
-        self.executor.submit(self._run_with_semaphore, run_id, threading.Semaphore(1))
+            # A completed experiment is normally terminal.  Re-open it atomically with
+            # the retried run; otherwise _run_with_semaphore sees `completed`, returns
+            # immediately, and leaves the run permanently queued.
+            connection.execute(
+                "UPDATE experiments SET status='running',completed_at=NULL WHERE id=?",
+                (experiment["id"],),
+            )
+        with self._state_lock:
+            semaphore = self._experiment_semaphores.get(experiment["id"])
+            if semaphore is None:
+                semaphore = threading.Semaphore(max(1, int(experiment["concurrency"])))
+                self._experiment_semaphores[experiment["id"]] = semaphore
+        self.executor.submit(self._run_with_semaphore, run_id, semaphore)
         return self.get_run(run_id)
+
+    def _recover_rejudge_answer(self, run: dict[str, Any]) -> str:
+        final_answer = str(run.get("final_answer") or "").strip()
+        if final_answer:
+            return final_answer
+        # Only recover after the candidate completed and validation/judging began.
+        # This prevents partial Runner-error output from being promoted to a submission.
+        reached_scoring = self.database.fetch_one(
+            "SELECT 1 AS ok FROM run_events WHERE run_id=? "
+            "AND event_type IN ('run.validating','run.judging') LIMIT 1",
+            (run["id"],),
+        )
+        if not reached_scoring:
+            return ""
+        candidate_runner = str(run.get("runner_type") or "")
+        rows = self.database.fetch_all(
+            "SELECT payload_json FROM run_events WHERE run_id=? AND event_type='live.message' "
+            "ORDER BY seq DESC",
+            (run["id"],),
+        )
+        for row in rows:
+            payload = _json(row.get("payload_json"), {})
+            if candidate_runner and str(payload.get("runner_type") or "") != candidate_runner:
+                continue
+            text = str(payload.get("text") or "").strip()
+            if text:
+                return text
+        return ""
+
+    @staticmethod
+    def _has_preserved_workspace_submission(
+        run: dict[str, Any], definition: dict[str, Any]
+    ) -> bool:
+        """Return whether a timed-out coding run left a scoreable workspace.
+
+        Native coding agents can be killed by the watchdog while their final files are
+        already on disk.  Coding benchmarks score those files, not the runner's final
+        chat sentence, so a preserved workspace with substantive changes is a valid
+        submission for deterministic revalidation.
+        """
+        if str(run.get("error_code") or "") != "runtime_safety_limit":
+            return False
+        if not bool((definition.get("attempt_policy") or {}).get("preserve_workspace")):
+            return False
+        raw_workspace = str(run.get("workspace_path") or "").strip()
+        if not raw_workspace:
+            return False
+        workspace_root = Path(raw_workspace)
+        if not workspace_root.is_dir():
+            return False
+
+        initial_files = definition.get("initial_files") or {}
+        ignored_parts = {"__pycache__", ".agentbench-tmp", ".pytest_cache", "pip"}
+        for target in workspace_root.rglob("*"):
+            if not target.is_file():
+                continue
+            relative = target.relative_to(workspace_root)
+            if any(part in ignored_parts for part in relative.parts):
+                continue
+            name = relative.as_posix()
+            if name not in initial_files:
+                return True
+            original = initial_files[name]
+            expected = (
+                base64.b64decode(original[len("base64:") :])
+                if isinstance(original, str) and original.startswith("base64:")
+                else str(original).encode("utf-8")
+            )
+            if target.read_bytes() != expected:
+                return True
+        return False
 
     def rejudge_run(self, run_id: str, *, reuse_judge: bool = False) -> dict[str, Any]:
         """Re-score a stored answer without re-running the candidate model.
@@ -5030,12 +5273,48 @@ class EvaluationService:
         historical repair does not create fresh judge cost or change a judge opinion.
         """
         run = self.get_run(run_id)
-        if run["status"] not in {"needs_review", "completed"}:
+        if run["status"] not in {
+            "needs_review",
+            "completed",
+            "failed",
+            "environment_unavailable",
+            "interrupted",
+        }:
             raise ValueError("run_not_rejudgeable")
-        final_answer = run.get("final_answer") or ""
+        definition, _ = self._definition_for_run(run)
+        preserved_timeout_submission = self._has_preserved_workspace_submission(
+            run, definition
+        )
+        if run["status"] in {"failed", "environment_unavailable", "interrupted"}:
+            reached_scoring = self.database.fetch_one(
+                "SELECT 1 AS ok FROM run_events WHERE run_id=? "
+                "AND event_type IN ('run.validating','run.judging') LIMIT 1",
+                (run_id,),
+            )
+            if not reached_scoring and not preserved_timeout_submission:
+                raise ValueError("run_not_rejudgeable")
+        final_answer = self._recover_rejudge_answer(run)
+        if not final_answer.strip() and preserved_timeout_submission:
+            final_answer = (
+                "Agent reached the runtime safety limit; score the preserved workspace "
+                "as the submitted coding result."
+            )
         if not final_answer.strip():
             raise ValueError("run_has_no_final_answer")
-        definition, _ = self._definition_for_run(run)
+        if not str(run.get("final_answer") or "").strip():
+            self.database.execute(
+                "UPDATE runs SET final_answer=? WHERE id=?", (final_answer, run_id)
+            )
+            run["final_answer"] = final_answer
+        validation_seed = self.database.fetch_one(
+            "SELECT seed_hex,revealed_at FROM run_validation_seeds WHERE run_id=?",
+            (run_id,),
+        )
+        if validation_seed:
+            definition["limits"] = {
+                **(definition.get("limits") or {}),
+                "_validation_seed": validation_seed["seed_hex"],
+            }
         workspace_path = (
             Path(run["workspace_path"])
             if run.get("workspace_path")
@@ -5064,6 +5343,24 @@ class EvaluationService:
                 "judge_mode": "reuse" if reuse_judge else "fresh",
             },
         )
+        if preserved_timeout_submission:
+            if validation_seed and not validation_seed.get("revealed_at"):
+                revealed_at = utc_now()
+                self.database.execute(
+                    "UPDATE run_validation_seeds SET revealed_at=? "
+                    "WHERE run_id=? AND revealed_at IS NULL",
+                    (revealed_at, run_id),
+                )
+                validation_seed["revealed_at"] = revealed_at
+                event_sink("validation.seed_revealed", {"reason": "timeout_workspace_salvage"})
+            event_sink(
+                "run.timeout_workspace_salvaged",
+                {
+                    "previous_error_code": run.get("error_code"),
+                    "workspace_preserved": True,
+                    "candidate_model_rerun": False,
+                },
+            )
         fresh_judge_callback = self._judge_callback(run, definition, workspace, event_sink)
         if reuse_judge:
             stored_judges = self.database.fetch_all(
@@ -5081,6 +5378,41 @@ class EvaluationService:
                     stored = stored_judges[stored_judge_index]
                     stored_judge_index += 1
                     evidence = _json(stored.get("evidence_json"), {})
+                    if config.get("scoring_points") and evidence.get("schema") == RUBRIC_SCHEMA:
+                        judge_payload = {
+                            key: evidence[key]
+                            for key in (
+                                "schema",
+                                "rubric_version",
+                                "source_tier",
+                                "solution_path",
+                                "points",
+                                "overall_confidence",
+                                "summary",
+                                "review_flags",
+                            )
+                            if key in evidence
+                        }
+                        rescored = score_rubric(judge_payload, config)
+                        evidence = {
+                            **evidence,
+                            "computed_score": rescored.percentage,
+                            "rubric_evaluation": rescored.as_dict(),
+                            "point_awards": rescored.point_results,
+                            "review_status": (
+                                "completed" if rescored.status == "passed" else "needs_review"
+                            ),
+                            "review_reasons": rescored.review_flags,
+                            "reused_for_revalidation": True,
+                            "source_run_id": run_id,
+                        }
+                        return ValidationResult(
+                            "ai_rubric",
+                            weight,
+                            rescored.percentage,
+                            "passed" if rescored.status == "passed" else "needs_review",
+                            evidence,
+                        )
                     evidence = {
                         **evidence,
                         "reused_for_revalidation": True,
@@ -5243,7 +5575,11 @@ class EvaluationService:
         return self.get_run(run_id)
 
     def rejudge_experiment(
-        self, experiment_id: str, *, scope: str = "structured"
+        self,
+        experiment_id: str,
+        *,
+        scope: str = "structured",
+        reuse_judge: bool = False,
     ) -> dict[str, Any]:
         """Batch-revalidate stored experiment answers with an auditable score delta."""
         before = self.get_experiment(experiment_id)
@@ -5255,22 +5591,26 @@ class EvaluationService:
         skipped = 0
         failures: list[dict[str, str]] = []
         for row in rows:
-            if row["status"] not in {"needs_review", "completed"} or not (
-                row.get("final_answer") or ""
-            ).strip():
-                skipped += 1
-                continue
             run = self.get_run(row["id"])
             definition, _revision = self._definition_for_run(run)
             validators = definition.get("validators") or []
-            if scope == "structured" and not any(
+            structured_math = any(
+                validator.get("type") == "ai_rubric"
+                and bool((validator.get("config") or {}).get("scoring_points"))
+                for validator in validators
+            )
+            structured_parser = any(
                 validator.get("type") == "symbolic_json" for validator in validators
-            ):
+            )
+            if scope == "structured" and not (structured_parser or structured_math):
                 skipped += 1
                 continue
             old_score = run.get("score")
             try:
-                result = self.rejudge_run(row["id"], reuse_judge=True)
+                result = self.rejudge_run(
+                    row["id"],
+                    reuse_judge=bool(reuse_judge or (structured_parser and not structured_math)),
+                )
                 updated.append(
                     {
                         "run_id": row["id"],
@@ -5447,6 +5787,20 @@ class EvaluationService:
                     "runtime_condition": condition,
                 },
             )
+            validation_seed = self._validation_seed_for_run(run_id, definition)
+            if validation_seed:
+                definition["limits"] = {
+                    **(definition.get("limits") or {}),
+                    "_validation_seed": validation_seed["seed_hex"],
+                }
+                event_sink(
+                    "validation.seed_committed",
+                    {
+                        "algorithm": "sha256",
+                        "commitment": validation_seed["commitment_sha256"],
+                        "revealed": bool(validation_seed.get("revealed_at")),
+                    },
+                )
             metadata = definition.get("metadata") or {}
             workspace_root = self.settings.workspaces_dir.resolve()
             workspace_path = (workspace_root / run_id).resolve()
@@ -5621,6 +5975,8 @@ class EvaluationService:
                         "cli_missing",
                         "cli_unavailable",
                         "native_cli_disabled",
+                        "native_agent_execution_error",
+                        "qoder_auth_unavailable",
                         "model_error",
                         "harness_model_not_active",
                         "harness_preset_unavailable",
@@ -5675,11 +6031,80 @@ class EvaluationService:
                             "attempt_consumed": not infrastructure_failure,
                         },
                     )
+                    # A native coding Agent can be stopped by the runtime watchdog
+                    # after it has already written a usable submission to disk.  Do
+                    # not discard that work or require the user to discover the
+                    # rejudge endpoint manually.  Only the explicit
+                    # ``preserve_workspace`` policy opts into this path, and the
+                    # helper requires a substantive file change before scoring.
+                    if result.error_code == "runtime_safety_limit":
+                        preserved_run = self.database.fetch_one(
+                            "SELECT * FROM runs WHERE id=?", (run_id,)
+                        )
+                        if preserved_run:
+                            try:
+                                preserved_definition, _ = self._definition_for_run(
+                                    preserved_run
+                                )
+                                can_salvage = self._has_preserved_workspace_submission(
+                                    preserved_run, preserved_definition
+                                )
+                            except Exception:
+                                # A best-effort salvage check must never replace the
+                                # original timeout classification with an internal
+                                # error (for example, if a workspace is unreadable).
+                                can_salvage = False
+                                logger.exception(
+                                    "Could not inspect timeout workspace for %s", run_id
+                                )
+                            if can_salvage:
+                                try:
+                                    self.rejudge_run(run_id)
+                                except Exception:
+                                    # Keep the original timeout failure visible if
+                                    # validation itself is unavailable or raises. The
+                                    # workspace remains intact for an explicit retry.
+                                    logger.exception(
+                                        "Automatic timeout workspace rejudge failed for %s",
+                                        run_id,
+                                    )
                     return
                 if task_temp.exists():
                     shutil.rmtree(task_temp, ignore_errors=True)
-                self.database.execute("UPDATE runs SET status='validating' WHERE id=?", (run_id,))
+                self.database.execute(
+                    "UPDATE runs SET status='validating',final_answer=?,steps=?,tokens_input=?,"
+                    "tokens_output=?,cost_usd=?,cost_source=?,duration_ms=?,attempt_count=?,"
+                    "telemetry_status=? WHERE id=?",
+                    (
+                        result.final_answer,
+                        cumulative_steps,
+                        cumulative_usage.input_tokens,
+                        cumulative_usage.output_tokens,
+                        cost,
+                        cost_source,
+                        cumulative_duration,
+                        attempt_no,
+                        telemetry_status,
+                        run_id,
+                    ),
+                )
                 event_sink("run.validating", {"attempt": attempt_no})
+                if validation_seed and not validation_seed.get("revealed_at"):
+                    revealed_at = utc_now()
+                    self.database.execute(
+                        "UPDATE run_validation_seeds SET revealed_at=? "
+                        "WHERE run_id=? AND revealed_at IS NULL",
+                        (revealed_at, run_id),
+                    )
+                    validation_seed["revealed_at"] = revealed_at
+                    event_sink(
+                        "validation.seed_revealed",
+                        {
+                            "algorithm": "sha256",
+                            "seed": validation_seed["seed_hex"],
+                            "commitment": validation_seed["commitment_sha256"],
+                        },
+                    )
                 manual_scoring = bool(
                     (attempt_definition.get("metadata") or {}).get("manual_scoring")
                 )
@@ -6030,6 +6455,8 @@ class EvaluationService:
             "cli_missing",
             "cli_unavailable",
             "native_cli_disabled",
+            "native_agent_execution_error",
+            "qoder_auth_unavailable",
             "model_error",
             "harness_model_not_active",
             "harness_preset_unavailable",
@@ -6117,18 +6544,48 @@ class EvaluationService:
         args = _json(runner.get("args_json"), [])
         native_environment = _json(runner.get("env_json"), {})
         model_settings = _json(model.get("settings_json"), {})
+        zcode_permission_profile: str | None = None
+        zcode_runtime_mode: str | None = None
         task_temp = str(metadata.get("task_temp") or "").strip()
         if task_temp:
             native_environment.update({"TEMP": task_temp, "TMP": task_temp, "TMPDIR": task_temp})
-        if metadata.get("reasoning_effort") and not metadata.get("studio_session"):
-            args = self._studio_native_options(
-                args,
-                str(runner["runner_type"]),
-                "workspace",
-                str(metadata["reasoning_effort"]),
-                [],
-                str(model.get("model_name") or ""),
-            )
+        if not metadata.get("studio_session"):
+            runner_type = str(runner["runner_type"])
+            reasoning_effort = metadata.get("reasoning_effort")
+            if runner_type == "zcode_cli":
+                declared_tools = {
+                    str(item).strip().lower() for item in definition.get("tools") or []
+                }
+                # ZCode's build/edit modes ask a permission client before every Bash
+                # call. Benchmark runs are headless, so no such client exists. Only
+                # use the official yolo mode when the immutable task definition
+                # explicitly grants Shell; file-only tasks remain in edit mode.
+                zcode_permission_profile = (
+                    "full" if "shell" in declared_tools else "workspace"
+                )
+                args = self._studio_native_options(
+                    args,
+                    runner_type,
+                    zcode_permission_profile,
+                    str(reasoning_effort or "high"),
+                    [],
+                    str(model.get("model_name") or ""),
+                )
+                if "--mode" in args:
+                    mode_index = args.index("--mode")
+                    if mode_index + 1 < len(args):
+                        zcode_runtime_mode = str(args[mode_index + 1])
+            elif reasoning_effort:
+                args = self._studio_native_options(
+                    args,
+                    runner_type,
+                    "workspace",
+                    str(reasoning_effort),
+                    [],
+                    str(model.get("model_name") or ""),
+                )
+            if runner_type == "qoder_cli":
+                args = self._qoder_benchmark_options(args)
         harness_runtime_root: Path | None = None
         harness_selection: tuple[str, str, str, str, dict[str, Any] | None] | None = None
         if runner["runner_type"] == "deepseek_harness":
@@ -6169,6 +6626,7 @@ class EvaluationService:
                 else None,
             )
         zcode_runtime_root: Path | None = None
+        qoder_runtime_root: Path | None = None
         zcode_cli_script = ""
         if runner["runner_type"] == "zcode_cli":
             requested_provider = str(model_settings.get("agent_provider") or "").strip()
@@ -6230,8 +6688,11 @@ class EvaluationService:
                     "detail": (
                         f"实际模型 {requested_provider}/{requested_model}；"
                         f"推理 Variant {actual_zcode_effort.upper()}；"
+                        f"权限模式 {(zcode_runtime_mode or 'unknown').upper()}"
+                        f"（题目{'已' if zcode_permission_profile == 'full' else '未'}声明 Shell）；"
                         "不会改写 ZCode Desktop 全局设置"
                     ),
+                    "permission_profile": zcode_permission_profile,
                     "status": "completed",
                 },
             )
@@ -6289,7 +6750,16 @@ class EvaluationService:
             ]
         placeholders = {
             "model_name": model["model_name"],
-            "prompt": prompt,
+            # Windows executes ``*.CMD`` launchers through cmd.exe.  Literal newlines
+            # in a positional argument terminate the command, so Qoder used to see
+            # only the generic benchmark preamble while the actual TASK section was
+            # silently dropped.  Keep the prompt as one argument; the visible marker
+            # preserves the original paragraph boundaries for the model.
+            "prompt": (
+                " ⏎ ".join(part.strip() for part in prompt.splitlines() if part.strip())
+                if runner["runner_type"] == "qoder_cli" and os.name == "nt"
+                else prompt
+            ),
             "workspace": str(workspace.root),
             "zcode_cli": zcode_cli_script,
         }
@@ -6307,7 +6777,8 @@ class EvaluationService:
         def workspace_state() -> dict[str, tuple[int, int]]:
             return _live_workspace_state(workspace.root)
 
-        previous_workspace_state = workspace_state()
+        initial_workspace_state = workspace_state()
+        previous_workspace_state = dict(initial_workspace_state)
 
         def line_callback(stream_name: str, line: str) -> None:
             nonlocal live_line_count, live_text_buffer, live_text_stream
@@ -6427,6 +6898,30 @@ class EvaluationService:
             )
 
         try:
+            if runner["runner_type"] == "qoder_cli" and not metadata.get("studio_session"):
+                try:
+                    qoder_runtime_root = self._prepare_qoder_run_config()
+                except RuntimeError as exc:
+                    return AgentResult(
+                        False,
+                        "",
+                        0,
+                        self._empty_usage(),
+                        0,
+                        str(exc),
+                        "Qoder 登录状态不可用于隔离评测；请重新登录 Qoder CLI 后重试。",
+                    )
+                self._replace_cli_option(args, "--config-dir", str(qoder_runtime_root))
+                event_sink(
+                    "live.phase",
+                    {
+                        "runner_type": "qoder_cli",
+                        "phase": "runtime_config",
+                        "summary": "Qoder 已应用隔离的评测配置",
+                        "detail": "仅继承登录与模型目录；个人插件、Skills、Hooks 与 MCP 均未载入",
+                        "status": "completed",
+                    },
+                )
             if harness_selection is not None:
                 (
                     harness_provider,
@@ -6482,34 +6977,115 @@ class EvaluationService:
                         "status": "completed",
                     },
                 )
+            command_timeout = int(
+                definition_limits.get(
+                    "max_runtime_seconds",
+                    definition_limits.get(
+                        "timeout_seconds",
+                        runner_limits.get(
+                            "max_runtime_seconds",
+                            runner_limits.get(
+                                "timeout_seconds",
+                                self.get_setting("default_max_runtime_seconds")
+                                if self.get_setting("default_max_runtime_seconds") is not None
+                                else 7200,
+                            ),
+                        ),
+                    ),
+                )
+            )
             command_result = run_native_cli(
                 executable=executable,
                 args=args,
                 workspace=workspace,
                 placeholders=placeholders,
                 extra_env=native_environment,
-                timeout=int(
-                    definition_limits.get(
-                        "max_runtime_seconds",
-                        definition_limits.get(
-                            "timeout_seconds",
-                            runner_limits.get(
-                                "max_runtime_seconds",
-                                runner_limits.get(
-                                    "timeout_seconds",
-                                    self.get_setting("default_max_runtime_seconds")
-                                    if self.get_setting("default_max_runtime_seconds") is not None
-                                    else 7200,
-                                ),
-                            ),
-                        ),
-                    )
-                ),
+                timeout=command_timeout,
                 cancel_event=cancel_event,
                 line_callback=line_callback,
                 heartbeat_callback=heartbeat_callback,
             )
+            qoder_coding_task = (
+                runner["runner_type"] == "qoder_cli"
+                and not metadata.get("studio_session")
+                and bool(metadata.get("private_validation"))
+                and (
+                    bool(definition.get("initial_files"))
+                    or metadata.get("workspace_submission_required") is True
+                )
+                and "filesystem"
+                in {str(tool).strip().lower() for tool in definition.get("tools") or []}
+            )
+            first_reported_failure = self._native_result_failure(
+                str(runner["runner_type"]), command_result.stdout
+            )
+            if (
+                qoder_coding_task
+                and command_result.ok
+                and first_reported_failure is None
+                and workspace_state() == initial_workspace_state
+                and not cancel_event.is_set()
+            ):
+                elapsed_seconds = (command_result.duration_ms + 999) // 1000
+                remaining_seconds = command_timeout - elapsed_seconds
+                if remaining_seconds >= 30:
+                    first_answer, *_ = self._parse_native_output(
+                        "qoder_cli", command_result.stdout, None
+                    )
+                    event_sink(
+                        "native_cli.completion_retry",
+                        {
+                            "runner_type": "qoder_cli",
+                            "reason": "no_workspace_changes",
+                            "remaining_seconds": remaining_seconds,
+                            "previous_result": _redact_viewer_text(first_answer, 1000),
+                        },
+                    )
+                    event_sink(
+                        "live.phase",
+                        {
+                            "runner_type": "qoder_cli",
+                            "phase": "completion_recovery",
+                            "summary": "Qoder 提前结束且未写入文件，正在自动续跑",
+                            "detail": "沿用同一工作区，并计入原任务总时限",
+                            "status": "running",
+                        },
+                    )
+                    retry_placeholders = dict(placeholders)
+                    retry_placeholders["prompt"] = (
+                        f"{prompt}\n\nRECOVERY TURN: Your previous response ended before any "
+                        "workspace file was changed. Continue the actual implementation now. "
+                        "Use the filesystem and shell tools, modify the required source files, "
+                        "run relevant tests, and do not finish with plans or future-tense actions. "
+                        "Only finish after the implementation is present in the workspace."
+                    )
+                    retry_result = run_native_cli(
+                        executable=executable,
+                        args=args,
+                        workspace=workspace,
+                        placeholders=retry_placeholders,
+                        extra_env=native_environment,
+                        timeout=remaining_seconds,
+                        cancel_event=cancel_event,
+                        line_callback=line_callback,
+                        heartbeat_callback=heartbeat_callback,
+                    )
+                    retry_result.duration_ms += command_result.duration_ms
+                    retry_result.stdout = (
+                        f"{command_result.stdout.rstrip()}\n{retry_result.stdout.lstrip()}"
+                    ).strip()
+                    retry_result.stderr = (
+                        f"{command_result.stderr.rstrip()}\n{retry_result.stderr.lstrip()}"
+                    ).strip()
+                    command_result = retry_result
         finally:
+            if qoder_runtime_root is not None:
+                expected_qoder_root = (
+                    self.settings.data_dir / "native-runtime" / "qoder"
+                ).resolve()
+                resolved_qoder_root = qoder_runtime_root.resolve()
+                if resolved_qoder_root.is_relative_to(expected_qoder_root):
+                    shutil.rmtree(resolved_qoder_root, ignore_errors=True)
             if zcode_runtime_root is not None:
                 expected_zcode_root = (
                     self.settings.data_dir / "native-runtime" / "zcode"
@@ -6548,6 +7124,17 @@ class EvaluationService:
         final_answer, input_tokens, output_tokens, reported_cost, event_count = self._parse_native_output(
             runner["runner_type"], command_result.stdout, None
         )
+        reported_failure = self._native_result_failure(
+            str(runner["runner_type"]), command_result.stdout
+        )
+        if reported_failure is not None:
+            event_sink(
+                "native_cli.result_error",
+                {
+                    "runner_type": runner["runner_type"],
+                    **reported_failure[2],
+                },
+            )
         if (
             runner["runner_type"] == "zcode_cli"
             and final_answer
@@ -6567,20 +7154,56 @@ class EvaluationService:
         usage.input_tokens = input_tokens
         usage.output_tokens = output_tokens
         usage.reported_cost_usd = reported_cost
-        return AgentResult(
-            command_result.ok,
-            final_answer or command_result.stdout[-20_000:],
-            max(1, event_count),
-            usage,
-            command_result.duration_ms,
-            command_result.error_code,
-            (
+        effective_ok = command_result.ok and reported_failure is None
+        error_code = command_result.error_code
+        error_message = None
+        if not command_result.ok:
+            error_message = (
                 command_result.stderr[-2000:]
                 or command_result.stdout[-2000:]
                 or command_result.error_code
             )
-            if not command_result.ok
-            else None,
+        elif reported_failure is not None:
+            error_code, error_message, _audit = reported_failure
+        qoder_no_workspace_submission = (
+            runner["runner_type"] == "qoder_cli"
+            and not metadata.get("studio_session")
+            and bool(metadata.get("private_validation"))
+            and (
+                bool(definition.get("initial_files"))
+                or metadata.get("workspace_submission_required") is True
+            )
+            and "filesystem"
+            in {str(tool).strip().lower() for tool in definition.get("tools") or []}
+            and workspace_state() == initial_workspace_state
+            and command_result.ok
+            and reported_failure is None
+            and not cancel_event.is_set()
+        )
+        if qoder_no_workspace_submission:
+            effective_ok = False
+            error_code = "native_agent_no_workspace_changes"
+            error_message = (
+                "Qoder reported success but did not modify any workspace file after the "
+                "automatic completion-recovery turn. The run was not scored."
+            )
+            event_sink(
+                "native_cli.result_error",
+                {
+                    "runner_type": "qoder_cli",
+                    "subtype": "no_workspace_changes",
+                    "is_error": True,
+                    "errors": [error_message],
+                },
+            )
+        return AgentResult(
+            effective_ok,
+            final_answer or command_result.stdout[-20_000:],
+            max(1, event_count),
+            usage,
+            command_result.duration_ms,
+            error_code,
+            error_message,
             self._extract_native_session_id(command_result.stdout),
         )
 
@@ -6832,11 +7455,28 @@ class EvaluationService:
                 "tool": _redact_viewer_text(str(tool_name or kind), 160),
             }
         if kind in {"result", "turn.completed", "step_finish", "step-finish"}:
+            subtype = str(item.get("subtype") or "").strip().lower()
+            result_failed = bool(item.get("is_error")) or subtype.startswith("error") or subtype in {
+                "failed",
+                "cancelled",
+                "terminated",
+            }
+            raw_errors = item.get("errors") or item.get("error")
+            detail = ""
+            if raw_errors:
+                detail = _redact_viewer_text(
+                    "; ".join(str(value) for value in raw_errors)
+                    if isinstance(raw_errors, list)
+                    else str(raw_errors),
+                    800,
+                )
             return "live.phase", {
                 **base,
                 "phase": "agent_result",
-                "summary": "Agent 已提交本阶段结果",
-                "status": first_value("status") or "completed",
+                "summary": "Agent 执行失败" if result_failed else "Agent 已提交本阶段结果",
+                "status": "failed" if result_failed else first_value("status") or "completed",
+                "subtype": subtype or None,
+                "detail": detail or None,
             }
         return "live.activity", {
             **base,
@@ -6887,6 +7527,69 @@ class EvaluationService:
         return ModelUsage()
 
     @staticmethod
+    def _native_json_items(output: str) -> list[dict[str, Any]]:
+        parsed_items: list[dict[str, Any]] = []
+        with suppress(json.JSONDecodeError):
+            parsed = json.loads(output)
+            if isinstance(parsed, dict):
+                parsed_items.append(parsed)
+            elif isinstance(parsed, list):
+                parsed_items.extend(item for item in parsed if isinstance(item, dict))
+        if parsed_items:
+            return parsed_items
+        for raw_line in output.splitlines():
+            if not raw_line.strip():
+                continue
+            with suppress(json.JSONDecodeError):
+                parsed = json.loads(raw_line)
+                if isinstance(parsed, dict):
+                    parsed_items.append(parsed)
+                elif isinstance(parsed, list):
+                    parsed_items.extend(item for item in parsed if isinstance(item, dict))
+        return parsed_items
+
+    @staticmethod
+    def _native_result_failure(
+        runner_type: str, output: str
+    ) -> tuple[str, str, dict[str, Any]] | None:
+        """Recognize CLIs that report an execution failure inside a zero-exit JSON result."""
+        if runner_type != "qoder_cli":
+            return None
+        for item in EvaluationService._native_json_items(output):
+            item_kind = str(item.get("kind") or item.get("type") or "").strip().lower()
+            subtype = str(item.get("subtype") or "").strip().lower()
+            is_error = bool(item.get("is_error"))
+            failed = is_error or subtype.startswith("error") or subtype in {
+                "failed",
+                "cancelled",
+                "terminated",
+            }
+            if item_kind != "result" or not failed:
+                continue
+            raw_errors = item.get("errors") or item.get("error") or item.get("message")
+            if isinstance(raw_errors, list):
+                error_values = [str(value) for value in raw_errors if value not in (None, "")]
+            elif raw_errors not in (None, ""):
+                error_values = [str(raw_errors)]
+            else:
+                error_values = []
+            detail = "; ".join(error_values) or "Qoder returned an unsuccessful result"
+            label = subtype or "error"
+            audit = {
+                "subtype": label,
+                "is_error": is_error,
+                "errors": [_redact_viewer_text(value, 1000) for value in error_values],
+                "credits": _viewer_safe_value(item.get("credits")),
+                "model_usage": _viewer_safe_value(item.get("modelUsage") or {}),
+            }
+            return (
+                "native_agent_execution_error",
+                _redact_viewer_text(f"Qoder CLI reported {label}: {detail}", 2000),
+                audit,
+            )
+        return None
+
+    @staticmethod
     def _parse_native_output(
         runner_type: str, output: str, event_sink=None
     ) -> tuple[str, int, int, float | None, int]:
@@ -6905,15 +7608,7 @@ class EvaluationService:
         reported_cost: float | None = None
         cursor_deltas = ""
         count = 0
-        parsed_items: list[Any] = []
-        with suppress(json.JSONDecodeError):
-            parsed_items.append(json.loads(output))
-        if not parsed_items:
-            for raw_line in output.splitlines():
-                if not raw_line.strip():
-                    continue
-                with suppress(json.JSONDecodeError):
-                    parsed_items.append(json.loads(raw_line))
+        parsed_items = EvaluationService._native_json_items(output)
         for item in parsed_items:
             if not isinstance(item, dict):
                 continue
@@ -7021,8 +7716,13 @@ class EvaluationService:
     # existing runner configurations (args containing {prompt}) fully compatible.
     JUDGE_STDIN_GUIDANCE = (
         "完整评审任务已通过标准输入(stdin)提供，并同步保存在当前工作区的 judge_prompt.md 文件中。"
-        "请阅读该评审任务，并严格按照其中的要求只输出一个JSON对象"
-        "（键为 score, summary, strengths, weaknesses, evidence），不要输出任何其他内容。"
+        "请完整阅读该评审任务，严格遵循其中的 RUBRIC_RESPONSE_SCHEMA 或 JSON 字段要求，"
+        "只输出一个JSON对象，不要输出任何其他内容。"
+    )
+    STRUCTURED_JUDGE_RETRY_GUIDANCE = (
+        "上一次响应未通过结构化评分协议校验。不要输出旧版 score/strengths/weaknesses/evidence 字段；"
+        "必须逐项输出 RUBRIC_RESPONSE_SCHEMA 要求的 rubric_version、source_tier、points、"
+        "overall_confidence、summary 和 review_flags。"
     )
 
     def _single_judge_callback(
@@ -7109,6 +7809,7 @@ class EvaluationService:
             structured_protocol = bool(config.get("scoring_points"))
             if structured_protocol:
                 rubric_schema = rubric_json_schema(config)
+                strict_exam = config.get("marking_mode") == "strict_exam"
                 judge_instruction = (
                     "This is a versioned postgraduate-mathematics marking rubric. "
                     "Evaluate every scoring point independently, including partial credit. "
@@ -7120,6 +7821,20 @@ class EvaluationService:
                     "for uncertainty or any exceptional case.\n\n"
                     f"RUBRIC_RESPONSE_SCHEMA:\n{json.dumps(rubric_schema, ensure_ascii=False)}"
                 )
+                if strict_exam:
+                    judge_instruction += (
+                        "\n\nSTRICT EXAM MARKING RULES: grade the written solution exactly as submitted, "
+                        "not the solution it could be repaired into. A missing justification, "
+                        "invalid implication, wrong interval/domain/branch, sign/orientation error, "
+                        "or unsupported key equality is a mathematical defect and MUST reduce the "
+                        "award by at least 0.5 marks. Do not call such a defect presentation-only. "
+                        "Use defect_severity=minor for a local repairable logical gap, major when a "
+                        "key argument is absent or wrong, and fatal when the scoring point is not "
+                        "established. Full credit requires a complete, rigorous derivation with no "
+                        "unresolved review flag and confidence at or above the configured full-credit "
+                        "threshold. Award only multiples of 0.5 marks. Numerical checks do not replace "
+                        "proof and unverifiable claims of tool verification earn no credit."
+                    )
             else:
                 judge_instruction = (
                     "This is a legacy rubric. Score the result from 0 to 100 using the rubric. "
@@ -7132,7 +7847,14 @@ class EvaluationService:
                 f"FINAL ANSWER:\n{run.get('final_answer') or ''}\n\n"
                 f"WORKSPACE FILE SAMPLES:\n{json.dumps(file_samples, ensure_ascii=False)}"
             )
-            def invoke(cli_capture: dict[str, Any]) -> str:
+            def invoke(cli_capture: dict[str, Any], *, structured_retry: bool = False) -> str:
+                active_prompt = prompt
+                argv_guidance = self.JUDGE_STDIN_GUIDANCE
+                if structured_retry:
+                    active_prompt = f"{prompt}\n\n{self.STRUCTURED_JUDGE_RETRY_GUIDANCE}"
+                    argv_guidance = (
+                        f"{self.JUDGE_STDIN_GUIDANCE}{self.STRUCTURED_JUDGE_RETRY_GUIDANCE}"
+                    )
                 if runner["runner_type"] == "unified":
                     judge_client = self._model_client(
                         model, {"reasoning_effort": judge_condition["effective"]}
@@ -7140,7 +7862,7 @@ class EvaluationService:
                     decision = judge_client.complete(
                         [
                             {"role": "system", "content": "Return strict JSON only."},
-                            {"role": "user", "content": prompt},
+                            {"role": "user", "content": active_prompt},
                         ],
                         [],
                     )
@@ -7166,7 +7888,7 @@ class EvaluationService:
                 try:
                     judge_workspace = Workspace(judge_workspace_path)
                     # Fallback channel for CLIs that ignore stdin.
-                    judge_workspace.write_file("judge_prompt.md", prompt)
+                    judge_workspace.write_file("judge_prompt.md", active_prompt)
                     judge_temp = (judge_workspace.root / ".agentbench-tmp").resolve()
                     judge_temp.mkdir(parents=True, exist_ok=True)
                     judge_environment = _json(runner.get("env_json"), {})
@@ -7182,6 +7904,7 @@ class EvaluationService:
                         str(model["model_name"]),
                     )
                     judge_harness_root: Path | None = None
+                    judge_qoder_root: Path | None = None
                     try:
                         if runner["runner_type"] == "deepseek_harness":
                             provider = str(model_settings.get("agent_provider") or "")
@@ -7194,13 +7917,19 @@ class EvaluationService:
                                 )
                             )
                             judge_runtime_identity["effective_reasoning_effort"] = actual_effort
+                        elif runner["runner_type"] == "qoder_cli":
+                            judge_args = self._qoder_benchmark_options(judge_args)
+                            judge_qoder_root = self._prepare_qoder_run_config()
+                            self._replace_cli_option(
+                                judge_args, "--config-dir", str(judge_qoder_root)
+                            )
                         judge_result = run_native_cli(
                             executable=runner["executable"],
                             args=judge_args,
                             workspace=judge_workspace,
                             placeholders={
                                 "model_name": model["model_name"],
-                                "prompt": self.JUDGE_STDIN_GUIDANCE,
+                                "prompt": argv_guidance,
                                 "workspace": str(judge_workspace.root),
                             },
                             extra_env=judge_environment,
@@ -7212,11 +7941,18 @@ class EvaluationService:
                                 ),
                                 1800,
                             ),
-                            stdin_text=prompt,
+                            stdin_text=active_prompt,
                         )
                     finally:
                         if judge_harness_root is not None:
                             shutil.rmtree(judge_harness_root, ignore_errors=True)
+                        if judge_qoder_root is not None:
+                            expected_qoder_root = (
+                                self.settings.data_dir / "native-runtime" / "qoder"
+                            ).resolve()
+                            resolved_qoder_root = judge_qoder_root.resolve()
+                            if resolved_qoder_root.is_relative_to(expected_qoder_root):
+                                shutil.rmtree(resolved_qoder_root, ignore_errors=True)
                     cli_capture["judge_cli_stdout"] = judge_result.stdout[-20_000:]
                     cli_capture["judge_cli_stderr"] = judge_result.stderr[-20_000:]
                     if not judge_result.ok:
@@ -7246,7 +7982,10 @@ class EvaluationService:
                             "UPDATE runs SET status='judging' WHERE id=?", (run["id"],)
                         )
                         event_sink("run.judging", {"anonymous_slot": anonymous_slot})
-                    response_text = invoke(cli_capture)
+                    response_text = invoke(
+                        cli_capture,
+                        structured_retry=bool(structured_protocol and attempt > 0),
+                    )
                     data = self._parse_json_object(response_text)
                     structured_result = None
                     review_status = "completed"
@@ -7269,7 +8008,13 @@ class EvaluationService:
                         }
                     else:
                         score = min(100.0, max(0.0, float(data["score"])))
-                except (ModelClientError, ValueError, KeyError, json.JSONDecodeError) as exc:
+                except (
+                    ModelClientError,
+                    ValueError,
+                    KeyError,
+                    OSError,
+                    json.JSONDecodeError,
+                ) as exc:
                     failure_evidence = {
                         "reason": str(exc),
                         "judge_attempts": attempt + 1,
@@ -7362,6 +8107,20 @@ class EvaluationService:
         )
 
         def callback(config: dict[str, Any], weight: float) -> ValidationResult:
+            required_judges = int(config.get("required_judges", 1) or 1)
+            if required_judges >= 2 and secondary is None:
+                return ValidationResult(
+                    "ai_rubric",
+                    weight,
+                    0,
+                    "needs_review",
+                    {
+                        "reason": "Strict exam rubric requires a secondary anonymous judge",
+                        "review_status": "needs_review",
+                        "review_reasons": ["required_secondary_judge_missing"],
+                        "required_judges": required_judges,
+                    },
+                )
             first = primary(config, weight)
             if first.status != "passed" or secondary is None:
                 return first
@@ -7383,14 +8142,18 @@ class EvaluationService:
                     },
                 )
             difference = abs(first.score - second.score)
+            effective_disagreement_threshold = min(
+                disagreement_threshold,
+                float(config.get("judge_disagreement_threshold", disagreement_threshold)),
+            )
             reviews = [first, second]
-            if difference > disagreement_threshold:
+            if difference > effective_disagreement_threshold:
                 if tiebreaker is None:
                     event_sink(
                         "judge.disagreement",
                         {
                             "difference": round(difference, 2),
-                            "threshold": disagreement_threshold,
+                            "threshold": effective_disagreement_threshold,
                             "status": "needs_review",
                         },
                     )
@@ -7407,7 +8170,7 @@ class EvaluationService:
                             "rubric_version": config.get("rubric_version"),
                             "source_tier": config.get("source_tier"),
                             "difference": round(difference, 2),
-                            "threshold": disagreement_threshold,
+                            "threshold": effective_disagreement_threshold,
                             "reviews": [item.evidence for item in reviews],
                         },
                     )
@@ -7447,16 +8210,19 @@ class EvaluationService:
                         for point_set in point_sets
                     ]
                     if all(isinstance(entry, dict) for entry in candidates):
-                        awarded = statistics.median(
+                        judge_awards = [
                             float(entry.get("awarded_points", 0)) for entry in candidates
+                        ]
+                        awarded = (
+                            min(judge_awards)
+                            if config.get("marking_mode") == "strict_exam" and len(reviews) == 2
+                            else statistics.median(judge_awards)
                         )
                         consensus_points.append(
                             {
                                 **candidates[0],
                                 "awarded_points": round(awarded, 6),
-                                "judge_awards": [
-                                    float(entry.get("awarded_points", 0)) for entry in candidates
-                                ],
+                                "judge_awards": judge_awards,
                             }
                         )
                 max_total = sum(float(point["max_points"]) for point in config["scoring_points"])
@@ -7474,14 +8240,18 @@ class EvaluationService:
                 "judge_count": len(reviews),
                 "scores": [round(item.score, 2) for item in reviews],
                 "spread": round(max(item.score for item in reviews) - min(item.score for item in reviews), 2),
-                "disagreement_threshold": disagreement_threshold,
+                "disagreement_threshold": effective_disagreement_threshold,
                 "rubric_source": config.get("rubric_source"),
                 "rubric_version": config.get("rubric_version"),
                 "source_tier": config.get("source_tier"),
                 "review_status": "completed",
                 "review_reasons": [],
                 "consensus_method": (
-                    "per_point_median_then_deterministic_sum"
+                    (
+                        "per_point_conservative_minimum_then_deterministic_sum"
+                        if config.get("marking_mode") == "strict_exam" and len(reviews) == 2
+                        else "per_point_median_then_deterministic_sum"
+                    )
                     if consensus_points
                     else "median_question_score"
                 ),

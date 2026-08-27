@@ -16,6 +16,13 @@ from pathlib import Path
 from typing import Any
 
 
+def _hidden_console_options() -> dict[str, int]:
+    """Prevent helper CLI probes and processes from opening a console on Windows."""
+    if os.name != "nt":
+        return {}
+    return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+
+
 class WorkspaceViolation(ValueError):
     pass
 
@@ -121,8 +128,9 @@ class CommandResult:
 
 
 class DockerExecutor:
-    def __init__(self, executable: str | None = None):
+    def __init__(self, executable: str | None = None, max_concurrency: int = 2):
         self.executable = executable or shutil.which("docker")
+        self._validator_slots = threading.BoundedSemaphore(max(1, int(max_concurrency)))
 
     @property
     def available(self) -> bool:
@@ -135,6 +143,7 @@ class DockerExecutor:
                 text=True,
                 timeout=5,
                 check=False,
+                **_hidden_console_options(),
             )
             return result.returncode == 0
         except (OSError, subprocess.TimeoutExpired):
@@ -147,6 +156,23 @@ class DockerExecutor:
             "executable": self.executable,
         }
 
+    def image_available(self, image: str) -> bool:
+        """Return whether an exact validator image exists in the local daemon."""
+        if not self.executable or not image.strip():
+            return False
+        try:
+            result = subprocess.run(
+                [self.executable, "image", "inspect", image],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+                **_hidden_console_options(),
+            )
+            return result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
     def run(
         self,
         workspace: Workspace,
@@ -154,6 +180,10 @@ class DockerExecutor:
         image: str,
         timeout: int = 120,
         network: str = "disabled",
+        cpus: float = 1.0,
+        memory: str = "768m",
+        pids_limit: int = 128,
+        tmpfs_size: str = "128m",
     ) -> CommandResult:
         if not self.available:
             return CommandResult(
@@ -177,46 +207,50 @@ class DockerExecutor:
             "--security-opt",
             "no-new-privileges",
             "--cpus",
-            "1.0",
+            str(min(8.0, max(0.25, float(cpus)))),
             "--memory",
-            "768m",
+            str(memory),
             "--pids-limit",
-            "128",
+            str(min(2048, max(32, int(pids_limit)))),
             "--tmpfs",
-            "/tmp:rw,noexec,nosuid,size=128m",
+            f"/tmp:rw,noexec,nosuid,size={tmpfs_size}",
             "-v",
             f"{workspace.root}:/workspace:rw",
             "-w",
             "/workspace",
             image,
             "sh",
-            "-lc",
+            "-c",
             command,
         ]
-        try:
-            result = subprocess.run(
-                args,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-            return CommandResult(
-                ok=result.returncode == 0,
-                exit_code=result.returncode,
-                stdout=result.stdout[-100_000:],
-                stderr=result.stderr[-100_000:],
-                duration_ms=int((time.perf_counter() - start) * 1000),
-            )
-        except subprocess.TimeoutExpired as exc:
-            return CommandResult(
-                ok=False,
-                exit_code=None,
-                stdout=(exc.stdout or "")[-100_000:] if isinstance(exc.stdout, str) else "",
-                stderr="Command timed out",
-                duration_ms=int((time.perf_counter() - start) * 1000),
-                error_code="command_timeout",
-            )
+        with self._validator_slots:
+            try:
+                result = subprocess.run(
+                    args,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                    **_hidden_console_options(),
+                )
+                return CommandResult(
+                    ok=result.returncode == 0,
+                    exit_code=result.returncode,
+                    stdout=result.stdout[-100_000:],
+                    stderr=result.stderr[-100_000:],
+                    duration_ms=int((time.perf_counter() - start) * 1000),
+                )
+            except subprocess.TimeoutExpired as exc:
+                return CommandResult(
+                    ok=False,
+                    exit_code=None,
+                    stdout=(exc.stdout or "")[-100_000:]
+                    if isinstance(exc.stdout, str)
+                    else "",
+                    stderr="Command timed out",
+                    duration_ms=int((time.perf_counter() - start) * 1000),
+                    error_code="command_timeout",
+                )
 
 
 SAFE_ENV_KEYS = {
@@ -643,6 +677,7 @@ def native_cli_status(executable: str | None) -> dict[str, Any]:
                 timeout=5,
                 check=False,
                 env=version_env,
+                **_hidden_console_options(),
             )
         except OSError as exc:
             last_failure = {
@@ -674,6 +709,7 @@ def native_cli_status(executable: str | None) -> dict[str, Any]:
                             text=True,
                             timeout=5,
                             check=False,
+                            **_hidden_console_options(),
                         )
                         help_text = (help_result.stdout or help_result.stderr).lower()
                         cursor_identity = "cursor agent" in help_text or all(
@@ -762,7 +798,10 @@ def run_native_cli(
     last_start_error: OSError | None = None
     popen_options: dict[str, Any] = {}
     if os.name == "nt":
-        popen_options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        popen_options["creationflags"] = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
     else:
         popen_options["start_new_session"] = True
     for resolved in candidates:
@@ -823,7 +862,11 @@ def run_native_cli(
         except (BrokenPipeError, OSError):
             pass
         finally:
-            process.stdin.close()
+            # Windows can raise EINVAL when a judge CLI exits while its large stdin
+            # prompt is still being delivered. The child result remains authoritative;
+            # closing an already-broken pipe must not fail the whole benchmark run.
+            with suppress(BrokenPipeError, OSError):
+                process.stdin.close()
 
     error_code: str | None = None
     next_heartbeat = time.monotonic() + max(0.5, heartbeat_interval)

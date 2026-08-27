@@ -65,18 +65,18 @@ export default function TestLibrary() {
   return (
     <div className="ab-view ab-library-view">
       <header className="ab-view-header">
-        <div className="ab-view-title"><span className="ab-view-index">02 / LIBRARY</span><div><h1>测试库巡检</h1><p>从测试集合追到单题、验证器与历史区分度，不再用卡片堆叠掩盖问题。</p></div></div>
-        <div className="ab-header-meta"><span className="ab-meta-pill"><i />{cases.data?.length ?? 0} CASES</span><span className="ab-meta-pill">{lowCount} 个信号待处理</span><button className="ab-ghost-button" type="button" onClick={() => setImporting(true)}><FileUp size={13} />导入题包</button></div>
+        <div className="ab-view-title"><span className="ab-view-index">能力评测</span><div><h1>测试与套件</h1><p>先按评测目标选择套件，再查看其中的题目、运行要求和评分方式。</p></div></div>
+        <div className="ab-header-meta"><span className="ab-meta-pill"><i />{cases.data?.length ?? 0} 项测试</span><span className="ab-meta-pill">{lowCount} 项区分度待关注</span><button className="ab-ghost-button" type="button" onClick={() => setImporting(true)}><FileUp size={13} />导入题包</button></div>
       </header>
 
       <div className="ab-library-layout">
         <aside className="ab-collection-pane">
-          <div className="ab-pane-label">BUILT-IN SUITES</div>
+          <div className="ab-pane-label">推荐套件</div>
           {mathSuite && <div className="ab-featured-suite ab-math-suite"><span><Sigma size={13} /></span><div><strong>2025 考研数学（一）</strong><small>内置原题 · 22 题 / 150 分</small><nav><Link to={`/experiments?create=1&suite_id=${mathSuite.id}`}>闭卷推理</Link>{mathToolsSuite && <Link to={`/experiments?create=1&suite_id=${mathToolsSuite.id}`}>工具增强</Link>}</nav></div><b>BUILT IN</b></div>}
           {frontendSuite && <div className="ab-featured-suite ab-frontend-suite"><span><MonitorSmartphone size={13} /></span><div><strong>Xnmk Library 前端工程</strong><small>{frontendSuite.case_count} 项 · D3–Ultra · 纯人工评分</small><nav><Link to={`/experiments?create=1&suite_id=${frontendSuite.id}`}>运行完整套件</Link></nav></div><b>5.2</b></div>}
           {featuredSuites.slice(0, 2).map((suite) => <Link className="ab-featured-suite" key={suite.id} to={`/experiments?create=1&suite_id=${suite.id}`}><span><FlaskConical size={13} /></span><div><strong>{suite.name}</strong><small>{suite.case_count} 项 · 难度 {suite.difficulty_min ?? 1}–{suite.difficulty_max ?? 1}</small></div><ChevronRight size={11} /></Link>)}
 
-          <div className="ab-pane-label spaced">COLLECTIONS</div>
+          <div className="ab-pane-label spaced">按能力浏览</div>
           <button className={`ab-collection${!category ? " active" : ""}`} type="button" onClick={() => chooseCategory("")}><span className="ab-collection-icon"><Layers3 size={12} /></span><span><strong>全部测试</strong><small>按真实历史信号排序</small></span><b>{cases.data?.length ?? 0}</b></button>
           {Object.entries(categoryMeta).map(([key, meta]) => {
             const Icon = meta.icon;

@@ -144,6 +144,12 @@ class MathRubricModel(BaseModel):
     allow_new_solutions: bool = True
     low_confidence_threshold: float = Field(default=0.70, ge=0, le=1)
     judge_disagreement_threshold: float = Field(default=12.0, ge=0, le=100)
+    marking_mode: Literal["standard", "strict_exam"] = "standard"
+    point_increment: float = Field(default=0.5, gt=0, le=10)
+    minor_defect_deduction: float = Field(default=0.5, gt=0, le=10)
+    major_defect_deduction: float = Field(default=1.0, gt=0, le=20)
+    full_credit_confidence: float = Field(default=0.90, ge=0, le=1)
+    required_judges: int = Field(default=1, ge=1, le=3)
 
     @model_validator(mode="after")
     def source_tier_matches_source(self) -> MathRubricModel:
@@ -165,6 +171,9 @@ class PointDecisionModel(BaseModel):
     rationale: str = Field(default="", max_length=5_000)
     propagated_error: bool = False
     independent_work: bool = False
+    defect_severity: Literal["none", "presentation", "minor", "major", "fatal"] = (
+        "none"
+    )
 
 
 class AIRubricResultModel(BaseModel):
@@ -338,6 +347,12 @@ def normalize_rubric(config: Mapping[str, Any]) -> dict[str, Any]:
     raw.setdefault("allow_new_solutions", True)
     raw.setdefault("low_confidence_threshold", 0.70)
     raw.setdefault("judge_disagreement_threshold", 12.0)
+    raw.setdefault("marking_mode", "standard")
+    raw.setdefault("point_increment", 0.5)
+    raw.setdefault("minor_defect_deduction", 0.5)
+    raw.setdefault("major_defect_deduction", 1.0)
+    raw.setdefault("full_credit_confidence", 0.90)
+    raw.setdefault("required_judges", 1)
     raw["rubric_protocol"] = RUBRIC_SCHEMA
     raw["max_points"] = _effective_max_points(normalized_points, alternate_paths)
     return raw
@@ -382,8 +397,14 @@ def rubric_json_schema(config: Mapping[str, Any] | None = None) -> dict[str, Any
             "rationale": {"type": "string"},
             "propagated_error": {"type": "boolean"},
             "independent_work": {"type": "boolean"},
+            "defect_severity": {
+                "type": "string",
+                "enum": ["none", "presentation", "minor", "major", "fatal"],
+            },
         },
     }
+    if normalized.get("marking_mode") == "strict_exam":
+        decision_schema["required"].append("defect_severity")
     if point_ids:
         decision_schema["properties"]["point_id"]["enum"] = point_ids
     return {
@@ -505,12 +526,22 @@ def score_rubric(
         flags.append("unknown_point_decision")
     if disagreement:
         flags.append("judge_disagreement")
-    if parsed.solution_path == "new":
+    if parsed.solution_path == "new" and not bool(
+        normalized.get("allow_new_solutions", True)
+    ):
         flags.append("new_solution")
     if parsed.solution_path == "unclear":
         flags.append("unclear_solution_path")
-    flags.extend(str(item) for item in parsed.review_flags)
+    # Judge-authored notes are useful audit evidence, but arbitrary prose must not
+    # decide workflow state.  Escalation is derived below from controlled fields
+    # (coverage, confidence, solution path, rule consistency, and disagreement).
+    judge_review_notes = list(dict.fromkeys(str(item) for item in parsed.review_flags))
     threshold = float(normalized.get("low_confidence_threshold", 0.70))
+    strict_exam = normalized.get("marking_mode") == "strict_exam"
+    point_increment = float(normalized.get("point_increment", 0.5))
+    minor_deduction = float(normalized.get("minor_defect_deduction", point_increment))
+    major_deduction = float(normalized.get("major_defect_deduction", 1.0))
+    full_credit_confidence = float(normalized.get("full_credit_confidence", 0.90))
     if parsed.overall_confidence < threshold:
         flags.append("low_confidence")
 
@@ -530,6 +561,43 @@ def score_rubric(
             flags.append("invalid_awarded_points")
         max_points = float(spec["max_points"])
         value = min(max_points, max(0.0, value))
+        try:
+            point_confidence = float(raw.get("confidence", 0))
+        except (TypeError, ValueError):
+            point_confidence = 0.0
+        if raw.get("status") == "uncertain" or point_confidence < threshold:
+            flags.append("low_point_confidence")
+        strict_adjustments: list[str] = []
+        defect_severity = str(raw.get("defect_severity") or "none")
+        if strict_exam:
+            # Exam marks are awarded in fixed half-point units.  Always round down:
+            # a judge may not create extra credit through a generous decimal.
+            quantized = math.floor((value + 1e-9) / point_increment) * point_increment
+            if abs(quantized - value) > 1e-9:
+                strict_adjustments.append("rounded_down_to_point_increment")
+            value = quantized
+            status = str(raw.get("status") or "not_met")
+            if status in {"not_met", "not_applicable"} or defect_severity == "fatal":
+                if value > 0:
+                    strict_adjustments.append("zeroed_unmet_or_fatal_point")
+                value = 0.0
+            elif status == "partial" and value >= max_points:
+                value = max(0.0, max_points - point_increment)
+                strict_adjustments.append("partial_status_cannot_receive_full_credit")
+            if defect_severity == "minor":
+                cap = max(0.0, max_points - max(point_increment, minor_deduction))
+                if value > cap:
+                    value = cap
+                    strict_adjustments.append("minor_defect_minimum_deduction")
+            elif defect_severity == "major":
+                cap = max(0.0, max_points - max(point_increment, major_deduction))
+                if value > cap:
+                    value = cap
+                    strict_adjustments.append("major_defect_minimum_deduction")
+            if value >= max_points and point_confidence < full_credit_confidence:
+                value = max(0.0, max_points - point_increment)
+                strict_adjustments.append("full_credit_confidence_not_met")
+            value = round(value, 6)
         awarded[point_id] = value
         point_results.append(
             {
@@ -544,6 +612,8 @@ def score_rubric(
                 "rationale": raw.get("rationale", ""),
                 "propagated_error": bool(raw.get("propagated_error", False)),
                 "independent_work": bool(raw.get("independent_work", False)),
+                "defect_severity": defect_severity,
+                "strict_adjustments": strict_adjustments,
                 "depends_on": list(spec.get("depends_on") or []),
                 "mutually_exclusive_with": list(spec.get("mutually_exclusive_with") or []),
                 "alternate_path": spec.get("alternate_path"),
@@ -619,6 +689,33 @@ def score_rubric(
     for item in point_results:
         item["awarded_points"] = round(awarded[item["point_id"]], 6)
     max_total = float(normalized["max_points"])
+    strict_question_adjustment: dict[str, Any] | None = None
+    substantive_flag = any(
+        str(item.get("defect_severity") or "none") in {"minor", "major", "fatal"}
+        for item in point_results
+    )
+    if strict_exam and parsed.review_flags and substantive_flag and sum(awarded.values()) >= max_total:
+        # Only a controlled mathematical defect may activate the full-score guard.
+        # Free-form review notes can also describe rounding, notation or presentation
+        # issues; those remain in the audit evidence but must not manufacture a
+        # deduction when every point is mathematically sound.
+        credited = [item for item in point_results if awarded[item["point_id"]] > 0]
+        if credited:
+            target = min(
+                credited,
+                key=lambda item: (float(item.get("confidence") or 0), item["point_id"]),
+            )
+            point_id = str(target["point_id"])
+            before = awarded[point_id]
+            awarded[point_id] = max(0.0, before - point_increment)
+            target["awarded_points"] = round(awarded[point_id], 6)
+            target["strict_adjustments"].append("substantive_review_flag_full_score_guard")
+            strict_question_adjustment = {
+                "point_id": point_id,
+                "before": round(before, 6),
+                "after": round(awarded[point_id], 6),
+                "judge_review_notes": judge_review_notes,
+            }
     awarded_total = round(sum(awarded.values()), 6)
     percentage = round(awarded_total / max_total * 100.0, 2) if max_total else 0.0
     # A point omission, malformed decision, low confidence, a new route, or judge
@@ -646,10 +743,14 @@ def score_rubric(
             "max_points": round(max_total, 6),
             "percentage": percentage,
             "review_flags": review_flags,
+            "judge_review_notes": judge_review_notes,
             "review_status": status,
             "review_reasons": review_flags,
             "point_awards": deepcopy(point_results),
             "selected_alternate_path": selected_alternate_path,
+            "marking_mode": normalized.get("marking_mode", "standard"),
+            "point_increment": point_increment,
+            "strict_question_adjustment": strict_question_adjustment,
             "scored_at": _now_iso(),
         },
     )
@@ -664,6 +765,12 @@ def structured_rubric_config(
     allow_new_solutions: bool = True,
     low_confidence_threshold: float = 0.70,
     judge_disagreement_threshold: float = 12.0,
+    marking_mode: Literal["standard", "strict_exam"] = "standard",
+    point_increment: float = 0.5,
+    minor_defect_deduction: float = 0.5,
+    major_defect_deduction: float = 1.0,
+    full_credit_confidence: float = 0.90,
+    required_judges: int = 1,
 ) -> dict[str, Any]:
     """Build a normalized config for a published solution case."""
 
@@ -681,6 +788,12 @@ def structured_rubric_config(
         "allow_new_solutions": allow_new_solutions,
         "low_confidence_threshold": low_confidence_threshold,
         "judge_disagreement_threshold": judge_disagreement_threshold,
+        "marking_mode": marking_mode,
+        "point_increment": point_increment,
+        "minor_defect_deduction": minor_defect_deduction,
+        "major_defect_deduction": major_defect_deduction,
+        "full_credit_confidence": full_credit_confidence,
+        "required_judges": required_judges,
     }
     return normalize_rubric(config)
 

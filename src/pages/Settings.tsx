@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useLayoutEffect, useRef, useState, type ChangeEvent } from "react";
 import { Archive, CheckCircle2, Database, FileDown, HardDrive, Save, ShieldAlert, TerminalSquare, Upload } from "lucide-react";
 import { api, API_BASE } from "../lib/api";
 import { useApi } from "../lib/useApi";
@@ -21,7 +21,7 @@ export default function SettingsPage() {
   const latestJudge = useRef({ model: "", runner: "" });
   const [message, setMessage] = useState<{ text: string; kind: "success" | "error" } | null>(null);
   const [busy, setBusy] = useState(false);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (status.data) {
       setNativeEnabled(status.data.native_cli_enabled);
       setMaxRuntime(status.data.settings.default_max_runtime_seconds ?? 7200);
@@ -101,8 +101,8 @@ export default function SettingsPage() {
   return (
     <div className="ab-view ab-secondary-view ab-settings-view">
       <header className="ab-view-header">
-        <div className="ab-view-title"><span className="ab-view-index">07 / LOCAL SYSTEM</span><div><h1>本地设置</h1><p>执行安全、匿名裁判与数据备份全部保留在这台设备。</p></div></div>
-        <div className="ab-header-meta"><span className="ab-meta-pill"><i />LOCAL ONLY</span><button className="ab-run-button" type="button" disabled={busy} onClick={() => void save()}><Save size={14} />{busy ? "保存中…" : "保存设置"}</button></div>
+        <div className="ab-view-title"><span className="ab-view-index">资源与设置</span><div><h1>本地设置</h1><p>管理执行安全、评测裁判、数据备份和故障诊断；所有内容只保存在这台设备。</p></div></div>
+        <div className="ab-header-meta"><span className="ab-meta-pill"><i />仅限本机</span><button className="ab-run-button" type="button" disabled={busy} onClick={() => void save()}><Save size={14} />{busy ? "保存中…" : "保存设置"}</button></div>
       </header>
       {message && <div className={message.kind === "success" ? "success-banner" : "error-banner settings-message"}>{message.text}</div>}
       <div className="ab-settings-body">

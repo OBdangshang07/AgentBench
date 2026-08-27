@@ -50,6 +50,7 @@ V2_QUICK_SUITE_ID = stable_id("suite", "v2-quick")
 PRACTICAL_SUITE_ID = stable_id("suite", "v2-practical")
 FRONTIER_SUITE_ID = stable_id("suite", "v2-frontier")
 ULTRA_SUITE_ID = stable_id("suite", "v3-ultra-prototype")
+BACKEND_ULTRA_SUITE_ID = stable_id("suite", "backend-ultra-extreme-v2-schema-contract")
 REASONING_SUITE_ID = stable_id("suite", "v2-reasoning-focus")
 PLANNING_SUITE_ID = stable_id("suite", "v2-planning-focus")
 CODING_SUITE_ID = stable_id("suite", "v2-coding-focus")
@@ -2856,6 +2857,31 @@ def build_ultra_catalog() -> list[dict[str, Any]]:
     return build_ultra_catalog_v5(event_solution)
 
 
+BACKEND_ULTRA_BUNDLE_ID = "backend-ultra-extreme"
+BACKEND_ULTRA_BUNDLE_VERSION = "1.0.2"
+BACKEND_ULTRA_MANIFEST_SHA256 = "249fe79111a100f1b1d68b06078afe6a4cb0aaabdafc66c8ae5263c9442303a7"
+
+
+def build_backend_ultra_catalog() -> list[dict[str, Any]]:
+    """Return the two digest-pinned BACKEND ULTRA extreme challenges."""
+    from .ultra_financial_ledger import build_financial_ledger_catalog
+    from .ultra_queue_v1 import build_queue_ultra_catalog
+
+    common_reference = {
+        "bundle_id": BACKEND_ULTRA_BUNDLE_ID,
+        "version": BACKEND_ULTRA_BUNDLE_VERSION,
+        "manifest_sha256": BACKEND_ULTRA_MANIFEST_SHA256,
+    }
+    return [
+        *build_financial_ledger_catalog(
+            {**common_reference, "validator_id": "financial-ledger"}
+        ),
+        *build_queue_ultra_catalog(
+            {**common_reference, "validator_id": "distributed-task-queue"}
+        ),
+    ]
+
+
 def seed_builtin_data(database: Database) -> None:
     now = utc_now()
     if not database.fetch_one("SELECT id FROM models WHERE id = ?", (MOCK_MODEL_ID,)):
@@ -3152,11 +3178,19 @@ def seed_builtin_data(database: Database) -> None:
     case_ids: list[str] = []
     base_cases = build_catalog()
     ultra_cases = build_ultra_catalog()
+    backend_ultra_cases = build_backend_ultra_catalog()
     math_cases_by_lane = build_builtin_math_cases()
     math_closed_cases = [item["definition"] for item in math_cases_by_lane["closed-book"]]
     math_tool_cases = [item["definition"] for item in math_cases_by_lane["tool-augmented"]]
     frontend_cases = build_frontend_cases()
-    cases = base_cases + ultra_cases + math_closed_cases + math_tool_cases + frontend_cases
+    cases = (
+        base_cases
+        + ultra_cases
+        + backend_ultra_cases
+        + math_closed_cases
+        + math_tool_cases
+        + frontend_cases
+    )
     for definition in cases:
         case_id = stable_id("case", f"{definition['slug']}@{definition['version']}")
         case_ids.append(case_id)
@@ -3196,10 +3230,12 @@ def seed_builtin_data(database: Database) -> None:
 
     base_case_ids = case_ids[: len(base_cases)]
     ultra_start = len(base_cases)
-    math_closed_start = ultra_start + len(ultra_cases)
+    backend_ultra_start = ultra_start + len(ultra_cases)
+    math_closed_start = backend_ultra_start + len(backend_ultra_cases)
     math_tool_start = math_closed_start + len(math_closed_cases)
     frontend_start = math_tool_start + len(math_tool_cases)
-    ultra_case_ids = case_ids[ultra_start:math_closed_start]
+    ultra_case_ids = case_ids[ultra_start:backend_ultra_start]
+    backend_ultra_case_ids = case_ids[backend_ultra_start:math_closed_start]
     math_closed_ids = case_ids[math_closed_start:math_tool_start]
     math_tool_ids = case_ids[math_tool_start:frontend_start]
     frontend_ids = case_ids[frontend_start:]
@@ -3315,7 +3351,7 @@ def seed_builtin_data(database: Database) -> None:
             SMOKE_SUITE_ID,
             "AgentBench V1 快速体验",
             "无需 Docker 的 12 个快速测试",
-            "1.0.0",
+            "1.1.0",
             base_case_ids[:4] + base_case_ids[25:29] + base_case_ids[50:54],
         ),
         (
@@ -3352,6 +3388,13 @@ def seed_builtin_data(database: Database) -> None:
             "两道三轮自适应极限挑战：崩溃一致性事件存储与多模式多资源调度",
             "4.0.0",
             ultra_case_ids,
+        ),
+        (
+            BACKEND_ULTRA_SUITE_ID,
+            "后端 Ultra 极限测试",
+            "两道真实后端系统极限题：强一致金融账本与分布式任务队列；固定 PostgreSQL 16、Redis 7、私有强杀验证和严重错误硬门槛。",
+            "1.0.0",
+            backend_ultra_case_ids,
         ),
         (
             REASONING_SUITE_ID,

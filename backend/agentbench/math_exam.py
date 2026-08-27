@@ -31,9 +31,9 @@ def _question_type(number: int) -> str:
 def _question_points(number: int) -> int:
     if number <= 16:
         return 5
-    # 2025 Math I paper structure: question 17 is 10 points and questions
-    # 18-22 are 12 points each (70 points for the solution section).
-    return 10 if number == 17 else 12
+    # National postgraduate Mathematics I structure: questions 17-20 are
+    # 10 points each and questions 21-22 are 15 points each (70 total).
+    return 10 if number <= 20 else 15
 
 
 def _rubric_template(number: int) -> dict[str, Any]:
@@ -162,6 +162,12 @@ def _structured_solution_rubric(question: dict[str, Any], year: int) -> dict[str
         judge_disagreement_threshold=float(
             question.get("judge_disagreement_threshold", 12.0)
         ),
+        marking_mode=str(question.get("marking_mode") or "standard"),
+        point_increment=float(question.get("point_increment", 0.5)),
+        minor_defect_deduction=float(question.get("minor_defect_deduction", 0.5)),
+        major_defect_deduction=float(question.get("major_defect_deduction", 1.0)),
+        full_credit_confidence=float(question.get("full_credit_confidence", 0.90)),
+        required_judges=int(question.get("required_judges", 1)),
     )
     # These are private judge context fields.  public_definition() removes them
     # before a case is exposed to candidate Agents.
@@ -414,6 +420,12 @@ def update_math_question(
         "allow_new_solutions",
         "low_confidence_threshold",
         "judge_disagreement_threshold",
+        "marking_mode",
+        "point_increment",
+        "minor_defect_deduction",
+        "major_defect_deduction",
+        "full_credit_confidence",
+        "required_judges",
         "review_status",
     }
     for key, value in changes.items():
@@ -500,7 +512,10 @@ def build_published_math_cases(manifest: dict[str, Any]) -> dict[str, list[dict[
                     }
                 }
                 validators = [{"type": "symbolic_json", "weight": 100, "config": {"fields": fields}}]
-                response_rule = '{"answer":"A"}'
+                # This is a response-shape example, not an answer hint.  A literal
+                # "A" here caused every multiple-choice prompt to instruct the
+                # candidate to return A even when the verified key was different.
+                response_rule = '{"answer":"选项字母"}'
             elif kind == "fill":
                 fields = {
                     "answer": {

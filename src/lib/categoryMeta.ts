@@ -32,6 +32,7 @@ export const categoryMeta: Record<string, CategoryMeta> = {
   planning: { name: "规划决策", icon: Route, color: "gold" },
   "ultra-engineering": { name: "Ultra 工程", icon: Code2, color: "ultra" },
   "ultra-planning": { name: "Ultra 规划", icon: Route, color: "ultra" },
+  "ultra-backend": { name: "后端 Ultra", icon: Code2, color: "ultra" },
   "frontend-ui": { name: "前端 UI 与视觉", icon: MonitorSmartphone, color: "teal" },
   "frontend-games": { name: "网页游戏", icon: Code2, color: "green" },
   "frontend-graphics": { name: "3D / WebGL", icon: Braces, color: "cyan" },
@@ -42,7 +43,7 @@ export const categoryMeta: Record<string, CategoryMeta> = {
 export const categoryOrder = Object.keys(categoryMeta);
 
 /** 不上雷达图的 Ultra 分类。 */
-export const ultraCategories = ["ultra-engineering", "ultra-planning"];
+export const ultraCategories = ["ultra-engineering", "ultra-planning", "ultra-backend"];
 
 /** 可进入雷达图的分类，顺序固定。 */
 export const radarCategories = categoryOrder.filter((category) => !ultraCategories.includes(category));

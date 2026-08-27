@@ -48,7 +48,7 @@ function renderRunPage(run: RunDetail) {
     const url = String(input);
     let value: unknown = {};
     if (url.endsWith("/health")) {
-        value = { name: "AgentBench Desktop", version: "5.2.6" };
+        value = { name: "AgentBench Desktop", version: "5.3.0" };
     } else if (url.includes("/runs?experiment_id=")) {
       value = [run];
     } else if (url.includes("/runs/run-1")) {
@@ -70,7 +70,7 @@ function renderRunPage(run: RunDetail) {
 function renderRunPageWithNotifications(run: RunDetail) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
-    const value = url.includes("/runs?experiment_id=") ? [run] : url.includes("/runs/run-1") ? run : { name: "AgentBench Desktop", version: "5.2.6" };
+    const value = url.includes("/runs?experiment_id=") ? [run] : url.includes("/runs/run-1") ? run : { name: "AgentBench Desktop", version: "5.3.0" };
     return { ok: true, status: 200, json: async () => value } as Response;
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -169,5 +169,23 @@ describe("RunDetail exam question card", () => {
     expect(screen.getByText("user · abcdef123456")).toBeInTheDocument();
     expect(screen.getByText(/Agent 未上报/)).toBeInTheDocument();
     expect(screen.getAllByText("N/A").length).toBeGreaterThan(0);
+  });
+
+  it("shows runner failures as unscored instead of fabricating zero-point dimensions", async () => {
+    renderRunPage(makeRun({
+      status: "environment_unavailable",
+      score: null,
+      passed: false,
+      failure_class: "runtime_environment_failure",
+      error_code: "native_agent_execution_error",
+      error_message: "Qoder CLI reported error_during_execution: terminated",
+      validators: [],
+      score_dimensions: [],
+    }));
+
+    expect(await screen.findByText("本次运行无效")).toBeInTheDocument();
+    expect(screen.getByText(/未进入能力评分/)).toBeInTheDocument();
+    expect(screen.getByText(/私有验证器未执行/)).toBeInTheDocument();
+    expect(screen.queryByText("客观质量")).not.toBeInTheDocument();
   });
 });

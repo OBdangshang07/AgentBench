@@ -105,7 +105,7 @@ export default function ExperimentDetail() {
       score: scored.length ? scored.reduce((sum, run) => sum + Number(run.score), 0) / scored.length : null,
       objective: objectiveScored.length ? objectiveScored.reduce((sum, run) => sum + Number(run.objective_score), 0) / objectiveScored.length : null,
       time: timeScored.length ? timeScored.reduce((sum, run) => sum + Number(run.time_score), 0) / timeScored.length : null,
-      success: group.length ? group.filter((run) => run.passed ?? run.status === "completed").length / group.length * 100 : 0,
+      success: scored.length ? scored.filter((run) => run.passed ?? run.status === "completed").length / scored.length * 100 : 0,
     };
   }).sort((left, right) => Number(right.score ?? -1) - Number(left.score ?? -1));
   const categoryStats = [...categoryGroups.entries()].map(([category, group]) => {

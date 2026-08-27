@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 
 def utc_now() -> str:
@@ -180,6 +180,14 @@ CREATE TABLE IF NOT EXISTS run_attempts (
     created_at TEXT NOT NULL,
     completed_at TEXT,
     UNIQUE(run_id, attempt_no)
+);
+
+CREATE TABLE IF NOT EXISTS run_validation_seeds (
+    run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    seed_hex TEXT NOT NULL,
+    commitment_sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    revealed_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS run_events (

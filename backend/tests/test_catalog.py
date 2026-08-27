@@ -6,6 +6,8 @@ import sys
 
 from agentbench.catalog import (
     AIDER_RUNNER_ID,
+    BACKEND_ULTRA_MANIFEST_SHA256,
+    BACKEND_ULTRA_SUITE_ID,
     CODEX_RUNNER_ID,
     CODING_SUITE_ID,
     FRONTIER_SUITE_ID,
@@ -25,6 +27,7 @@ from agentbench.catalog import (
     ULTRA_SUITE_ID,
     V2_FULL_SUITE_ID,
     V2_QUICK_SUITE_ID,
+    build_backend_ultra_catalog,
     build_catalog,
     build_ultra_catalog,
     seed_builtin_data,
@@ -431,7 +434,7 @@ def test_seed_disables_retired_builtin_cases(settings):
             "SELECT enabled FROM test_cases WHERE id='retired'"
         )
         assert retired == {"enabled": 0}
-        assert service.dashboard()["test_cases"] == 282
+        assert service.dashboard()["test_cases"] == 284
     finally:
         service.close()
 
@@ -453,6 +456,30 @@ def test_ultra_catalog_contains_three_attempt_project_challenges():
         assert len(case["attempt_policy"]["hints"]) == 2
         assert any(item["type"] == "command_metrics" for item in case["validators"])
         assert case["version"] == "5.0.0"
+
+
+def test_backend_ultra_catalog_contains_two_digest_pinned_single_attempt_challenges():
+    cases = build_backend_ultra_catalog()
+
+    assert len(cases) == 2
+    assert {case["category"] for case in cases} == {"ultra-backend"}
+    assert {case["metadata"]["difficulty"] for case in cases} == {6}
+    assert {case["metadata"]["estimated_minutes"] for case in cases} == {40}
+    assert {case["metadata"]["score_basis"] for case in cases} == {"backend_quality"}
+    assert all(case["attempt_policy"]["max_attempts"] == 1 for case in cases)
+    assert all(case["limits"]["docker_image"] == "agentbench/backend-ultra:1.0.0" for case in cases)
+    assert all(case["limits"]["validator_cpus"] == 4 for case in cases)
+    assert all(case["limits"]["validator_memory"] == "8g" for case in cases)
+    references = {
+        case["validators"][0]["config"]["private_validator_ref"]["validator_id"]:
+        case["validators"][0]["config"]["private_validator_ref"]
+        for case in cases
+    }
+    assert set(references) == {"financial-ledger", "distributed-task-queue"}
+    assert {reference["manifest_sha256"] for reference in references.values()} == {
+        BACKEND_ULTRA_MANIFEST_SHA256
+    }
+    assert all(len(reference["manifest_sha256"]) == 64 for reference in references.values())
 
 
 def test_ultra_private_validators_are_hidden_and_scheduler_reference_is_feasible(tmp_path):
@@ -556,6 +583,7 @@ def test_seeded_suites_have_expected_sizes(settings):
         assert len(service.get_suite(NCRE_OFFICE_PAPER02_SUITE_ID)["cases"]) == 4
         assert len(service.get_suite(NCRE_OFFICE_PAPER03_SUITE_ID)["cases"]) == 4
         assert len(service.get_suite(ULTRA_SUITE_ID)["cases"]) == 2
+        assert len(service.get_suite(BACKEND_ULTRA_SUITE_ID)["cases"]) == 2
         assert len(service.get_suite(REASONING_SUITE_ID)["cases"]) == 25
         assert len(service.get_suite(PLANNING_SUITE_ID)["cases"]) == 15
         assert len(service.get_suite(CODING_SUITE_ID)["cases"]) == 20
@@ -567,11 +595,13 @@ def test_seeded_suites_have_expected_sizes(settings):
         assert len(gauntlet_cases) >= 55
         assert {case["category"] for case in gauntlet_cases}.isdisjoint({"office-exam"})
         assert 50 <= len(gauntlet_lite_cases) <= 75
-        assert service.dashboard()["test_cases"] == 282
+        assert service.dashboard()["test_cases"] == 284
         suites = {item["id"]: item for item in service.list_suites()}
         assert suites[FRONTIER_SUITE_ID]["difficulty_max"] == 5
         assert suites[PRACTICAL_SUITE_ID]["docker_case_count"] > 0
         assert suites[ULTRA_SUITE_ID]["docker_case_count"] == 2
+        assert suites[BACKEND_ULTRA_SUITE_ID]["docker_case_count"] == 2
+        assert suites[BACKEND_ULTRA_SUITE_ID]["estimated_minutes"] == 80
         assert suites[GAUNTLET_SUITE_ID]["difficulty_min"] >= 4
         assert suites[GAUNTLET_SUITE_ID]["category_count"] >= 5
         assert suites[GAUNTLET_SUITE_ID]["docker_case_count"] > 0

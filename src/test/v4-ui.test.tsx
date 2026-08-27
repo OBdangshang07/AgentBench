@@ -5,7 +5,7 @@ import App from "../App";
 import { useWorkspaceUx, WorkspaceUxProvider } from "../components/WorkspaceUx";
 
 const systemStatus = {
-  version: "5.2.6",
+  version: "5.3.0",
   data_dir: "C:/AgentBench",
   database: { path: "C:/AgentBench/agentbench.db", ready: true },
   docker: { installed: true, available: true, executable: "docker" },
@@ -111,7 +111,7 @@ describe("AgentBench V4 application shell", () => {
   it("renders the real Agent operations navigation and control center", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.6" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.3.0" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       return json([]);
@@ -119,22 +119,21 @@ describe("AgentBench V4 application shell", () => {
 
     render(<MemoryRouter initialEntries={["/"]}><App /></MemoryRouter>);
 
-    expect(await screen.findByRole("heading", { name: "控制中心" })).toBeInTheDocument();
-    expect(screen.getByText("Agent Studio")).toBeInTheDocument();
-    expect(screen.getByText("Agent Flow")).toBeInTheDocument();
-    expect(screen.getByText("工具与 MCP")).toBeInTheDocument();
-    expect(screen.getByText(/把所有 Agent 放进一个/)).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "今天要做什么？" })).toBeInTheDocument();
+    expect(screen.getByText("会话")).toBeInTheDocument();
+    expect(screen.getAllByText("能力评测").length).toBeGreaterThan(0);
+    expect(screen.getByText("资源与设置")).toBeInTheDocument();
+    expect(screen.getByText("需要你处理")).toBeInTheDocument();
     expect(await screen.findByText(/42\.8万|428K/)).toBeInTheDocument();
-    expect(screen.getByText("统一活动流")).toBeInTheDocument();
-    expect(screen.getByText("任务开始执行")).toBeInTheDocument();
-    expect(screen.getByText("当前工作队列")).toBeInTheDocument();
+    expect(screen.getByText("继续工作")).toBeInTheDocument();
+    expect(screen.getByText("任务与自动化")).toBeInTheDocument();
   });
 
   it("creates an authorized local project through the V4 form", async () => {
     let posted: Record<string, unknown> | null = null;
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.6" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.3.0" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       if (url.endsWith("/runners")) return json([runner]);
@@ -148,10 +147,10 @@ describe("AgentBench V4 application shell", () => {
     });
 
     render(<MemoryRouter initialEntries={["/projects"]}><App /></MemoryRouter>);
-    fireEvent.click(await screen.findByRole("button", { name: /新建项目/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /添加项目/ }));
     fireEvent.change(screen.getByLabelText("项目名称"), { target: { value: "Local Workbench" } });
     fireEvent.change(screen.getByLabelText(/项目根目录/), { target: { value: "D:\\Projects\\Workbench" } });
-    fireEvent.click(screen.getByRole("button", { name: /创建并授权/ }));
+    fireEvent.click(screen.getByRole("button", { name: /添加并开始会话/ }));
 
     await waitFor(() => expect(posted).not.toBeNull());
     expect(posted).toMatchObject({
@@ -166,7 +165,7 @@ describe("AgentBench V4 application shell", () => {
   it("persists workspace density, collapses navigation, runs commands and keeps notifications", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.6" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.3.0" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       if (url.endsWith("/projects")) return json([{ id: "project-1", name: "AgentBench", root_path: "D:/AgentBench" }]);
@@ -175,7 +174,7 @@ describe("AgentBench V4 application shell", () => {
 
     render(<WorkspaceUxProvider><NotificationSeed /><MemoryRouter initialEntries={["/"]}><App /></MemoryRouter></WorkspaceUxProvider>);
 
-    const shell = (await screen.findByRole("heading", { name: "控制中心" })).closest(".v4-shell");
+    const shell = (await screen.findByRole("heading", { name: "今天要做什么？" })).closest(".v4-shell");
     fireEvent.click(screen.getByRole("button", { name: "收起主导航" }));
     expect(shell).toHaveClass("sidebar-collapsed");
     expect(window.localStorage.getItem("agentbench.workspace.sidebar.v1")).toBe("collapsed");
@@ -188,18 +187,18 @@ describe("AgentBench V4 application shell", () => {
     fireEvent.click(screen.getByRole("button", { name: /通知中心，1 条未读/ }));
     expect(screen.getByRole("complementary", { name: "通知中心" })).toHaveTextContent("任务已完成");
 
-    fireEvent.click(screen.getByRole("button", { name: /搜索项目、会话或运行命令/ }));
+    fireEvent.click(screen.getByRole("button", { name: /搜索或新建/ }));
     const palette = document.querySelector(".v4-palette");
     expect(palette).not.toBeNull();
-    expect(within(palette as HTMLElement).getByText("新建 Agent 会话")).toBeInTheDocument();
-    expect(within(palette as HTMLElement).getByText("新建 Agent Flow")).toBeInTheDocument();
+    expect(within(palette as HTMLElement).getByText("开始新会话")).toBeInTheDocument();
+    expect(within(palette as HTMLElement).getByText("新建自动化 Flow")).toBeInTheDocument();
   });
 
   it("opens the real task detail route and updates acceptance evidence", async () => {
     let acceptanceUpdate: Record<string, unknown> | null = null;
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.6" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.3.0" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       if (url.endsWith("/projects")) return json([{ id: "project-1", name: "AgentBench", root_path: "D:/AgentBench" }]);
@@ -238,7 +237,7 @@ describe("AgentBench V4 application shell", () => {
     const secondTask = { ...task, id: "task-2", title: "验证批量操作", priority: "normal" as const };
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.2.6" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.3.0" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       if (url.endsWith("/projects")) return json([{ id: "project-1", name: "AgentBench", root_path: "D:/AgentBench" }]);
@@ -253,7 +252,7 @@ describe("AgentBench V4 application shell", () => {
     });
 
     render(<MemoryRouter initialEntries={["/tasks"]}><App /></MemoryRouter>);
-    expect(await screen.findByRole("heading", { name: "任务中心" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "任务" })).toBeInTheDocument();
     fireEvent.click(screen.getByTitle("列表视图"));
     expect(screen.getByText("验证批量操作")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "选择 完善任务中心" }));

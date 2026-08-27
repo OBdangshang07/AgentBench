@@ -106,9 +106,12 @@ export default function Projects() {
       if (!payload.default_runner_id || !payload.default_model_id) {
         throw new Error("请先配置至少一个可用 Agent 和模型");
       }
-      await api<Project>("/projects", { method: "POST", body: JSON.stringify(payload) });
+      const created = await api<Project>("/projects", { method: "POST", body: JSON.stringify(payload) });
+      ux.setSelectedProjectId(created.id);
       setModalOpen(false);
       await refresh();
+      ux.notify({ kind: "success", title: "项目已添加", message: "下一步选择 Agent 和模型，然后输入任务。" });
+      navigate("/studio?new=1");
     } catch (value) {
       setFormError(value instanceof Error ? value.message : "无法创建项目");
     } finally {
@@ -142,11 +145,7 @@ export default function Projects() {
 
   async function startSession(project: Project) {
     ux.setSelectedProjectId(project.id);
-    const session = await api<{ id: string }>("/sessions", {
-      method: "POST",
-      body: JSON.stringify({ project_id: project.id, title: `${project.name} Agent 会话` }),
-    });
-    navigate(`/studio/${session.id}`);
+    navigate("/studio?new=1");
   }
 
   async function togglePin(project: Project) {
@@ -179,8 +178,8 @@ export default function Projects() {
   return (
     <div className="v4-page">
       <header className="v4-page-head">
-        <div><span>AUTHORIZED WORKSPACES</span><h1>项目中心</h1><p>每个项目都有独立的授权目录、会话、权限规则与 Agent 配置。</p></div>
-        <div><button className="v4-button primary" type="button" onClick={openCreate}><Plus size={16} />新建项目</button></div>
+        <div><span>本地工作区</span><h1>项目</h1><p>每个项目对应一个明确授权的目录，也是会话、任务和自动化的工作边界。</p></div>
+        <div><button className="v4-button primary" type="button" onClick={openCreate}><Plus size={16} />添加项目</button></div>
       </header>
 
       <section className="v4-panel v4-filter-bar">
@@ -207,17 +206,17 @@ export default function Projects() {
       {modalOpen && (
         <div className="v4-modal-backdrop" onMouseDown={() => setModalOpen(false)}>
           <form className="v4-modal" onSubmit={submit} onMouseDown={(event) => event.stopPropagation()}>
-            <header><div><strong>新建本地项目</strong><small>Agent 只能访问你明确授权的项目目录</small></div><button type="button" onClick={() => setModalOpen(false)}><X size={18} /></button></header>
+            <header><div><strong>添加本地项目</strong><small>完成后将直接进入会话配置，不会立刻执行任何操作</small></div><button type="button" aria-label="关闭" onClick={() => setModalOpen(false)}><X size={18} /></button></header>
             <div className="v4-form-grid">
               <label><span>项目名称</span><input required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如 AgentBench Desktop" /></label>
               <label className="full" htmlFor="v4-project-root"><span>项目根目录</span><div className="v4-path-picker"><input id="v4-project-root" aria-label="项目根目录" required value={form.root_path} onChange={(event) => setForm({ ...form, root_path: event.target.value })} placeholder="D:\Projects\MyProject" /><button type="button" onClick={() => void chooseProjectRoot()}><FolderOpen size={16} />浏览…</button></div><small>选择一个项目文件夹进行授权；磁盘根目录和越界路径会被拒绝。</small></label>
               <label className="full"><span>项目说明</span><textarea value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="告诉 Agent 这个项目的用途与边界" /></label>
               <label><span>默认 Agent</span><select required value={form.default_runner_id} onChange={(event) => setForm({ ...form, default_runner_id: event.target.value })}>{runners?.filter((runner) => runner.enabled).map((runner) => <option key={runner.id} value={runner.id}>{runner.name}{runner.capability.installed ? "" : "（未安装）"}</option>)}</select></label>
               <label><span>默认模型</span><select required value={form.default_model_id} onChange={(event) => setForm({ ...form, default_model_id: event.target.value })}>{models?.filter((model) => model.enabled).map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>
-              <label className="full"><span>权限配置</span><select value={form.permission_profile} onChange={(event) => setForm({ ...form, permission_profile: event.target.value as PermissionProfile })}><option value="readonly">只读</option><option value="workspace">工作区读写</option><option value="standard">标准开发</option><option value="full">完全访问</option></select></label>
+              <label className="full"><span>默认访问权限</span><select value={form.permission_profile} onChange={(event) => setForm({ ...form, permission_profile: event.target.value as PermissionProfile })}><option value="readonly">只读，不允许修改文件</option><option value="workspace">仅项目目录读写（推荐）</option><option value="standard">标准开发权限</option><option value="full">完全访问（高风险）</option></select><small>这是新会话的默认值；执行受保护或高风险操作时仍会请求你的批准。</small></label>
             </div>
             {formError && <div className="v4-error">{formError}</div>}
-            <footer><button className="v4-button secondary" type="button" onClick={() => setModalOpen(false)}>取消</button><button className="v4-button primary" type="submit" disabled={submitting}><Bot size={16} />{submitting ? "正在创建…" : "创建并授权"}</button></footer>
+            <footer><button className="v4-button secondary" type="button" onClick={() => setModalOpen(false)}>取消</button><button className="v4-button primary" type="submit" disabled={submitting}><Bot size={16} />{submitting ? "正在添加…" : "添加并开始会话"}</button></footer>
           </form>
         </div>
       )}
