@@ -80,6 +80,22 @@ def test_workspace_tools_are_scoped(tmp_path):
     assert workspace.search_text("beta")[0]["line"] == 2
 
 
+def test_workspace_artifacts_skip_dependency_links_outside_root(tmp_path):
+    workspace = Workspace(tmp_path / "run-with-dependency-link")
+    workspace.write_file("result.txt", "candidate output")
+    dependency_root = tmp_path / "shared-dependencies"
+    dependency_root.mkdir()
+    (dependency_root / "package.js").write_text("external tool", encoding="utf-8")
+    link = workspace.root / "node_modules"
+    try:
+        os.symlink(dependency_root, link, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"Directory symlink creation is unavailable: {exc}")
+
+    assert workspace.list_files() == ["result.txt"]
+    assert workspace.changed_files()[0]["path"] == "result.txt"
+
+
 def test_custom_native_cli_is_started_without_shell_interpolation(tmp_path):
     workspace = Workspace(tmp_path / "run")
     result = run_native_cli(

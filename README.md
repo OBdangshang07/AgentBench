@@ -1,5 +1,14 @@
 # AgentBench Desktop
 
+## V5.4.1（抽象前端版）
+
+- 更新工作台整体界面、导航、会话消息与运行详情，支持 Workbench 外观、颜色模式和界面密度设置。
+- 新增六维能力评测与能力报告，覆盖创意前端、系统后端、数学推理、研究写作、数据工程与数据科学、Agent 执行，可导出六维面板 SVG。
+- 支持评测暂停与继续，改进数学答案判定、复判和 Office 评分，并更新后端 Ultra 验证器。
+- 提供 Windows x64 安装包，内置 Python 后端和 298 个测试项目。
+
+完整变更和下载见 [`docs/releases/V5.4.1.md`](docs/releases/V5.4.1.md) 与 [GitHub Release](https://github.com/OBdangshang07/AgentBench/releases/tag/v5.4.1)。
+
 ## V5.3.0：后端 Ultra 与工作台交互重构
 
 - 新增独立的“后端 Ultra 极限测试”，只含两道 40 分钟、60K Token 的真实系统题：强一致金融账本与分布式任务队列。

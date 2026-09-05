@@ -92,7 +92,8 @@ export default function Tasks() {
   const [projectFilter, setProjectFilter] = useState(searchParams.get("project") || ux.selectedProjectId || "all");
   const [priorityFilter, setPriorityFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
-  const [viewMode, setViewMode] = useState<ViewMode>(() => window.localStorage.getItem("agentbench.tasks.view.v1") === "list" ? "list" : "board");
+  const taskViewStorageKey = "agentbench.tasks.view.v2";
+  const [viewMode, setViewMode] = useState<ViewMode>(() => window.localStorage.getItem(taskViewStorageKey) === "board" ? "board" : "list");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -131,8 +132,8 @@ export default function Tasks() {
   const allVisibleSelected = visible.length > 0 && visible.every((task) => selectedIds.has(task.id));
 
   useEffect(() => {
-    window.localStorage.setItem("agentbench.tasks.view.v1", viewMode);
-  }, [viewMode]);
+    window.localStorage.setItem(taskViewStorageKey, viewMode);
+  }, [taskViewStorageKey, viewMode]);
 
   useEffect(() => {
     if (!selectedFromUrl || modalOpen || !tasks) return;
@@ -352,7 +353,7 @@ export default function Tasks() {
   }
 
   return (
-    <div className="v4-page v5-tasks-page">
+    <div className="v4-page v5-tasks-page ab-tasks-screen">
       <header className="v4-page-head">
         <div><span>任务与自动化</span><h1>任务</h1><p>把需要持续追踪的工作交给 Agent，并明确验收标准、阻塞和最终结果。</p></div>
         <div><button className="v4-button primary" type="button" onClick={openCreate}><Plus size={16} />新建任务</button></div>

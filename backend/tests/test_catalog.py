@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from collections import Counter
 
 from agentbench.catalog import (
     AIDER_RUNNER_ID,
@@ -16,6 +17,7 @@ from agentbench.catalog import (
     GAUNTLET_SUITE_ID,
     MATH_2025_CLOSED_SUITE_ID,
     MATH_2025_TOOL_SUITE_ID,
+    MATH_FRONTIER_SUITE_ID,
     NCRE_OFFICE_PAPER02_SUITE_ID,
     NCRE_OFFICE_PAPER03_SUITE_ID,
     NCRE_OFFICE_SUITE_ID,
@@ -23,6 +25,7 @@ from agentbench.catalog import (
     PRACTICAL_SUITE_ID,
     REASONING_SUITE_ID,
     REASONIX_RUNNER_ID,
+    SIX_DIMENSION_SUITE_ID,
     SMOKE_SUITE_ID,
     ULTRA_SUITE_ID,
     V2_FULL_SUITE_ID,
@@ -434,7 +437,7 @@ def test_seed_disables_retired_builtin_cases(settings):
             "SELECT enabled FROM test_cases WHERE id='retired'"
         )
         assert retired == {"enabled": 0}
-        assert service.dashboard()["test_cases"] == 284
+        assert service.dashboard()["test_cases"] == 298
     finally:
         service.close()
 
@@ -450,12 +453,14 @@ def test_ultra_catalog_contains_three_attempt_project_challenges():
             **case["attempt_policy"],
             "max_attempts": 3,
             "pass_threshold": 85,
-            "multipliers": [1.0, 0.85, 0.7],
+            "multipliers": [1.0, 0.75, 0.5],
             "preserve_workspace": True,
         }
         assert len(case["attempt_policy"]["hints"]) == 2
         assert any(item["type"] == "command_metrics" for item in case["validators"])
-        assert case["version"] == "5.0.0"
+        assert case["version"] == "5.2.0"
+        assert case["metadata"]["score_basis"] == "quality_only"
+        assert case["metadata"]["frontier_profile"]
 
 
 def test_backend_ultra_catalog_contains_two_digest_pinned_single_attempt_challenges():
@@ -465,7 +470,13 @@ def test_backend_ultra_catalog_contains_two_digest_pinned_single_attempt_challen
     assert {case["category"] for case in cases} == {"ultra-backend"}
     assert {case["metadata"]["difficulty"] for case in cases} == {6}
     assert {case["metadata"]["estimated_minutes"] for case in cases} == {40}
-    assert {case["metadata"]["score_basis"] for case in cases} == {"backend_quality"}
+    assert {case["metadata"]["score_basis"] for case in cases} == {"backend_quality_time"}
+    assert {case["metadata"]["quality_weight"] for case in cases} == {95}
+    assert {case["metadata"]["time_weight"] for case in cases} == {5}
+    assert {case["metadata"]["frontier_profile"] for case in cases} == {
+        "backend-mastery-gates-v3"
+    }
+    assert {case["limits"]["max_runtime_seconds"] for case in cases} == {7200}
     assert all(case["attempt_policy"]["max_attempts"] == 1 for case in cases)
     assert all(case["limits"]["docker_image"] == "agentbench/backend-ultra:1.0.0" for case in cases)
     assert all(case["limits"]["validator_cpus"] == 4 for case in cases)
@@ -494,16 +505,22 @@ def test_ultra_private_validators_are_hidden_and_scheduler_reference_is_feasible
         "validate_event_store.py",
         "exec",
     )
-    assert 'sys.path.insert(0, str(workspace))' in event_command["config"][
-        "private_files"
-    ]["validate_event_store.py"]
+    event_validator_source = event_command["config"]["private_files"][
+        "validate_event_store.py"
+    ]
+    assert 'sys.path.insert(0, str(workspace))' in event_validator_source
+    assert "def event_matches(row, version, payload):" in event_validator_source
+    assert '{"prev_hash", "event_hash"} <= columns' in event_validator_source
+    assert 'recovered.read("crash")[0]["payload"]' not in event_validator_source
     assert [item["key"] for item in event_command["config"]["metrics"]] == [
         "migration_schema",
         "idempotency_json",
+        "contention_idempotency",
         "multiprocess",
-        "crash_atomicity",
-        "integrity_snapshot",
-        "file_integrity",
+            "crash_atomicity",
+            "integrity_snapshot",
+            "model_history",
+            "file_integrity",
     ]
     event_workspace = tmp_path / "event"
     event_workspace.mkdir()
@@ -523,6 +540,34 @@ def test_ultra_private_validators_are_hidden_and_scheduler_reference_is_feasible
     )
     assert event_result.returncode == 0, event_result.stderr
     assert "PUBLIC_EVENT_STORE_SMOKE_OK" in event_result.stdout
+    event_private_root = event_workspace / ".agentbench-private-test"
+    event_private_root.mkdir()
+    event_private_validator = event_private_root / "validate_event_store.py"
+    event_private_validator.write_text(event_validator_source, encoding="utf-8")
+    event_private_result = subprocess.run(
+        [sys.executable, str(event_private_validator)],
+        cwd=event_workspace,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert event_private_result.returncode == 0, event_private_result.stderr
+    event_protocol = next(
+        line.removeprefix("AGENTBENCH_METRICS=")
+        for line in event_private_result.stdout.splitlines()
+        if line.startswith("AGENTBENCH_METRICS=")
+    )
+    assert json.loads(event_protocol)["metrics"] == {
+        "migration_schema": 100.0,
+        "idempotency_json": 100.0,
+        "contention_idempotency": 100.0,
+        "multiprocess": 100.0,
+            "crash_atomicity": 100.0,
+            "integrity_snapshot": 100.0,
+            "model_history": 100.0,
+            "file_integrity": 100.0,
+    }
 
     scheduler_workspace = tmp_path / "scheduler"
     scheduler_workspace.mkdir()
@@ -584,6 +629,88 @@ def test_seeded_suites_have_expected_sizes(settings):
         assert len(service.get_suite(NCRE_OFFICE_PAPER03_SUITE_ID)["cases"]) == 4
         assert len(service.get_suite(ULTRA_SUITE_ID)["cases"]) == 2
         assert len(service.get_suite(BACKEND_ULTRA_SUITE_ID)["cases"]) == 2
+        math_frontier_cases = service.get_suite(MATH_FRONTIER_SUITE_ID)["cases"]
+        assert len(math_frontier_cases) == 6
+        math_frontier_definitions = [
+            json.loads(
+                service.database.fetch_one(
+                    "SELECT definition_json FROM test_cases WHERE id=?", (case["id"],)
+                )["definition_json"]
+            )
+            for case in math_frontier_cases
+        ]
+        assert {
+            definition["metadata"]["capability_dimension"]
+            for definition in math_frontier_definitions
+        } == {"mathematical_reasoning"}
+        six_dimension_cases = service.get_suite(SIX_DIMENSION_SUITE_ID)["cases"]
+        assert len(six_dimension_cases) == 18
+        six_dimension_definitions = [
+            json.loads(
+                service.database.fetch_one(
+                    "SELECT definition_json FROM test_cases WHERE id=?", (case["id"],)
+                )["definition_json"]
+            )
+            for case in six_dimension_cases
+        ]
+        assert {
+            definition["metadata"]["capability_dimension"]
+            for definition in six_dimension_definitions
+        } == {
+            "creative_frontend",
+            "systems_backend",
+            "mathematical_reasoning",
+            "research_writing",
+            "data_engineering_science",
+            "agent_execution",
+        }
+        assert Counter(
+            definition["metadata"]["capability_dimension"]
+            for definition in six_dimension_definitions
+        ) == {
+            "creative_frontend": 3,
+            "systems_backend": 2,
+            "mathematical_reasoning": 6,
+            "research_writing": 2,
+            "data_engineering_science": 3,
+            "agent_execution": 2,
+        }
+        non_frontend = [
+            definition
+            for definition in six_dimension_definitions
+            if definition["metadata"]["capability_dimension"] != "creative_frontend"
+        ]
+        assert len(non_frontend) == 15
+        assert all(definition["metadata"].get("frontier_profile") for definition in non_frontend)
+        data_definitions = [
+            definition
+            for definition in six_dimension_definitions
+            if definition["metadata"]["capability_dimension"] == "data_engineering_science"
+        ]
+        assert [definition["slug"] for definition in data_definitions] == [
+            "sixdim.data-incremental-revenue-ledger",
+            "sixdim.data-online-experiment-audit",
+            "sixdim.data-temporal-risk-model",
+        ]
+        for definition in data_definitions:
+            assert definition["metadata"]["difficulty"] == 6
+            assert definition["metadata"]["score_basis"] == "quality_only"
+            assert definition["metadata"]["mastery_curve"] == "frontier_v1"
+            command = next(
+                validator
+                for validator in definition["validators"]
+                if validator["type"] == "command_metrics"
+            )
+            assert command["config"]["private_files"]["validate.py"]
+            assert sum(metric["weight"] for metric in command["config"]["metrics"]) == 100
+        frontend_self = next(
+            definition
+            for definition in six_dimension_definitions
+            if definition["slug"] == "sixdim.frontend-self-digital-experience"
+        )
+        assert "你主动决定“不做”的三件事及原因" in frontend_self["instruction"]
+        assert "开始—发展—转折—收束" in frontend_self["instruction"]
+        assert "声音/触觉替代反馈和性能" in frontend_self["instruction"]
         assert len(service.get_suite(REASONING_SUITE_ID)["cases"]) == 25
         assert len(service.get_suite(PLANNING_SUITE_ID)["cases"]) == 15
         assert len(service.get_suite(CODING_SUITE_ID)["cases"]) == 20
@@ -595,7 +722,7 @@ def test_seeded_suites_have_expected_sizes(settings):
         assert len(gauntlet_cases) >= 55
         assert {case["category"] for case in gauntlet_cases}.isdisjoint({"office-exam"})
         assert 50 <= len(gauntlet_lite_cases) <= 75
-        assert service.dashboard()["test_cases"] == 284
+        assert service.dashboard()["test_cases"] == 298
         suites = {item["id"]: item for item in service.list_suites()}
         assert suites[FRONTIER_SUITE_ID]["difficulty_max"] == 5
         assert suites[PRACTICAL_SUITE_ID]["docker_case_count"] > 0

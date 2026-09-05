@@ -94,7 +94,7 @@ describe("Xnmk frontend suite UI", () => {
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.3.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.4.1" });
       return json(portfolio);
     }));
     render(<MemoryRouter initialEntries={["/experiments/exp-front/portfolio"]}><Routes><Route path="/experiments/:experimentId/portfolio" element={<FrontendPortfolio />} /></Routes></MemoryRouter>);
@@ -108,7 +108,7 @@ describe("Xnmk frontend suite UI", () => {
   it("uploads screenshot evidence from the manual rubric workbench", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.3.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.4.1" });
       if (url.includes("manual-review/evidence?")) return json({ ...review, evidence: [{ name: "proof.png", path: "evidence.png", size: 8 }] });
       if (url.includes("/runs?experiment_id=")) return json([run]);
       return json(run);
@@ -122,5 +122,39 @@ describe("Xnmk frontend suite UI", () => {
 
     expect(await screen.findByText("proof.png")).toBeInTheDocument();
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("manual-review/evidence?filename=proof.png"), expect.objectContaining({ method: "POST" })));
+  });
+
+  it("imports an already generated HTML artifact into a skipped frontend run", async () => {
+    const portfolio: Portfolio = {
+      experiment_id: "exp-front",
+      root_path: "C:/AgentBench/data/frontend-portfolios/exp-front",
+      metadata: { kind: "frontend", suite_revision: "2026.08-r2", source_commit: "2b03bc0f39f4a1e912816d5a8f752f6d1fd985eb" },
+      score: { reviewed_runs: 0, unreviewed_runs: 1, review_progress: 0 },
+      runs: [{
+        id: run.id, model_id: run.model_id, runner_id: run.runner_id, repetition: 1,
+        status: "cancelled", score: null, workspace_path: null,
+        duration_ms: 0, tokens_input: 0, tokens_output: 0, cost_usd: 0,
+        model_name: run.model_name, runner_name: run.runner_name,
+        title: run.test_title, slug: "frontend.xnmk-2048", difficulty: 4,
+        preview: { available: false, kind: "none", reason: "workspace_not_ready" },
+      }],
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.4.1" });
+      if (url.includes("/frontend-import?")) return json({ run, preview: { available: true, kind: "static", entry: "index.html" } });
+      return json(portfolio);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<MemoryRouter initialEntries={["/experiments/exp-front/portfolio"]}><Routes><Route path="/experiments/:experimentId/portfolio" element={<FrontendPortfolio />} /></Routes></MemoryRouter>);
+
+    const input = (await screen.findByText("导入作品")).closest("label")?.querySelector("input[type=file]") as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [new File(["<!doctype html>"], "black-hole.html", { type: "text/html" })] } });
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/frontend-import?filename=black-hole.html"),
+      expect.objectContaining({ method: "POST", headers: { "Content-Type": "text/html" } }),
+    ));
+    expect(await screen.findByText(/已导入“2048 × Roguelike 网页游戏”/)).toBeInTheDocument();
   });
 });

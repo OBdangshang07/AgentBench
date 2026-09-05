@@ -102,6 +102,8 @@ class ScoringPointModel(BaseModel):
     error_carry_forward: ErrorCarryForwardModel | None = None
     evidence_required: list[str] = Field(default_factory=list, max_length=20)
     critical: bool = False
+    mandatory: bool = False
+    minimum_defect_deduction: float = Field(default=0.0, ge=0, le=100)
     notes: str = Field(default="", max_length=2_000)
 
 
@@ -150,6 +152,12 @@ class MathRubricModel(BaseModel):
     major_defect_deduction: float = Field(default=1.0, gt=0, le=20)
     full_credit_confidence: float = Field(default=0.90, ge=0, le=1)
     required_judges: int = Field(default=1, ge=1, le=3)
+    consensus_mode: Literal["median", "defect_aware"] = "median"
+    critical_failure_score_cap: float = Field(default=60.0, ge=0, le=100)
+    # Compatibility defaults are neutral.  Frontier v3 opts into 90/95
+    # explicitly so frozen v1/v2 rubrics retain their historical score semantics.
+    mandatory_failure_score_cap: float = Field(default=100.0, ge=0, le=100)
+    critical_defect_score_cap: float = Field(default=100.0, ge=0, le=100)
 
     @model_validator(mode="after")
     def source_tier_matches_source(self) -> MathRubricModel:
@@ -309,6 +317,25 @@ def normalize_rubric(config: Mapping[str, Any]) -> dict[str, Any]:
             str(item) for item in point.get("mutually_exclusive_with") or []
         ]
         point["alternate_for"] = [str(item) for item in point.get("alternate_for") or []]
+        point["critical"] = bool(point.get("critical", False))
+        point["mandatory"] = bool(point.get("mandatory", False))
+        try:
+            minimum_defect_deduction = float(
+                point.get("minimum_defect_deduction", 0.0) or 0.0
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"scoring_point_invalid_minimum_defect_deduction:{point_id}"
+            ) from exc
+        if (
+            not math.isfinite(minimum_defect_deduction)
+            or minimum_defect_deduction < 0
+            or minimum_defect_deduction > max_points
+        ):
+            raise ValueError(
+                f"scoring_point_invalid_minimum_defect_deduction:{point_id}"
+            )
+        point["minimum_defect_deduction"] = minimum_defect_deduction
         if point.get("alternate_path") is not None:
             point["alternate_path"] = str(point["alternate_path"])
         normalized_points.append(point)
@@ -353,6 +380,10 @@ def normalize_rubric(config: Mapping[str, Any]) -> dict[str, Any]:
     raw.setdefault("major_defect_deduction", 1.0)
     raw.setdefault("full_credit_confidence", 0.90)
     raw.setdefault("required_judges", 1)
+    raw.setdefault("consensus_mode", "median")
+    raw.setdefault("critical_failure_score_cap", 60.0)
+    raw.setdefault("mandatory_failure_score_cap", 100.0)
+    raw.setdefault("critical_defect_score_cap", 100.0)
     raw["rubric_protocol"] = RUBRIC_SCHEMA
     raw["max_points"] = _effective_max_points(normalized_points, alternate_paths)
     return raw
@@ -569,6 +600,7 @@ def score_rubric(
             flags.append("low_point_confidence")
         strict_adjustments: list[str] = []
         defect_severity = str(raw.get("defect_severity") or "none")
+        point_minimum_deduction = float(spec.get("minimum_defect_deduction", 0.0))
         if strict_exam:
             # Exam marks are awarded in fixed half-point units.  Always round down:
             # a judge may not create extra credit through a generous decimal.
@@ -585,12 +617,20 @@ def score_rubric(
                 value = max(0.0, max_points - point_increment)
                 strict_adjustments.append("partial_status_cannot_receive_full_credit")
             if defect_severity == "minor":
-                cap = max(0.0, max_points - max(point_increment, minor_deduction))
+                cap = max(
+                    0.0,
+                    max_points
+                    - max(point_increment, minor_deduction, point_minimum_deduction),
+                )
                 if value > cap:
                     value = cap
                     strict_adjustments.append("minor_defect_minimum_deduction")
             elif defect_severity == "major":
-                cap = max(0.0, max_points - max(point_increment, major_deduction))
+                cap = max(
+                    0.0,
+                    max_points
+                    - max(point_increment, major_deduction, point_minimum_deduction),
+                )
                 if value > cap:
                     value = cap
                     strict_adjustments.append("major_defect_minimum_deduction")
@@ -618,6 +658,9 @@ def score_rubric(
                 "mutually_exclusive_with": list(spec.get("mutually_exclusive_with") or []),
                 "alternate_path": spec.get("alternate_path"),
                 "error_carry_forward": deepcopy(spec.get("error_carry_forward")),
+                "critical": bool(spec.get("critical", False)),
+                "mandatory": bool(spec.get("mandatory", False)),
+                "minimum_defect_deduction": point_minimum_deduction,
             }
         )
 
@@ -717,7 +760,40 @@ def score_rubric(
                 "judge_review_notes": judge_review_notes,
             }
     awarded_total = round(sum(awarded.values()), 6)
-    percentage = round(awarded_total / max_total * 100.0, 2) if max_total else 0.0
+    percentage_before_cap = (
+        round(awarded_total / max_total * 100.0, 2) if max_total else 0.0
+    )
+    critical_failures = [
+        point_id
+        for point_id in expected_ids
+        if bool(point_lookup[point_id].get("critical")) and awarded.get(point_id, 0.0) <= 0
+    ]
+    mandatory_failures = [
+        point_id
+        for point_id in expected_ids
+        if bool(point_lookup[point_id].get("mandatory"))
+        and awarded.get(point_id, 0.0) + 1e-9 < float(point_lookup[point_id]["max_points"])
+    ]
+    critical_defects = [
+        point_id
+        for point_id in expected_ids
+        if bool(point_lookup[point_id].get("critical"))
+        and str(result_by_id[point_id].get("defect_severity") or "none")
+        in {"minor", "major", "fatal"}
+    ]
+    critical_cap = float(normalized.get("critical_failure_score_cap", 60.0))
+    mandatory_cap = float(normalized.get("mandatory_failure_score_cap", 100.0))
+    critical_defect_cap = float(normalized.get("critical_defect_score_cap", 100.0))
+    active_caps: list[tuple[str, float]] = []
+    if critical_failures:
+        active_caps.append(("critical_failure_score_cap", critical_cap))
+    if mandatory_failures:
+        active_caps.append(("mandatory_failure_score_cap", mandatory_cap))
+    if critical_defects:
+        active_caps.append(("critical_defect_score_cap", critical_defect_cap))
+    percentage = min(
+        [percentage_before_cap, *(cap for _name, cap in active_caps)]
+    )
     # A point omission, malformed decision, low confidence, a new route, or judge
     # disagreement is reviewable even though a provisional arithmetic score exists.
     review_flags = list(dict.fromkeys(flags))
@@ -738,10 +814,24 @@ def score_rubric(
             "rubric_version": normalized["rubric_version"],
             "rubric_source": deepcopy(normalized["rubric_source"]),
             "source_tier": normalized["source_tier"],
-            "calculation": "sum(clamp(awarded_points, 0, max_points)) / sum(max_points) * 100",
+            "calculation": (
+                "min(raw_percentage, active_question_caps)"
+                if active_caps
+                else "sum(clamp(awarded_points, 0, max_points)) / sum(max_points) * 100"
+            ),
             "awarded_points": awarded_total,
             "max_points": round(max_total, 6),
             "percentage": percentage,
+            "percentage_before_cap": percentage_before_cap,
+            "critical_failures": critical_failures,
+            "critical_failure_score_cap": critical_cap,
+            "mandatory_failures": mandatory_failures,
+            "mandatory_failure_score_cap": mandatory_cap,
+            "critical_defects": critical_defects,
+            "critical_defect_score_cap": critical_defect_cap,
+            "active_question_caps": [
+                {"reason": reason, "cap": cap} for reason, cap in active_caps
+            ],
             "review_flags": review_flags,
             "judge_review_notes": judge_review_notes,
             "review_status": status,
@@ -771,6 +861,10 @@ def structured_rubric_config(
     major_defect_deduction: float = 1.0,
     full_credit_confidence: float = 0.90,
     required_judges: int = 1,
+    consensus_mode: Literal["median", "defect_aware"] = "median",
+    critical_failure_score_cap: float = 60.0,
+    mandatory_failure_score_cap: float = 100.0,
+    critical_defect_score_cap: float = 100.0,
 ) -> dict[str, Any]:
     """Build a normalized config for a published solution case."""
 
@@ -794,6 +888,10 @@ def structured_rubric_config(
         "major_defect_deduction": major_defect_deduction,
         "full_credit_confidence": full_credit_confidence,
         "required_judges": required_judges,
+        "consensus_mode": consensus_mode,
+        "critical_failure_score_cap": critical_failure_score_cap,
+        "mandatory_failure_score_cap": mandatory_failure_score_cap,
+        "critical_defect_score_cap": critical_defect_score_cap,
     }
     return normalize_rubric(config)
 

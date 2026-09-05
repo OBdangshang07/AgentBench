@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 
 from agentbench.agent import AgentResult
@@ -18,7 +19,8 @@ from agentbench.schemas import (
     RunnerCreate,
     TestCaseImport,
 )
-from agentbench.service import EvaluationService
+from agentbench.scoring import ScoreResult, ValidationResult
+from agentbench.service import EvaluationService, _materialize_private_frontier_variant
 
 JUDGE_JSON = json.dumps(
     {
@@ -74,6 +76,14 @@ def _create_rubric_run(service: EvaluationService) -> str:
             suite_id=suite_id,
             participants=[Participant(model_id=MOCK_MODEL_ID, runner_id=UNIFIED_RUNNER_ID)],
         )
+    )
+    # ``_execute_run`` now enforces the same running-experiment guard as the
+    # scheduler so a queued run cannot slip through after a pause request.
+    # These focused tests drive the private executor synchronously, therefore
+    # put their fixture experiment into the lifecycle state the scheduler uses.
+    service.database.execute(
+        "UPDATE experiments SET status='running',started_at=? WHERE id=?",
+        (utc_now(), experiment["id"]),
     )
     return service.list_runs(experiment["id"])[0]["id"]
 
@@ -137,6 +147,9 @@ def test_long_judge_prompt_travels_via_stdin_not_argv(settings, monkeypatch):
         assert len(stdin_text) > 8191
         assert captured["judge_prompt_file"] == stdin_text
         assert "judge_prompt.md" in captured["judge_workspace_files"]
+        assert captured["extra_env"]["GIT_CEILING_DIRECTORIES"] == str(
+            settings.workspaces_dir.resolve()
+        )
         # argv only carries the short guidance text, never the long prompt.
         placeholders = captured["placeholders"]
         assert placeholders["prompt"] == EvaluationService.JUDGE_STDIN_GUIDANCE
@@ -149,6 +162,436 @@ def test_long_judge_prompt_travels_via_stdin_not_argv(settings, monkeypatch):
         ]
         assert all(long_answer not in part for part in rendered)
         assert len(" ".join(rendered)) < 8191
+    finally:
+        service.close()
+
+
+def test_three_judge_consensus_uses_scored_low_confidence_tiebreaker(
+    settings, tmp_path, monkeypatch
+):
+    service = EvaluationService(settings)
+    try:
+        service.update_settings(
+            {
+                "judge_model_id_secondary": "secondary-model",
+                "judge_runner_id_secondary": "secondary-runner",
+                "judge_model_id_tiebreaker": "tiebreaker-model",
+                "judge_runner_id_tiebreaker": "tiebreaker-runner",
+                "judge_disagreement_threshold": 4,
+            }
+        )
+
+        def review(score, status="passed", reasons=None):
+            return ValidationResult(
+                "ai_rubric",
+                100,
+                score,
+                status,
+                {
+                    "point_awards": [
+                        {
+                            "point_id": "p1",
+                            "awarded_points": score / 10,
+                            "max_points": 10,
+                        }
+                    ],
+                    "review_reasons": reasons or [],
+                },
+            )
+
+        by_slot = {
+            "primary": review(100),
+            "secondary": review(90),
+            "tiebreaker": review(
+                85, status="needs_review", reasons=["low_point_confidence"]
+            ),
+        }
+
+        def fake_single(*_args, anonymous_slot="primary", **_kwargs):
+            return lambda _config, _weight: by_slot[anonymous_slot]
+
+        monkeypatch.setattr(service, "_single_judge_callback", fake_single)
+        callback = service._judge_callback(
+            {"id": "run-consensus", "model_id": "candidate-model"},
+            {},
+            Workspace(tmp_path / "consensus"),
+            lambda *_args: None,
+        )
+        result = callback(
+            {
+                "required_judges": 2,
+                "judge_disagreement_threshold": 4,
+                "marking_mode": "strict_exam",
+                "scoring_points": [
+                    {"point_id": "p1", "description": "proof", "max_points": 10}
+                ],
+            },
+            100,
+        )
+
+        assert result.status == "passed"
+        assert result.score == 90
+        assert result.evidence["scores"] == [100, 90, 85]
+        assert result.evidence["advisory_review_reasons"] == ["low_point_confidence"]
+
+        stored_reviews = []
+        for slot, item in by_slot.items():
+            stored_reviews.append(
+                {
+                    "score": item.score,
+                    "status": "completed" if item.status == "passed" else item.status,
+                    "evidence_json": json.dumps(
+                        {**item.evidence, "anonymous_slot": slot}, ensure_ascii=False
+                    ),
+                }
+            )
+        monkeypatch.setattr(
+            service,
+            "_single_judge_callback",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("stored reviews must not invoke a judge")
+            ),
+        )
+        reused_callback = service._judge_callback(
+            {"id": "run-consensus", "model_id": "candidate-model"},
+            {},
+            Workspace(tmp_path / "stored-consensus"),
+            lambda *_args: None,
+            stored_reviews=stored_reviews,
+        )
+        reused = reused_callback(
+            {
+                "required_judges": 2,
+                "judge_disagreement_threshold": 4,
+                "marking_mode": "strict_exam",
+                "scoring_points": [
+                    {"point_id": "p1", "description": "proof", "max_points": 10}
+                ],
+            },
+            100,
+        )
+        assert reused.status == "passed"
+        assert reused.score == 90
+    finally:
+        service.close()
+
+
+def test_required_three_judges_always_runs_third_without_disagreement(
+    settings, tmp_path, monkeypatch
+):
+    service = EvaluationService(settings)
+    try:
+        service.update_settings(
+            {
+                "judge_model_id_secondary": "secondary-model",
+                "judge_runner_id_secondary": "secondary-runner",
+                "judge_model_id_tiebreaker": "third-model",
+                "judge_runner_id_tiebreaker": "third-runner",
+                "judge_disagreement_threshold": 4,
+            }
+        )
+        calls: list[str] = []
+        scores = {"primary": 92, "secondary": 93, "tiebreaker": 91}
+
+        def fake_single(*_args, anonymous_slot="primary", **_kwargs):
+            def review(_config, weight):
+                calls.append(anonymous_slot)
+                score = scores[anonymous_slot]
+                return ValidationResult(
+                    "ai_rubric",
+                    weight,
+                    score,
+                    "passed",
+                    {
+                        "point_awards": [
+                            {
+                                "point_id": "p1",
+                                "awarded_points": score / 10,
+                                "max_points": 10,
+                            }
+                        ],
+                        "review_reasons": [],
+                    },
+                )
+
+            return review
+
+        monkeypatch.setattr(service, "_single_judge_callback", fake_single)
+        callback = service._judge_callback(
+            {"id": "run-required-three", "model_id": "candidate-model"},
+            {},
+            Workspace(tmp_path / "required-three"),
+            lambda *_args: None,
+        )
+        result = callback(
+            {
+                "required_judges": 3,
+                "judge_disagreement_threshold": 4,
+                "marking_mode": "strict_exam",
+                "scoring_points": [
+                    {"point_id": "p1", "description": "proof", "max_points": 10}
+                ],
+            },
+            100,
+        )
+
+        assert calls == ["primary", "secondary", "tiebreaker"]
+        assert result.status == "passed"
+        assert result.score == 92
+        assert result.evidence["judge_count"] == 3
+        assert result.evidence["scores"] == [92, 93, 91]
+    finally:
+        service.close()
+
+
+def test_required_three_judges_continue_after_scored_dependency_violation(
+    settings, tmp_path, monkeypatch
+):
+    service = EvaluationService(settings)
+    try:
+        service.update_settings(
+            {
+                "judge_model_id_secondary": "secondary-model",
+                "judge_runner_id_secondary": "secondary-runner",
+                "judge_model_id_tiebreaker": "third-model",
+                "judge_runner_id_tiebreaker": "third-runner",
+                "judge_disagreement_threshold": 20,
+            }
+        )
+        calls: list[str] = []
+        scores = {"primary": 50, "secondary": 55, "tiebreaker": 45}
+
+        def fake_single(*_args, anonymous_slot="primary", **_kwargs):
+            def review(_config, weight):
+                calls.append(anonymous_slot)
+                score = scores[anonymous_slot]
+                return ValidationResult(
+                    "ai_rubric",
+                    weight,
+                    score,
+                    "needs_review" if anonymous_slot == "primary" else "passed",
+                    {
+                        "point_awards": [
+                            {
+                                "point_id": "p1",
+                                "awarded_points": score / 10,
+                                "max_points": 10,
+                            }
+                        ],
+                        "review_reasons": (
+                            ["dependency_violation"]
+                            if anonymous_slot == "primary"
+                            else []
+                        ),
+                    },
+                )
+
+            return review
+
+        monkeypatch.setattr(service, "_single_judge_callback", fake_single)
+        callback = service._judge_callback(
+            {"id": "run-dependency-consensus", "model_id": "candidate-model"},
+            {},
+            Workspace(tmp_path / "dependency-consensus"),
+            lambda *_args: None,
+        )
+        result = callback(
+            {
+                "required_judges": 3,
+                "judge_disagreement_threshold": 20,
+                "marking_mode": "strict_exam",
+                "scoring_points": [
+                    {"point_id": "p1", "description": "proof", "max_points": 10}
+                ],
+            },
+            100,
+        )
+
+        assert calls == ["primary", "secondary", "tiebreaker"]
+        assert result.status == "passed"
+        assert result.score == 50
+        assert result.evidence["judge_count"] == 3
+        assert result.evidence["advisory_review_reasons"] == [
+            "dependency_violation"
+        ]
+    finally:
+        service.close()
+
+
+def test_defect_aware_consensus_preserves_one_judges_real_mathematical_defect(
+    settings, tmp_path, monkeypatch
+):
+    service = EvaluationService(settings)
+    try:
+        service.update_settings(
+            {
+                "judge_model_id_secondary": "secondary-model",
+                "judge_runner_id_secondary": "secondary-runner",
+                "judge_model_id_tiebreaker": "third-model",
+                "judge_runner_id_tiebreaker": "third-runner",
+                "judge_disagreement_threshold": 30,
+            }
+        )
+        reviews = {
+            "primary": (10.0, "none"),
+            "secondary": (10.0, "none"),
+            # The old per-point median erased this unique, valid defect report.
+            "tiebreaker": (8.0, "major"),
+        }
+
+        def fake_single(*_args, anonymous_slot="primary", **_kwargs):
+            def review(_config, weight):
+                award, severity = reviews[anonymous_slot]
+                return ValidationResult(
+                    "ai_rubric",
+                    weight,
+                    award * 10,
+                    "passed",
+                    {
+                        "point_awards": [
+                            {
+                                "point_id": "p1",
+                                "awarded_points": award,
+                                "max_points": 10,
+                                "status": "met" if award == 10 else "partial",
+                                "confidence": 0.99,
+                                "defect_severity": severity,
+                            }
+                        ],
+                        "review_reasons": [],
+                    },
+                )
+
+            return review
+
+        monkeypatch.setattr(service, "_single_judge_callback", fake_single)
+        callback = service._judge_callback(
+            {"id": "run-defect-aware", "model_id": "candidate-model"},
+            {},
+            Workspace(tmp_path / "defect-aware"),
+            lambda *_args: None,
+        )
+        result = callback(
+            {
+                "required_judges": 3,
+                "judge_disagreement_threshold": 30,
+                "marking_mode": "strict_exam",
+                "consensus_mode": "defect_aware",
+                "critical_defect_score_cap": 95,
+                "scoring_points": [
+                    {
+                        "point_id": "p1",
+                        "description": "关键证明",
+                        "max_points": 10,
+                        "critical": True,
+                    }
+                ],
+            },
+            100,
+        )
+
+        assert result.status == "passed"
+        assert result.score == 80
+        assert result.evidence["consensus_method"] == (
+            "per_point_defect_aware_then_deterministic_sum_and_caps"
+        )
+        assert result.evidence["critical_defects"] == ["p1"]
+        point = result.evidence["point_awards"][0]
+        assert point["judge_awards"] == [10, 10, 8]
+        assert point["judge_defect_severities"] == ["none", "none", "major"]
+        assert point["defect_aware_minimum_applied"] is True
+    finally:
+        service.close()
+
+
+def test_rejudge_reuses_committed_seed_for_same_private_math_variant(
+    settings, monkeypatch
+):
+    service = EvaluationService(settings)
+    try:
+        case = service.database.fetch_one(
+            "SELECT id,definition_json FROM test_cases "
+            "WHERE slug='sixdim.math.frontier.q20'"
+        )
+        assert case is not None
+        definition = json.loads(case["definition_json"])
+        suite_id = new_id()
+        service.database.execute(
+            "INSERT INTO test_suites(id,name,description,version,builtin,created_at) "
+            "VALUES (?,?,?,'3.0.0',0,?)",
+            (suite_id, "Variant replay suite", "test", utc_now()),
+        )
+        service.database.execute(
+            "INSERT INTO suite_cases(suite_id,test_case_id,position) VALUES (?,?,0)",
+            (suite_id, case["id"]),
+        )
+        experiment = service.create_experiment(
+            ExperimentCreate(
+                name="Variant replay experiment",
+                suite_id=suite_id,
+                participants=[
+                    Participant(model_id=MOCK_MODEL_ID, runner_id=UNIFIED_RUNNER_ID)
+                ],
+            )
+        )
+        run_id = service.list_runs(experiment["id"])[0]["id"]
+        seed = service._validation_seed_for_run(run_id, definition)
+        assert seed is not None
+        expected_definition, expected_selection = _materialize_private_frontier_variant(
+            definition, seed["seed_hex"]
+        )
+        service.database.execute(
+            "UPDATE runs SET status='completed',final_answer='{}',score=0,steps=1,"
+            "duration_ms=1,tokens_input=1,tokens_output=1,completed_at=? WHERE id=?",
+            (utc_now(), run_id),
+        )
+        captured: dict[str, object] = {}
+
+        def fake_score(**kwargs):
+            captured["definition"] = kwargs["definition"]
+            return ScoreResult(score=80, status="scored", components=[], dimensions=[])
+
+        monkeypatch.setattr(service.scoring, "score", fake_score)
+
+        service.rejudge_run(run_id)
+
+        replayed = captured["definition"]
+        assert replayed["instruction"] == expected_definition["instruction"]
+        assert "_private_frontier_variants" not in replayed
+        variant_events = [
+            event
+            for event in service.get_run_events(run_id, viewer_safe=False)
+            if event["event_type"] == "math.variant_selected"
+        ]
+        assert variant_events[-1]["payload"]["variant_id"] == expected_selection[
+            "variant_id"
+        ]
+        assert variant_events[-1]["payload"]["rejudge"] is True
+    finally:
+        service.close()
+
+
+def test_private_file_validator_receives_committed_seed(settings):
+    service = EvaluationService(settings)
+    try:
+        definition = {
+            "validators": [
+                {
+                    "type": "command_metrics",
+                    "config": {
+                        "command": ["python", "verify.py"],
+                        "private_files": {"verify.py": "print('{}')\n"},
+                    },
+                }
+            ]
+        }
+        run_id = _create_rubric_run(service)
+
+        seed = service._validation_seed_for_run(run_id, definition)
+
+        assert seed is not None
+        assert len(seed["seed_hex"]) == 64
+        assert len(seed["commitment_sha256"]) == 64
     finally:
         service.close()
 
@@ -215,6 +658,58 @@ def test_judge_failure_retries_once_and_keeps_cli_output_in_evidence(settings, m
         assert len(calls) == 2
         assert result.status == "passed"
         assert result.score == 87.0
+    finally:
+        service.close()
+
+
+def test_research_judge_receives_complete_priority_deliverables(settings, monkeypatch):
+    service = EvaluationService(settings)
+    try:
+        _enable_native_judge(service)
+        run = {
+            "id": _create_rubric_run(service),
+            "model_id": MOCK_MODEL_ID,
+            "final_answer": "Research deliverables completed.",
+        }
+        definition = {
+            "instruction": "Write an evidence-backed decision memo.",
+            "metadata": {"capability_dimension": "research_writing"},
+            "validators": [
+                {"type": "ai_rubric", "weight": 100, "config": {"rubric": "quality"}}
+            ],
+        }
+        workspace = Workspace(settings.workspaces_dir / "research-judge-complete")
+        report_tail = "REPORT_END_MARKER"
+        claims_tail = "CLAIMS_END_MARKER"
+        workspace.write_file("S1_source.md", "source evidence\n" * 800)
+        workspace.write_file("report.md", ("decision analysis\n" * 1200) + report_tail)
+        workspace.write_file(
+            "claims.json", '{"claims":["' + ("supported claim " * 700) + claims_tail + '"]}'
+        )
+
+        captured: dict[str, object] = {}
+
+        def fake_run_native_cli(**kwargs):
+            captured.update(kwargs)
+            return CommandResult(
+                True,
+                0,
+                json.dumps({"type": "result", "result": JUDGE_JSON}) + "\n",
+                "",
+                12,
+                None,
+            )
+
+        monkeypatch.setattr("agentbench.service.run_native_cli", fake_run_native_cli)
+        callback = service._judge_callback(run, definition, workspace, lambda *_args: None)
+        assert callback is not None
+        result = callback({"rubric": "quality"}, 100.0)
+
+        assert result.status == "passed"
+        judge_prompt = str(captured["stdin_text"])
+        assert report_tail in judge_prompt
+        assert claims_tail in judge_prompt
+        assert judge_prompt.index('"report.md"') < judge_prompt.index('"S1_source.md"')
     finally:
         service.close()
 
@@ -328,6 +823,13 @@ def test_rejudge_endpoint_rescores_needs_review_run(settings):
         assert after["passed"] is True
         assert after["final_answer"] == "OK"  # reused, model not re-run
 
+        service._model_client = lambda _model, _metadata: (_ for _ in ()).throw(
+            AssertionError("reuse_judge=true must not call the judge model")
+        )
+        reused = client.post(f"/api/v1/runs/{run_id}/rejudge?reuse_judge=true")
+        assert reused.status_code == 200
+        assert reused.json()["score"] == after["score"]
+
 
 def test_rejudge_recovers_candidate_answer_after_judge_phase_crash(settings):
     app = create_app(settings)
@@ -339,7 +841,8 @@ def test_rejudge_recovers_candidate_answer_after_judge_phase_crash(settings):
         workspace.mkdir(parents=True)
         service.database.execute(
             "UPDATE runs SET status='failed',final_answer=NULL,workspace_path=?,"
-            "error_code='internal_error',error_message='[Errno 22] Invalid argument' WHERE id=?",
+            "error_code='internal_error',error_message='[Errno 22] Invalid argument',"
+            "failure_class='runtime_environment_failure' WHERE id=?",
             (str(workspace), run_id),
         )
         service.database.execute(
@@ -380,6 +883,7 @@ def test_rejudge_recovers_candidate_answer_after_judge_phase_crash(settings):
         assert recovered["status"] == "completed"
         assert recovered["final_answer"] == "OK"
         assert recovered["error_code"] is None
+        assert recovered["failure_class"] is None
         assert len(after["judge_reviews"]) == 1
         assert {event["event_type"] for event in after["events"]} >= {
             "rejudge.started",
@@ -439,6 +943,10 @@ def test_experiment_rejudge_recovers_structured_answers_without_rerunning_model(
             )
         )
         run_id = service.list_runs(experiment["id"])[0]["id"]
+        service.database.execute(
+            "UPDATE experiments SET status='running',started_at=? WHERE id=?",
+            (utc_now(), experiment["id"]),
+        )
         service._model_client = lambda _model, _metadata: SequencedClient(
             ['分析完成。\n```json\n{"answer":"B"}\n```']
         )
@@ -533,6 +1041,131 @@ def test_rejudge_keeps_attempt_multiplier(settings):
         service.close()
 
 
+def test_rejudge_can_apply_checker_only_current_revision_without_rerunning_model(settings):
+    service = EvaluationService(settings)
+    try:
+        case = service.import_test_case(
+            TestCaseImport(
+                slug=f"test.evaluator-hotfix-{new_id()}",
+                version="1.0.0",
+                category="checker-hotfix",
+                title="Evaluator hotfix",
+                instruction="Return exactly OK.",
+                validators=[
+                    {"type": "exact_match", "weight": 100, "config": {"expected": "WRONG"}}
+                ],
+                limits={"max_steps": 4, "time_target_seconds": 60, "token_budget": 1000},
+                attempt_policy={"max_attempts": 1, "pass_threshold": 60},
+            )
+        )
+        suite_id = new_id()
+        service.database.execute(
+            "INSERT INTO test_suites(id,name,description,version,builtin,created_at) "
+            "VALUES (?,?,?,'1.0.0',0,?)",
+            (suite_id, "Evaluator hotfix suite", "test", utc_now()),
+        )
+        service.database.execute(
+            "INSERT INTO suite_cases(suite_id,test_case_id,position) VALUES (?,?,0)",
+            (suite_id, case["id"]),
+        )
+        experiment = service.create_experiment(
+            ExperimentCreate(
+                name="Evaluator hotfix experiment",
+                suite_id=suite_id,
+                participants=[
+                    Participant(model_id=MOCK_MODEL_ID, runner_id=UNIFIED_RUNNER_ID)
+                ],
+            )
+        )
+        run_id = service.list_runs(experiment["id"])[0]["id"]
+        original_revision = service.database.fetch_one(
+            "SELECT tr.id FROM test_cases t JOIN test_case_revisions tr "
+            "ON tr.test_case_id=t.id AND tr.definition_hash=t.definition_hash WHERE t.id=?",
+            (case["id"],),
+        )["id"]
+        service.database.execute(
+            "UPDATE runs SET status='completed',final_answer='OK',score=0,tokens_input=1,"
+            "tokens_output=1,duration_ms=1000,steps=1,passed=0,completed_at=? WHERE id=?",
+            (utc_now(), run_id),
+        )
+        service.database.execute(
+            "INSERT INTO run_attempts(id,run_id,attempt_no,status,prompt,multiplier,"
+            "created_at) VALUES (?,?,1,'completed','Return exactly OK.',0.7,?)",
+            (new_id(), run_id, utc_now()),
+        )
+        current_definition = service.database.fetch_one(
+            "SELECT definition_json FROM test_cases WHERE id=?", (case["id"],)
+        )["definition_json"]
+        definition = json.loads(current_definition)
+        definition["validators"][0]["config"]["expected"] = "OK"
+        service.database.execute(
+            "UPDATE test_cases SET definition_json=? WHERE id=?",
+            (json.dumps(definition, ensure_ascii=False), case["id"]),
+        )
+        service.database.sync_test_case_revisions(case["id"])
+
+        repaired = service.rejudge_run(
+            run_id,
+            use_current_evaluator=True,
+            waive_retry_penalty=True,
+        )
+
+        assert repaired["score"] == 99.8
+        exact = next(
+            item for item in repaired["validators"] if item["validator_type"] == "exact_match"
+        )
+        assert exact["score"] == 100.0
+        assert repaired["test_revision_id"] != original_revision
+        events = service.get_run_events(run_id, viewer_safe=False)
+        started = next(item for item in events if item["event_type"] == "rejudge.started")
+        assert started["payload"]["evaluator_mode"] == "current"
+        assert started["payload"]["original_revision_id"] == original_revision
+        assert started["payload"]["retry_penalty_waived"] is True
+        finished = next(item for item in events if item["event_type"] == "run.rejudged")
+        assert finished["payload"]["stored_attempt_multiplier"] == 0.7
+        assert finished["payload"]["applied_attempt_multiplier"] == 1.0
+    finally:
+        service.close()
+
+
+def test_retry_penalty_waiver_requires_current_evaluator(settings):
+    service = EvaluationService(settings)
+    try:
+        run_id = _create_rubric_run(service)
+        with pytest.raises(
+            ValueError, match="retry_penalty_waiver_requires_current_evaluator"
+        ):
+            service.rejudge_run(run_id, waive_retry_penalty=True)
+    finally:
+        service.close()
+
+
+def test_current_evaluator_rejudge_rejects_changed_candidate_contract(settings):
+    service = EvaluationService(settings)
+    try:
+        run_id = _create_rubric_run(service)
+        run = service.get_run(run_id)
+        service.database.execute(
+            "UPDATE runs SET status='needs_review',final_answer='OK' WHERE id=?", (run_id,)
+        )
+        definition = json.loads(
+            service.database.fetch_one(
+                "SELECT definition_json FROM test_cases WHERE id=?", (run["test_case_id"],)
+            )["definition_json"]
+        )
+        definition["instruction"] = "A materially different task."
+        service.database.execute(
+            "UPDATE test_cases SET definition_json=? WHERE id=?",
+            (json.dumps(definition, ensure_ascii=False), run["test_case_id"]),
+        )
+        service.database.sync_test_case_revisions(run["test_case_id"])
+
+        with pytest.raises(ValueError, match="current_evaluator_public_contract_changed"):
+            service.rejudge_run(run_id, use_current_evaluator=True)
+    finally:
+        service.close()
+
+
 def test_timeout_with_preserved_workspace_is_scored_automatically(settings, monkeypatch):
     """A watchdog stop must not turn an already-written coding submission into 0."""
     service = EvaluationService(settings)
@@ -587,6 +1220,10 @@ def test_timeout_with_preserved_workspace_is_scored_automatically(settings, monk
             )
         )
         run_id = service.list_runs(experiment["id"])[0]["id"]
+        service.database.execute(
+            "UPDATE experiments SET status='running',started_at=? WHERE id=?",
+            (utc_now(), experiment["id"]),
+        )
 
         def timed_out_native_agent(_runner, _model, _definition, workspace, _events, _cancel):
             workspace.write_file("solution.txt", "written before watchdog")
@@ -622,5 +1259,82 @@ def test_timeout_with_preserved_workspace_is_scored_automatically(settings, monk
         assert (settings.workspaces_dir / run_id / "solution.txt").read_text(encoding="utf-8") == (
             "written before watchdog"
         )
+    finally:
+        service.close()
+
+
+def test_timeout_artifact_only_run_is_scored_without_legacy_preserve_flag(
+    settings, monkeypatch
+):
+    """Older Office cases must not discard an already-written artifact at timeout."""
+    service = EvaluationService(settings)
+    try:
+        runner = service.create_runner(
+            RunnerCreate(name="Artifact timeout runner", runner_type="command", executable="native")
+        )
+        case = service.import_test_case(
+            TestCaseImport(
+                slug=f"test.timeout-artifact-salvage-{new_id()}",
+                version="1.0.0",
+                category="office-productivity",
+                title="Artifact timeout salvage",
+                instruction="Write result.docx and finish.",
+                initial_files={"starter.txt": "unchanged"},
+                validators=[
+                    {"type": "file_exists", "weight": 100, "config": {"path": "result.docx"}}
+                ],
+                limits={"max_steps": 4, "time_target_seconds": 60},
+                # Deliberately omit attempt_policy to represent a legacy built-in.
+            )
+        )
+        suite_id = new_id()
+        service.database.execute(
+            "INSERT INTO test_suites(id,name,description,version,builtin,created_at) "
+            "VALUES (?,?,?,'1.0.0',0,?)",
+            (suite_id, "Artifact timeout suite", "test", utc_now()),
+        )
+        service.database.execute(
+            "INSERT INTO suite_cases(suite_id,test_case_id,position) VALUES (?,?,0)",
+            (suite_id, case["id"]),
+        )
+        experiment = service.create_experiment(
+            ExperimentCreate(
+                name="Artifact timeout test",
+                suite_id=suite_id,
+                participants=[Participant(model_id=MOCK_MODEL_ID, runner_id=runner["id"])],
+            )
+        )
+        run_id = service.list_runs(experiment["id"])[0]["id"]
+        service.database.execute(
+            "UPDATE experiments SET status='running',started_at=? WHERE id=?",
+            (utc_now(), experiment["id"]),
+        )
+
+        def timed_out_native_agent(_runner, _model, _definition, workspace, _events, _cancel):
+            workspace.write_file("result.docx", "artifact bytes")
+            return AgentResult(
+                False,
+                "",
+                3,
+                ModelUsage(input_tokens=12, output_tokens=8),
+                1234,
+                "runtime_safety_limit",
+                "watchdog",
+            )
+
+        monkeypatch.setattr(service, "_run_native_agent", timed_out_native_agent)
+        service._execute_run(run_id)
+
+        run = service.get_run(run_id)
+        assert run["status"] == "completed"
+        assert run["score"] > 98.0
+        assert next(
+            item for item in run["validators"] if item["validator_type"] == "file_exists"
+        )["score"] == 100.0
+        assert run["passed"] is True
+        assert run["final_answer"].startswith("Agent reached the runtime safety limit")
+        assert "run.timeout_workspace_salvaged" in {
+            item["event_type"] for item in run["events"]
+        }
     finally:
         service.close()

@@ -59,13 +59,21 @@ def test_user_pdf_is_bundled_as_two_verified_22_question_suites():
         assert question["rubric_source"]["verification_status"] == "partially_verified"
         assert sum(point["max_points"] for point in question["scoring_points"]) == question["points"]
     q17_validator = cases["closed-book"][16]["definition"]["validators"]
-    assert [item["type"] for item in q17_validator] == ["ai_rubric"]
-    assert q17_validator[0]["weight"] == 100
-    assert q17_validator[0]["config"]["rubric_protocol"] == "agentbench.math-rubric/v1"
-    assert q17_validator[0]["config"]["marking_mode"] == "strict_exam"
-    assert q17_validator[0]["config"]["point_increment"] == 0.5
-    assert q17_validator[0]["config"]["required_judges"] == 2
-    assert q17_validator[0]["config"]["judge_disagreement_threshold"] == 4.0
+    assert [item["type"] for item in q17_validator] == ["symbolic_json", "ai_rubric"]
+    assert q17_validator[0]["weight"] == 0
+    assert q17_validator[0]["config"]["score_cap_on_failure"] == 60
+    assert q17_validator[1]["weight"] == 100
+    assert q17_validator[1]["config"]["rubric_protocol"] == "agentbench.math-rubric/v1"
+    assert q17_validator[1]["config"]["marking_mode"] == "strict_exam"
+    assert q17_validator[1]["config"]["point_increment"] == 0.5
+    assert q17_validator[1]["config"]["required_judges"] == 2
+    assert q17_validator[1]["config"]["judge_disagreement_threshold"] == 4.0
+    assert q17_validator[1]["config"]["critical_failure_score_cap"] == 60
+
+    solution_questions = manifest["questions"][16:]
+    assert all(any(point.get("critical") for point in item["scoring_points"]) for item in solution_questions)
+    assert all(item["answer_anchor_fields"] for item in (solution_questions[0], solution_questions[1], solution_questions[3], solution_questions[4], solution_questions[5]))
+    assert not solution_questions[2]["answer_anchor_fields"]  # proof question: no fake literal anchor
 
 
 def test_math_pdf_import_is_local_and_stays_in_review(settings):
@@ -185,7 +193,7 @@ def test_math_paper_review_and_publish_creates_two_real_suites(settings):
         selected = {}
         for run in runs:
             metadata = json.loads(run["definition_json"])["metadata"]
-            if metadata["question_no"] in {1, 17}:
+            if metadata["question_no"] in {1, 2, 17}:
                 selected[metadata["question_no"]] = run["id"]
         service.database.execute(
             "UPDATE runs SET status='completed',score=100 WHERE id=?", (selected[1],)
@@ -193,11 +201,20 @@ def test_math_paper_review_and_publish_creates_two_real_suites(settings):
         service.database.execute(
             "UPDATE runs SET status='completed',score=0 WHERE id=?", (selected[17],)
         )
+        service.database.execute(
+            "UPDATE runs SET status='environment_unavailable',score=NULL,failure_class='runtime_environment_failure' WHERE id=?",
+            (selected[2],),
+        )
         summary = client.get(f"/api/v1/experiments/{experiment['id']}").json()["summary"]
-        assert summary["avg_score"] == 3.33
+        assert summary["avg_score"] == 33.33
+        assert summary["weighted_score"] == 33.33
         assert summary["exam_score"] == 5.0
+        assert summary["exam_available"] == 15.0
+        assert summary["completion_rate"] == 10.0
+        assert summary["environment_unavailable_count"] == 1
+        assert summary["provisional"] is True
         assert summary["exam_total"] == 150.0
-        assert summary["exam_scoring_basis"] == "answer_quality"
+        assert summary["exam_scoring_basis"] == "valid_answer_quality_with_completion"
 
 
 def test_math_paper_score_uses_answer_quality_not_efficiency(settings):
@@ -277,8 +294,11 @@ def test_math_paper_keeps_declared_objective_and_judge_weights(settings):
             )
 
         summary = client.get(f"/api/v1/experiments/{experiment['id']}").json()["summary"]
-        assert summary["weighted_score"] == 4
-        assert summary["exam_score"] == 6
+        assert summary["weighted_score"] == 59.97
+        assert summary["raw_quality_score"] == 60.0
+        assert summary["final_capped_score"] == 59.97
+        assert summary["exam_score"] == 6.0
+        assert summary["exam_available"] == 10.0
 
 
 def test_math_question_cannot_be_confirmed_without_required_review_data(settings):

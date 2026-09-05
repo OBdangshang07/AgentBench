@@ -446,7 +446,7 @@ export default function ToolsMcp() {
   const connected = (builtins?.filter((item) => item.status === "online" || item.status === "approval").length ?? 0)
     + (servers?.filter((item) => item.enabled && item.health_status === "online").length ?? 0);
 
-  return <div className="v4-page">
+  return <div className="v4-page ab-tools-screen">
     <header className="v4-page-head"><div><span>资源与设置</span><h1>工具与 MCP</h1><p>连接工具后先执行健康检查，再把它们加入会话、能力包或自动化 Flow。</p></div><div><button className="v4-button secondary" type="button" onClick={() => setMcpImportOpen(true)}><Braces size={15} />导入配置</button><button className="v4-button secondary" type="button" onClick={() => void checkHealth()} disabled={checking}><Check size={16} />{checking ? "检查中…" : "检查全部连接"}</button><button className="v4-button primary" type="button" onClick={() => openCreateServer()}><Plus size={16} />连接 MCP 工具</button></div></header>
     {error && <div className="v4-error">{error}</div>}
     <RuntimeProfilesPanel />

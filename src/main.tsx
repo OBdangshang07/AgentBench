@@ -9,6 +9,7 @@ import "./studio-ui.css";
 import "./redesign-v2.css";
 import "./v4.css";
 import "./ux-530.css";
+import "./product-ui.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

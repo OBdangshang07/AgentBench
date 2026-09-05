@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import base64
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -291,6 +292,87 @@ def run_judge(case: dict, workspace: Path, tmp_path: Path) -> dict:
         assert line is not None, f"{name} 未输出协议行: {result.stdout}"
         payload[name] = json.loads(line.removeprefix("AGENTBENCH_METRICS="))
     return payload
+
+
+def test_ppt_judge_accepts_visual_titles_hierarchy_and_standard_custom_shows(tmp_path):
+    """自定义布局不应因未使用标题/正文占位符而丢失内容分。
+
+    OOXML 自定义放映可以使用 p:custShow，且 Relationship 属性没有
+    固定顺序；判分器需按 XML 语义解析，不能依赖特定生成器格式。
+    """
+    from pptx import Presentation
+    from pptx.util import Inches, Pt
+
+    titles = [
+        "Microsoft Office图书策划案",
+        "推荐作者简介",
+        "Office 2010的十大优势",
+        "新版图书读者定位",
+        "PowerPoint 2010创新的功能体验",
+        "2012年同类图书销量统计",
+        "新版图书创作流程示意",
+    ]
+    presentation = Presentation()
+    first = presentation.slides.add_slide(presentation.slide_layouts[0])
+    first.shapes.title.text = titles[0]
+    for title in titles[1:]:
+        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        box = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(8), Inches(0.6))
+        box.text_frame.text = title
+
+    def add_text(slide, text, top, size):
+        box = slide.shapes.add_textbox(Inches(1), Inches(top), Inches(8), Inches(0.5))
+        box.text_frame.text = text
+        box.text_frame.paragraphs[0].runs[0].font.size = Pt(size)
+
+    page2 = presentation.slides[1]
+    add_text(page2, "刘雅汶", 1.3, 24)
+    add_text(page2, "Contoso公司技术经理", 1.9, 12)
+    add_text(page2, "主要代表作品", 2.7, 20)
+    add_text(page2, "《Microsoft Office整合应用精要》", 3.3, 12)
+    page4 = presentation.slides[3]
+    for index, text in enumerate(("信息工作者", "学生和教师", "办公应用技能培训班", "大专院校教材")):
+        add_text(page4, text, 1.2 + index * 0.8, 18)
+
+    source = tmp_path / "source.pptx"
+    presentation.save(source)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "PowerPoint.pptx"
+    with zipfile.ZipFile(source) as original, zipfile.ZipFile(target, "w") as rewritten:
+        presentation_xml = original.read("ppt/presentation.xml").decode("utf-8")
+        rels_xml = original.read("ppt/_rels/presentation.xml.rels").decode("utf-8")
+        slide_ids = re.findall(r'<p:sldId\b[^>]*r:id="([^"]+)"', presentation_xml)
+        assert len(slide_ids) == 7
+        custom_shows = (
+            '<p:custShowLst xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            '<p:custShow name="放映方案1" id="1"><p:sldLst>'
+            + "".join(f'<p:sld r:id="{slide_ids[i - 1]}"/>' for i in (1, 2, 4, 7))
+            + '</p:sldLst></p:custShow><p:custShow name="放映方案2" id="2"><p:sldLst>'
+            + "".join(f'<p:sld r:id="{slide_ids[i - 1]}"/>' for i in (1, 2, 3, 5, 6))
+            + "</p:sldLst></p:custShow></p:custShowLst>"
+        )
+        presentation_xml = presentation_xml.replace(
+            "</p:presentation>", custom_shows + "</p:presentation>"
+        )
+        rels_xml = re.sub(
+            r'<Relationship Id="([^"]+)" Type="([^"]+)" Target="([^"]+)"',
+            r'<Relationship Type="\2" Target="\3" Id="\1"',
+            rels_xml,
+        )
+        for item in original.infolist():
+            data = original.read(item.filename)
+            if item.filename == "ppt/presentation.xml":
+                data = presentation_xml.encode("utf-8")
+            elif item.filename == "ppt/_rels/presentation.xml.rels":
+                data = rels_xml.encode("utf-8")
+            rewritten.writestr(item, data)
+
+    case = ncre_cases()["ncre.office.paper01.ppt"]
+    result = run_judge(case, workspace, tmp_path)["judge_ppt.py"]["metrics"]
+    assert result["p2"] == 100.0
+    assert result["p3"] == 100.0
+    assert result["p8"] == 100.0
 
 
 @pytest.mark.parametrize("slug", NCRE_SLUGS)

@@ -1,6 +1,7 @@
 import {
   Activity,
   AlertTriangle,
+  ArrowLeft,
   Archive,
   AtSign,
   Bot,
@@ -13,7 +14,6 @@ import {
   CircleStop,
   Clock3,
   Code2,
-  Copy,
   Cpu,
   File,
   FileCode2,
@@ -48,18 +48,14 @@ import {
   TerminalSquare,
   Trash2,
   Upload,
-  User,
   X,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, downloadUrl } from "../lib/api";
-import { copyText } from "../lib/clipboard";
 import { useApi } from "../lib/useApi";
 import { useWorkspaceUx } from "../components/WorkspaceUx";
 import type { ModelConfig, Runner } from "../types";
@@ -83,18 +79,15 @@ import type {
 } from "./types";
 import { useSessionStream } from "./useSessionStream";
 import { TerminalView } from "./TerminalView";
+import {
+  ExecutionTimeline,
+  formatStudioDuration as duration,
+  formatStudioTime as time,
+  StudioMessageCard,
+  studioEventTitle as eventTitle,
+} from "./studio/ConversationPrimitives";
 
 const activeStatuses = new Set(["queued", "preparing", "running", "waiting_approval"]);
-
-function time(value: string) {
-  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date(value));
-}
-
-function duration(ms: number) {
-  if (!ms) return "0s";
-  if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))}s`;
-  return `${Math.floor(ms / 60_000)}m ${Math.round(ms % 60_000 / 1000)}s`;
-}
 
 function fileSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -143,141 +136,6 @@ const statusLabels: Record<string, string> = {
   cancelled: "已停止",
   interrupted: "已中断",
 };
-
-function eventTitle(event: StudioEvent) {
-  const payload = event.payload;
-  switch (event.event_type) {
-    case "turn.queued": return "任务已进入 Agent 队列";
-    case "turn.started": return "Agent 开始执行本轮任务";
-    case "native_cli.started": return "已启动原生 Agent 运行时";
-    case "live.phase": return String(payload.summary ?? "Agent 正在推进任务");
-    case "live.heartbeat": return String(payload.summary ?? "Agent 正在持续运行");
-    case "live.message": return payload.status === "streaming" ? "Agent 正在说明进度" : "Agent 进度说明";
-    case "live.tool": return `${payload.status === "completed" ? "工具完成" : payload.status === "preparing" ? "准备调用工具" : "正在调用工具"} · ${String(payload.tool ?? "tool")}`;
-    case "live.command": return "正在执行命令";
-    case "live.test": return payload.status === "completed" ? "测试执行完成" : "正在运行验证测试";
-    case "live.file_change": return `${String(payload.change ?? "修改")}文件 · ${String(payload.path ?? "工作区文件")}`;
-    case "tool.requested": return `调用工具 · ${String(payload.name ?? "tool")}`;
-    case "tool.completed": return `工具完成 · ${String(payload.name ?? "tool")}`;
-    case "file.changed": return `${String(payload.change_type ?? "修改")}文件 · ${String(payload.path ?? "")}`;
-    case "native_cli.event": return String(payload.summary ?? "原生 Agent 产生新活动");
-    case "assistant.message": return "Agent 已提交结果";
-    case "turn.completed": return "本轮任务已完成";
-    case "turn.cancelled": return "本轮任务已取消";
-    case "turn.failed": return `执行失败 · ${String(payload.error_code ?? "runtime_error")}`;
-    case "approval.requested": return `等待审批 · ${String(payload.title ?? "受保护操作")}`;
-    case "usage.updated": return "额度消耗已更新";
-    default: return event.event_type.replaceAll(".", " · ");
-  }
-}
-
-function eventDetail(event: StudioEvent) {
-  const payload = event.payload;
-  if (event.event_type === "live.message") return String(payload.text ?? "");
-  if (event.event_type === "live.tool") return String(payload.detail ?? "");
-  if (event.event_type === "live.command") return [payload.command, payload.detail].filter(Boolean).join("\n");
-  if (event.event_type === "live.test") return [payload.command, payload.detail].filter(Boolean).join("\n");
-  if (event.event_type === "live.phase") return String(payload.detail ?? "");
-  if (event.event_type === "live.heartbeat" && payload.phase) return `阶段：${String(payload.phase)}`;
-  if (event.event_type === "live.file_change" && payload.size_delta !== undefined) return `${Number(payload.size_delta) >= 0 ? "+" : ""}${String(payload.size_delta)} B`;
-  if (event.event_type === "tool.requested") return JSON.stringify(payload.arguments ?? {}, null, 2);
-  if (event.event_type === "tool.completed") return JSON.stringify(payload.result ?? {}, null, 2);
-  if (event.event_type === "turn.completed") return `${String(payload.steps ?? 0)} steps · ${duration(Number(payload.duration_ms ?? 0))}`;
-  if (event.event_type === "turn.failed" || event.event_type === "turn.cancelled") return String(payload.message ?? "");
-  return "";
-}
-
-function eventCategory(event: StudioEvent) {
-  if (event.event_type === "live.message") return "公开说明";
-  if (event.event_type.includes("tool")) return "工具";
-  if (event.event_type.includes("command")) return "命令";
-  if (event.event_type.includes("test")) return "验证";
-  if (event.event_type.includes("file")) return "文件";
-  if (event.event_type.includes("approval")) return "审批";
-  if (event.event_type === "live.heartbeat") return "状态";
-  return "进度";
-}
-
-function eventTone(event: StudioEvent) {
-  if (event.event_type.includes("failed") || event.event_type.includes("cancelled")) return "failed";
-  if (event.payload.status === "completed" || event.event_type.includes("completed")) return "done";
-  if (event.event_type === "live.message") return "message";
-  if (event.event_type.includes("tool") || event.event_type.includes("command") || event.event_type.includes("test")) return "action";
-  return "running";
-}
-
-function eventIcon(event: StudioEvent) {
-  if (event.event_type === "live.message") return <Sparkles size={15} />;
-  if (event.event_type.includes("command") || event.event_type.includes("test")) return <TerminalSquare size={15} />;
-  if (event.event_type.includes("file")) return <FileDiff size={15} />;
-  if (event.event_type.includes("approval")) return <ShieldCheck size={15} />;
-  if (event.event_type.includes("tool")) return <Code2 size={15} />;
-  if (eventTone(event) === "done") return <Check size={15} />;
-  return <Brain size={15} />;
-}
-
-function isSecondaryOperation(event: StudioEvent) {
-  if (["live.tool", "live.command", "live.test", "live.file_change", "tool.requested", "tool.completed", "file.changed"].includes(event.event_type)) {
-    return eventTone(event) !== "failed";
-  }
-  return false;
-}
-
-function operationSummary(events: StudioEvent[]) {
-  const tools = events.filter((event) => event.event_type.includes("tool")).length;
-  const commands = events.filter((event) => event.event_type.includes("command")).length;
-  const tests = events.filter((event) => event.event_type.includes("test")).length;
-  const files = events.filter((event) => event.event_type.includes("file")).length;
-  return [
-    tools ? `${tools} 个工具` : "",
-    commands ? `${commands} 条命令` : "",
-    tests ? `${tests} 次验证` : "",
-    files ? `${files} 项文件变更` : "",
-  ].filter(Boolean).join(" · ");
-}
-
-function isRuntimeNoise(event: StudioEvent) {
-  const path = String(event.payload.path ?? event.payload.detail ?? "").replaceAll("\\", "/").toLowerCase();
-  return [
-    "/node_modules/", "/.git/", "/__pycache__/", "/.venv/", "/.packaging-venv/",
-    "/browser-profile/", "/guide-browser-profile/", "/cache/", "/code cache/",
-    "/gpu cache/", "/session storage/", "/safe browsing/", "/gcm store/",
-  ].some((fragment) => path.includes(fragment));
-}
-
-function MarkdownMessage({ content }: { content: string }) {
-  const [copied, setCopied] = useState<string | null>(null);
-
-  async function copyCode(value: string) {
-    if (!await copyText(value)) return;
-    setCopied(value);
-    window.setTimeout(() => setCopied((current) => current === value ? null : current), 1600);
-  }
-
-  return (
-    <div className="v5-markdown">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          pre: ({ children }) => <>{children}</>,
-          code: ({ className, children, ...props }) => {
-            const value = String(children).replace(/\n$/, "");
-            const block = Boolean(className) || value.includes("\n");
-            if (!block) return <code className={className} {...props}>{children}</code>;
-            const language = className?.replace("language-", "") || "text";
-            return (
-              <section className="v5-code-block">
-                <header><span>{language}</span><button type="button" onClick={() => void copyCode(value)}>{copied === value ? <Check size={13} /> : <Copy size={13} />}{copied === value ? "已复制" : "复制"}</button></header>
-                <pre><code className={className} {...props}>{children}</code></pre>
-              </section>
-            );
-          },
-          a: ({ href, children }) => <a href={href} target={href?.startsWith("http") ? "_blank" : undefined} rel="noreferrer">{children}</a>,
-        }}
-      >{content}</ReactMarkdown>
-    </div>
-  );
-}
 
 interface SessionForm {
   session_mode: "workspace" | "chat";
@@ -517,6 +375,7 @@ export default function AgentStudio() {
   const [searchParams, setSearchParams] = useSearchParams();
   const ux = useWorkspaceUx();
   const createRequested = searchParams.get("new") === "1";
+  const requestedProjectId = searchParams.get("project") ?? "";
   const [messageLimit, setMessageLimit] = useState(120);
   const { data: sessions, refresh: refreshSessions } = useApi<AgentSession[]>("/sessions", 3_000);
   const { data: projects } = useApi<Project[]>("/projects");
@@ -551,6 +410,7 @@ export default function AgentStudio() {
   const [draftLoadedFor, setDraftLoadedFor] = useState("");
   const [composerInspectorOpen, setComposerInspectorOpen] = useState(false);
   const [runtimeConfigOpen, setRuntimeConfigOpen] = useState(false);
+  const [processExpanded, setProcessExpanded] = useState(false);
   const [sessionQuery, setSessionQuery] = useState("");
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
@@ -610,11 +470,12 @@ export default function AgentStudio() {
 
   useEffect(() => {
     if (!createRequested || !projects) return;
-    openCreate();
+    openCreate(requestedProjectId);
     const next = new URLSearchParams(searchParams);
     next.delete("new");
+    next.delete("project");
     setSearchParams(next, { replace: true });
-  }, [createRequested, projects]);
+  }, [createRequested, projects, requestedProjectId]);
 
   useEffect(() => {
     const projectId = detail?.project_id;
@@ -806,10 +667,6 @@ export default function AgentStudio() {
     streamedEvents.forEach((event) => bySequence.set(event.seq, event));
     return [...bySequence.values()].sort((left, right) => left.seq - right.seq);
   }, [detail?.events, streamedEvents]);
-  const latestHeartbeat = useMemo(
-    () => [...events].reverse().find((event) => event.event_type === "live.heartbeat"),
-    [events],
-  );
   const processEvents = useMemo(() => {
     const keyed = new Map<string, StudioEvent>();
     const standalone: StudioEvent[] = [];
@@ -832,19 +689,6 @@ export default function AgentStudio() {
     }
     return [...standalone, ...keyed.values()].sort((left, right) => left.seq - right.seq);
   }, [events]);
-  const primaryProcessEvents = useMemo(
-    () => processEvents.filter((event) => !isSecondaryOperation(event)),
-    [processEvents],
-  );
-  const operationEvents = useMemo(
-    () => processEvents.filter(isSecondaryOperation),
-    [processEvents],
-  );
-  const visibleOperationEvents = useMemo(
-    () => operationEvents.filter((event) => !isRuntimeNoise(event)),
-    [operationEvents],
-  );
-  const runtimeNoiseCount = operationEvents.length - visibleOperationEvents.length;
   const collapsedEventCount = Math.max(0, events.length - processEvents.length);
   const pendingApprovals = useMemo(
     () => detail?.approvals.filter((item) => item.status === "pending") ?? [],
@@ -859,6 +703,22 @@ export default function AgentStudio() {
     () => detail?.messages.filter((item) => !item.turn_id || !queuedTurnIds.has(item.turn_id)) ?? [],
     [detail?.messages, queuedTurnIds],
   );
+  const processEventsByTurn = useMemo(() => {
+    const groups = new Map<string, StudioEvent[]>();
+    for (const event of processEvents) {
+      const key = event.turn_id ?? "__session__";
+      groups.set(key, [...(groups.get(key) ?? []), event]);
+    }
+    return groups;
+  }, [processEvents]);
+  const processTurnIdsWithReplies = useMemo(
+    () => new Set(visibleMessages.filter((message) => message.role === "assistant" && message.turn_id).map((message) => message.turn_id as string)),
+    [visibleMessages],
+  );
+  const trailingProcessEvents = useMemo(
+    () => processEvents.filter((event) => !event.turn_id || !processTurnIdsWithReplies.has(event.turn_id)),
+    [processEvents, processTurnIdsWithReplies],
+  );
   const fileContextPaths = useMemo(
     () => isChat ? [] : [...new Set([...(preview ? [preview.path] : []), ...contextFiles])],
     [contextFiles, isChat, preview],
@@ -867,6 +727,15 @@ export default function AgentStudio() {
     const needle = sessionQuery.trim().toLowerCase();
     return (sessions ?? []).filter((session) => !needle || `${session.title} ${session.project_name} ${session.runner_name} ${session.model_name}`.toLowerCase().includes(needle));
   }, [sessionQuery, sessions]);
+  const sessionGroups = useMemo(() => {
+    const today = new Date().toDateString();
+    const limited = visibleSessions.slice(0, 40);
+    return [
+      { label: "运行中", items: limited.filter((session) => activeStatuses.has(session.status)) },
+      { label: "今天", items: limited.filter((session) => !activeStatuses.has(session.status) && new Date(session.updated_at).toDateString() === today) },
+      { label: "更早", items: limited.filter((session) => !activeStatuses.has(session.status) && new Date(session.updated_at).toDateString() !== today) },
+    ].filter((group) => group.items.length > 0);
+  }, [visibleSessions]);
   const retryableTurn = useMemo(() => {
     const latest = detail?.turns.at(-1);
     return latest && ["failed", "cancelled", "interrupted"].includes(latest.status) ? latest : null;
@@ -1048,8 +917,8 @@ export default function AgentStudio() {
     return () => { stopped = true; window.clearInterval(timer); };
   }, [sessionId, terminal?.id, terminal?.running, terminal?.cursor]);
 
-  function openCreate() {
-    const project = projects?.find((item) => item.id === ux.selectedProjectId) ?? projects?.[0];
+  function openCreate(projectId = "") {
+    const project = projects?.find((item) => item.id === projectId) ?? projects?.find((item) => item.id === ux.selectedProjectId) ?? projects?.[0];
     setSessionForm({
       session_mode: project ? "workspace" : "chat",
       project_id: project?.id ?? "",
@@ -1582,7 +1451,7 @@ export default function AgentStudio() {
     return (
       <div className="v4-studio-empty">
         <span><Sparkles size={28} /></span><h1>开始第一次会话</h1><p>选择项目和 Agent，然后直接描述你希望完成的工作。</p>
-        <button className="v4-button primary" type="button" onClick={openCreate}><Plus size={16} />开始新会话</button>
+        <button className="v4-button primary" type="button" onClick={() => openCreate()}><Plus size={16} />开始新会话</button>
         {!projects?.length && <Link className="v4-button secondary" to="/projects"><FolderOpen size={16} />添加项目工作区</Link>}
         {createOpen && renderCreateModal()}
       </div>
@@ -1632,15 +1501,28 @@ export default function AgentStudio() {
     );
   }
 
+  function renderProcessGroup(group: StudioEvent[], label = "思考与执行") {
+    return (
+      <ExecutionTimeline
+        events={group}
+        label={label === "思考与执行" ? "执行轨迹" : label}
+        active={activeStatuses.has(detail?.status ?? "")}
+        expanded={processExpanded}
+        onToggle={() => setProcessExpanded((value) => !value)}
+      />
+    );
+  }
+
   return (
-    <div className={`v4-studio-workbench ${isChat ? "chat-mode" : ""} ${studioLayout.left ? "" : "left-collapsed"} ${studioLayout.right && !isChat ? "" : "right-collapsed"} ${studioLayout.dock && !isChat ? "" : "dock-collapsed"} ${studioLayout.dockExpanded && !isChat ? "dock-expanded" : ""} ${resizing ? `resizing-${resizing}` : ""}`} style={{ "--studio-left": studioLayout.left ? `${studioLayout.leftWidth}px` : "0px", "--studio-right": studioLayout.right && !isChat ? `${studioLayout.rightWidth}px` : "0px", "--studio-dock": !studioLayout.dock || isChat ? "45px" : studioLayout.dockExpanded ? "min(54vh, 540px)" : `${studioLayout.dockHeight}px` } as CSSProperties}>
+    <div className={`v4-studio-workbench ab-studio-shell ${isChat ? "chat-mode" : ""} ${studioLayout.left ? "" : "left-collapsed"} ${studioLayout.right && !isChat ? "" : "right-collapsed"} ${studioLayout.dock && !isChat ? "" : "dock-collapsed"} ${studioLayout.dockExpanded && !isChat ? "dock-expanded" : ""} ${resizing ? `resizing-${resizing}` : ""}`} style={{ "--studio-left": studioLayout.left ? `${studioLayout.leftWidth}px` : "0px", "--studio-right": studioLayout.right && !isChat ? `${studioLayout.rightWidth}px` : "0px", "--studio-dock": !studioLayout.dock || isChat ? "45px" : studioLayout.dockExpanded ? "min(54vh, 540px)" : `${studioLayout.dockHeight}px` } as CSSProperties}>
       {draggingFiles && <div className="v5-studio-dropzone"><Upload size={28} /><strong>放下即可附加到当前会话</strong><span>图片和文件最多 10 个，单个最大 50 MB</span></div>}
-      <aside className="v4-studio-rail">
+      <aside className="v4-studio-rail ab-session-sidebar">
+        <Link className="v54-studio-app-back" to="/"><ArrowLeft size={14} /><span>AgentBench 工作区</span></Link>
         <header>{detail ? <><span className="v4-project-logo">{detail.project_name.slice(0, 2).toUpperCase()}</span><div><strong>{detail.project_name}</strong><small title={isChat ? "无工作区" : detail.workspace_path}>{isChat ? <MessageSquarePlus size={11} /> : <GitBranch size={11} />} {isChat ? "无工作区 · 隔离对话" : detail.workspace_path}</small></div></> : <span>加载会话…</span>}</header>
-        <button className="v5-new-session-primary" type="button" onClick={openCreate}><Plus size={15} />新建会话</button>
+        <button className="v5-new-session-primary" type="button" onClick={() => openCreate()}><Plus size={15} />新建会话</button>
         <div className="v4-rail-tabs v5-studio-nav-tabs"><button className={railMode === "sessions" ? "active" : ""} type="button" onClick={() => setRailMode("sessions")}><Bot size={13} />会话</button>{!isChat && <><button className={railMode === "files" ? "active" : ""} type="button" onClick={() => setRailMode("files")}><Folder size={13} />文件</button><button className={railMode === "search" ? "active" : ""} type="button" onClick={() => setRailMode("search")}><Search size={13} />搜索</button></>}</div>
         {railMode === "sessions" ? (
-          <section className="v4-session-list v5-session-list-primary"><header><span>最近会话</span><button type="button" aria-label="新建 Agent 会话" onClick={openCreate}><Plus size={14} /></button></header><label className="v5-session-search"><Search size={13} /><input aria-label="搜索会话" value={sessionQuery} onChange={(event) => setSessionQuery(event.target.value)} placeholder="搜索会话…" />{sessionQuery && <button type="button" aria-label="清除会话搜索" onClick={() => setSessionQuery("")}><X size={12} /></button>}</label>{visibleSessions.slice(0, 40).map((session) => <button key={session.id} className={session.id === sessionId ? "active" : ""} type="button" onClick={() => navigate(`/studio/${session.id}`)}><i className={activeStatuses.has(session.status) ? "live" : ""} /><span><strong>{session.title}</strong><small>{session.project_name} · {session.runner_name}</small></span><em>{statusLabels[session.status] ?? session.status}</em></button>)}{sessionQuery && !visibleSessions.length && <div className="v5-session-none">没有匹配会话</div>}</section>
+          <section className="v4-session-list v5-session-list-primary"><header><span>会话</span><button type="button" aria-label="新建 Agent 会话" onClick={() => openCreate()}><Plus size={14} /></button></header><label className="v5-session-search"><Search size={13} /><input aria-label="搜索会话" value={sessionQuery} onChange={(event) => setSessionQuery(event.target.value)} placeholder="搜索会话…" />{sessionQuery && <button type="button" aria-label="清除会话搜索" onClick={() => setSessionQuery("")}><X size={12} /></button>}</label>{sessionGroups.flatMap((group) => [<div className="v54-session-group-label" key={`group-${group.label}`}>{group.label}<span>{group.items.length}</span></div>, ...group.items.map((session) => <button key={session.id} className={session.id === sessionId ? "active" : ""} type="button" title={session.summary || session.title} onClick={() => navigate(`/studio/${session.id}`)}><i className={activeStatuses.has(session.status) ? "live" : ""} /><span><strong>{session.title}</strong><small>{session.summary || `${session.project_name} · ${session.runner_name}`}</small></span><em>{statusLabels[session.status] ?? session.status}</em></button>)])}{!visibleSessions.length && <div className="v5-session-none">{sessionQuery ? "没有匹配会话" : "还没有会话，从上方开始第一个任务"}</div>}</section>
         ) : railMode === "files" ? (
           <section className="v4-file-tree">
             <button className="v4-tree-up" type="button" disabled={treePath === "."} onClick={() => setTreePath(treePath.includes("/") ? treePath.slice(0, treePath.lastIndexOf("/")) : ".")}><ChevronDown size={14} />WORKSPACE · {treePath}</button>
@@ -1665,8 +1547,8 @@ export default function AgentStudio() {
 
       {studioLayout.left && <div className="v5-studio-resizer left" role="separator" aria-label="调整导航侧栏宽度" aria-orientation="vertical" tabIndex={0} onPointerDown={(event) => beginResize("left", event)} onKeyDown={(event) => resizeWithKeyboard("left", event.key)} />}
 
-      <section className="v4-conversation">
-        <header className="v4-conversation-head">
+      <section className="v4-conversation ab-thread">
+        <header className="v4-conversation-head ab-thread-header">
           <button className={`v4-pane-toggle with-label ${studioLayout.left ? "active" : ""}`} type="button" aria-label={studioLayout.left ? "收起导航侧栏" : "展开导航侧栏"} title={`${studioLayout.left ? "收起" : "展开"}导航侧栏 · Ctrl B`} onClick={() => setStudioLayout((current) => ({ ...current, left: !current.left }))}>{studioLayout.left ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}<span>导航</span></button>
           {editingTitle ? <form className="v5-session-title-edit" onSubmit={renameSession}><input autoFocus aria-label="会话名称" value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} /><button type="submit"><Check size={14} /></button><button type="button" onClick={() => setEditingTitle(false)}><X size={14} /></button></form> : <div className="v4-conversation-title"><strong>{detail?.title ?? "正在加载会话"}</strong><small title={isChat ? "纯对话 · 无工作区" : detail?.workspace_path}>SESSION / {sessionId?.slice(0, 8)} · {isChat ? "纯对话 · 无工作区" : detail?.workspace_path}</small></div>}
           <span className={`v4-status ${activeStatuses.has(detail?.status ?? "") ? "green" : ""}`}><i />{detail ? statusLabels[detail.status] ?? detail.status : "加载中"}</span>
@@ -1678,65 +1560,16 @@ export default function AgentStudio() {
 
         {runtimeConfigOpen && <section className="v5-runtime-config-popover"><header><div><strong>运行配置</strong><small>{isChat ? "纯对话固定隔离权限；可切换 Agent、模型与思考强度" : "当前会话立即生效；运行中限制切换 Agent 与模型"}</small></div><button type="button" aria-label="关闭运行配置" onClick={() => setRuntimeConfigOpen(false)}><X size={14} /></button></header><div className="v5-runtime-primary"><StudioPicker ariaLabel="选择 Agent" caption="AGENT" icon={<Bot size={15} />} disabled={activeStatuses.has(detail?.status ?? "")} value={detail?.runner_id ?? ""} options={runnerOptions} onChange={(runnerId) => void updateSession({ runner_id: runnerId })} /><StudioPicker ariaLabel="选择模型" caption="MODEL" icon={<Cpu size={15} />} disabled={activeStatuses.has(detail?.status ?? "")} value={detail?.model_id ?? ""} options={modelOptions} onChange={(modelId) => void updateSession({ model_id: modelId })} /></div><div className="v5-runtime-secondary"><ComposerMenu ariaLabel="会话访问权限" label="权限" icon={<ShieldCheck size={14} />} value={detail?.permission_profile ?? "workspace"} options={permissionOptions} disabled={configBusy || isChat} onChange={(value) => void updateRuntimeSetting({ permission_profile: value as PermissionProfile })} /><ComposerMenu ariaLabel="思考强度" label="思考" icon={<Brain size={14} />} value={detail?.reasoning_effort ?? "medium"} options={effortOptions} disabled={configBusy} onChange={(value) => void updateRuntimeSetting({ reasoning_effort: value as ReasoningEffort })} />{!isChat && <><ComposerMenu ariaLabel="会话能力包" label="能力" icon={<Sparkles size={14} />} value={detail?.skill_pack_id ?? ""} options={skillOptions} disabled={configBusy || activeStatuses.has(detail?.status ?? "")} onChange={(value) => void updateRuntimeSetting({ skill_pack_id: value || null })} /><ComposerMenu ariaLabel="运行 Profile" label="Profile" icon={<Gauge size={14} />} value={detail?.profile_id ?? ""} options={profileOptions} disabled={configBusy || activeStatuses.has(detail?.status ?? "")} onChange={(value) => void updateRuntimeSetting({ profile_id: value || null })} /></>}</div>{harnessEffort && <div className="v5-harness-effort-note"><Brain size={14} /><span><strong>Harness 实际生效：{harnessEffort.actual} · {harnessEffort.label}</strong><small>{harnessEffort.note}；本次使用隔离配置，不修改 dsh 全局设置</small></span></div>}<footer><span><Gauge size={13} />{quotaTokens.toLocaleString()} Tokens · ${quotaCost.toFixed(3)}</span><span><Clock3 size={13} />{duration(detail?.duration_ms ?? 0)}</span>{!isChat && <span><FileDiff size={13} />{detail?.file_changes.length ?? 0} 个变更</span>}</footer></section>}
 
-        <div className="v4-conversation-scroll" ref={scrollRef} onScroll={handleConversationScroll}>
+        <div className="v4-conversation-scroll ab-thread-scroll" ref={scrollRef} onScroll={handleConversationScroll}>
           {loading && <div className="v4-empty compact"><RefreshCw className="spin" size={22} /><strong>正在恢复会话上下文</strong></div>}
           {detail?.messages_truncated && <button className="v5-load-earlier" type="button" onClick={loadEarlierMessages}>加载更早的 {Math.min(120, detail.message_count - detail.messages.length)} 条消息</button>}
-          {visibleMessages.map((item) => <article key={item.id} className={`v4-message ${item.role}`}><span>{item.role === "user" ? <User size={16} /> : <Sparkles size={16} />}</span><div><header><strong>{item.role === "user" ? "你" : detail?.runner_name}</strong><time>{time(item.created_at)}</time><button className="v5-message-action" type="button" title="从这里创建会话分支" aria-label="从这条消息创建会话分支" onClick={() => void forkSession(item.id)}><GitFork size={13} /></button></header><MarkdownMessage content={item.content} />{item.metadata.context?.length ? <footer><Paperclip size={13} />已附加 {item.metadata.context.length} 项上下文</footer> : null}</div></article>)}
-          {!!events.length && (
-            <section className="v4-inline-activity">
-              <header>
-                <span className="v4-process-mark"><Activity size={16} /></span>
-                <div><strong>Agent 执行过程</strong><small>公开进度、工具调用与可验证操作</small></div>
-                {latestHeartbeat && (
-                  <div className="v4-process-telemetry">
-                    <span><Clock3 size={12} />{duration(Number(latestHeartbeat.payload.elapsed_ms ?? 0))}</span>
-                    <span>{latestHeartbeat.payload.summary ? String(latestHeartbeat.payload.summary) : `${Number(latestHeartbeat.payload.line_count ?? 0).toLocaleString()} 流事件`}</span>
-                  </div>
-                )}
-                <b className={connected ? "live" : ""}><i />{connected ? "实时" : "已保存"}</b>
-              </header>
-              <div className="v4-process-list">
-                {primaryProcessEvents.slice(-8).map((event, index, visible) => (
-                  <article key={`${event.event_type}-${event.seq}`} className={eventTone(event)}>
-                    <span className="v4-process-icon">{eventIcon(event)}</span>
-                    <div>
-                      <header><strong>{eventTitle(event)}</strong><em>{eventCategory(event)}</em></header>
-                      {eventDetail(event) && (event.event_type === "live.message"
-                        ? <p>{eventDetail(event)}</p>
-                        : <pre>{eventDetail(event)}</pre>)}
-                      <small>{time(event.created_at)} · 公开进度 {Math.max(1, primaryProcessEvents.length - visible.length + index + 1)}</small>
-                    </div>
-                  </article>
-                ))}
-                {visibleOperationEvents.length > 0 && (
-                  <details className="v4-process-operations">
-                    <summary>
-                      <span><Code2 size={14} /></span>
-                      <div><strong>后台操作</strong><small>{operationSummary(visibleOperationEvents)}{runtimeNoiseCount ? ` · ${runtimeNoiseCount} 条运行时噪声已隐藏` : ""}</small></div>
-                      <b>{visibleOperationEvents.length}</b>
-                      <ChevronRight className="v4-operation-chevron" size={14} />
-                    </summary>
-                    <div>
-                      {visibleOperationEvents.slice(-30).map((event) => (
-                        <article key={`${event.event_type}-${event.seq}`} className={eventTone(event)}>
-                          <span className="v4-process-icon">{eventIcon(event)}</span>
-                          <div>
-                            <header><strong>{eventTitle(event)}</strong><em>{eventCategory(event)}</em></header>
-                            {eventDetail(event) && <pre>{eventDetail(event)}</pre>}
-                            <small>{time(event.created_at)} · 操作 {event.seq}</small>
-                          </div>
-                        </article>
-                      ))}
-                    </div>
-                  </details>
-                )}
-                {!processEvents.length && (
-                  <div className="v4-process-waiting"><Brain size={18} /><span><strong>Agent 正在处理</strong><small>等待下一条可公开的进度说明或工具活动…</small></span></div>
-                )}
-              </div>
-              {collapsedEventCount > 0 && <footer>已自动折叠 {collapsedEventCount.toLocaleString()} 条 Token、心跳与重复底层事件</footer>}
-            </section>
-          )}
+          {visibleMessages.map((item) => (
+            <div className="v54-conversation-turn ab-conversation-turn" key={item.id}>
+              {item.role === "assistant" && item.turn_id && processEventsByTurn.has(item.turn_id) && renderProcessGroup(processEventsByTurn.get(item.turn_id) ?? [])}
+              <StudioMessageCard message={item} runnerName={detail?.runner_name} onFork={() => void forkSession(item.id)} />
+            </div>
+          ))}
+          {!!trailingProcessEvents.length && renderProcessGroup(trailingProcessEvents, activeStatuses.has(detail?.status ?? "") ? "Agent 正在工作" : "思考与执行")}
           {completedTurn && !activeStatuses.has(detail?.status ?? "") && (
             <section className="v5-completion-summary">
               <header><span><CheckCircle2 size={18} /></span><div><strong>本轮任务已完成</strong><small>{completedTurn.final_answer ? "Agent 已提交最终结果，运行证据已保存" : "运行结束，完整过程已保存"}</small></div></header>
@@ -1748,7 +1581,7 @@ export default function AgentStudio() {
         </div>
         {!followingLatest && <button className="v4-return-latest" type="button" onClick={jumpToLatest}><ChevronDown size={14} />返回最新内容</button>}
 
-        <form className="v4-composer" onSubmit={sendTurn}>
+        <form className="v4-composer ab-composer" onSubmit={sendTurn}>
           {pendingApprovals.length > 0 && <section className="v4-approval-gate v5-approval-composer-gate"><header><ShieldCheck size={16} /><div><strong>Agent 正在等待你的审批</strong><small>确认后当前任务会自动继续</small></div><b>{pendingApprovals.length}</b></header>{pendingApprovals.map((approval) => renderApproval(approval, true))}</section>}
           {queuedTurns.length > 0 && <details className="v5-composer-queue"><summary><Clock3 size={14} /><span>后续指令队列 · {queuedTurns.length} 条等待执行</span><ChevronDown size={13} /></summary><div>{queuedTurns.map((turn, index) => <article key={turn.id}><span>{index + 1}</span><div><strong>{turn.user_message}</strong><small>第 {turn.turn_no} 轮 · {time(turn.created_at)}</small></div><button type="button" title="移除这条排队指令" aria-label={`移除排队指令 ${turn.user_message}`} onClick={() => void removeQueuedTurn(turn)}><Trash2 size={13} /></button></article>)}</div></details>}
           {(fileContextPaths.length > 0 || attachments.length > 0) && <div className="v4-composer-context">
@@ -1780,7 +1613,7 @@ export default function AgentStudio() {
 
       {studioLayout.right && !isChat && <div className="v5-studio-resizer right" role="separator" aria-label="调整工具工作台宽度" aria-orientation="vertical" tabIndex={0} onPointerDown={(event) => beginResize("right", event)} onKeyDown={(event) => resizeWithKeyboard("right", event.key)} />}
 
-      {!isChat && <section className="v4-studio-dock">
+      {!isChat && <section className="v4-studio-dock ab-context-drawer">
         <nav>
           <button type="button" className={studioLayout.dock && dock === "activity" ? "active" : ""} onClick={() => { setDock("activity"); setStudioLayout((current) => ({ ...current, dock: true, right: true })); }}><Activity size={14} />活动详情 <b>{processEvents.length}</b></button>
           <button type="button" className={studioLayout.dock && dock === "terminal" ? "active" : ""} onClick={openTerminalPanel}><TerminalSquare size={14} />交互终端 <b>{terminals.length || ""}</b><i className={terminals.some((item) => item.running) ? "live" : ""} /></button>

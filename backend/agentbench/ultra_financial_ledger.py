@@ -124,10 +124,59 @@ LEDGER_SPEC = textwrap.dedent(
 
     The required tables are `schema_meta`, `tenants`, `accounts`,
     `ledger_transactions`, `postings`, `idempotency_keys`, `outbox`, and
-    `audit_log`.  A fresh database must create them automatically.  A process may
+    `audit_log`.  The following column contract is public because the independent
+    validator inspects durable state directly.  Equivalent additional indexes,
+    checks, and columns are allowed, but these names, meanings, and compatible
+    PostgreSQL types must exist:
+
+    ```sql
+    schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)
+    tenants(tenant_id TEXT PRIMARY KEY, currency TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL)
+    accounts(tenant_id TEXT NOT NULL, account_id TEXT NOT NULL, kind TEXT NOT NULL,
+             currency TEXT NOT NULL, balance_minor BIGINT NOT NULL,
+             created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
+             PRIMARY KEY(tenant_id, account_id))
+    ledger_transactions(transaction_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL,
+             request_id TEXT NOT NULL, kind TEXT NOT NULL, amount_minor BIGINT NOT NULL,
+             metadata_json TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL,
+             UNIQUE(tenant_id, request_id))
+    postings(posting_id BIGSERIAL PRIMARY KEY, transaction_id TEXT NOT NULL,
+             tenant_id TEXT NOT NULL, account_id TEXT NOT NULL,
+             direction TEXT NOT NULL, amount_minor BIGINT NOT NULL,
+             position INTEGER NOT NULL, UNIQUE(transaction_id, position))
+    idempotency_keys(tenant_id TEXT NOT NULL, request_id TEXT NOT NULL,
+             fingerprint TEXT NOT NULL, transaction_id TEXT NOT NULL,
+             response_json TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL,
+             PRIMARY KEY(tenant_id, request_id))
+    outbox(event_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL,
+             transaction_id TEXT NOT NULL, topic TEXT NOT NULL, payload_json TEXT NOT NULL,
+             created_at TIMESTAMPTZ NOT NULL, published_at TIMESTAMPTZ,
+             claimed_by TEXT, claim_until TIMESTAMPTZ,
+             attempts INTEGER NOT NULL DEFAULT 0,
+             UNIQUE(tenant_id, transaction_id))
+    audit_log(tenant_id TEXT NOT NULL, sequence BIGINT NOT NULL,
+             transaction_id TEXT NOT NULL, event_type TEXT NOT NULL,
+             payload_json TEXT NOT NULL, previous_hash TEXT NOT NULL, hash TEXT NOT NULL,
+             created_at TIMESTAMPTZ NOT NULL, PRIMARY KEY(tenant_id, sequence),
+             UNIQUE(tenant_id, transaction_id))
+    ```
+
+    `direction` is exactly `debit` or `credit`; account `kind` supports
+    `customer`, `system`, and the reserved `settlement` account.  Required foreign
+    keys must prevent a posting, idempotency row, outbox row, or audit row from
+    referring to a nonexistent transaction/account.  A fresh database must create
+    the schema automatically.  A process may
     be terminated before or during COMMIT; after reopening, every visible
     transaction is complete with all dependent rows, and every invisible one is
     absent.  Never repair a partial transaction by silently inventing money.
+
+    When `original_transaction_id` is supplied to `refund`, it must name an
+    existing transaction in the same tenant and must be preserved in the canonical
+    refund payload/metadata.  A missing or cross-tenant original is rejected
+    without consuming the request key.  All accounts in a tenant, including the
+    settlement account, use the tenant currency; cross-currency account creation
+    and money movement are rejected.
 
     A legacy database may contain these tables (and no new tables):
 
@@ -162,7 +211,12 @@ LEDGER_SPEC = textwrap.dedent(
     tampering, gaps, or invalid JSON.  `audit_head` returns the latest hash or
     `None` for a tenant with no transactions.
 
-    Run `python public_smoke.py` locally after setting `DATABASE_URL`.  Private
+    Performance scoring is public: the bounded workload performs one deposit and
+    80 transfers.  It earns 100 for at most 60 seconds, 70 for at most 120 seconds,
+    and 30 otherwise; correctness assertions still apply at every tier.
+
+    Run `python public_smoke.py` locally after setting `DATABASE_URL`.  Without a
+    DSN it exits non-zero as `SKIPPED`, never as a passing database test.  Private
     checks add PostgreSQL multiprocess contention, duplicate-charge races,
     cross-tenant attacks, migration fixtures, outbox leasing, hash tampering,
     and crash/reopen checks.  The private checks are deterministic; hidden data
@@ -320,12 +374,9 @@ LEDGER_PUBLIC_SMOKE = textwrap.dedent(
     from ledger import IdempotencyConflict, Ledger
 
 
-    # The local public smoke is also useful before a database is provisioned.  The
-    # real assertions run whenever the runner supplies PostgreSQL 16's DSN.
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
-        print("PUBLIC_FINANCIAL_LEDGER_SMOKE_OK (DATABASE_URL not configured)")
-        raise SystemExit(0)
+        raise SystemExit("PUBLIC_FINANCIAL_LEDGER_SMOKE_SKIPPED: DATABASE_URL is required")
 
     ledger = Ledger(dsn)
     suffix = next(tempfile._get_candidate_names())
@@ -393,14 +444,16 @@ APP_SCAFFOLD = textwrap.dedent(
 
 
 FINANCIAL_LEDGER_METRICS = [
-    {"key": "api_business", "name": "API 与业务流程", "weight": 10},
-    {"key": "double_entry", "name": "双重记账与余额不变量", "weight": 18},
-    {"key": "transaction_idempotency", "name": "事务幂等与规范 JSON", "weight": 20},
-    {"key": "concurrency", "name": "多进程并发转账", "weight": 15},
-    {"key": "crash_outbox", "name": "强杀恢复与事务发件箱", "weight": 15},
-    {"key": "tenant_security", "name": "租户隔离与安全", "weight": 10},
-    {"key": "migration_audit", "name": "迁移与哈希审计", "weight": 5},
-    {"key": "performance", "name": "性能", "weight": 5},
+    {"key": "api_business", "name": "API 与业务流程", "weight": 13},
+    {"key": "double_entry", "name": "双重记账与余额不变量", "weight": 13},
+    {"key": "transaction_idempotency", "name": "事务幂等与规范 JSON", "weight": 13},
+    {"key": "boundary_contract", "name": "边界输入与跨租户引用", "weight": 8},
+    {"key": "concurrency", "name": "多进程并发转账", "weight": 14},
+    {"key": "crash_outbox", "name": "强杀恢复与事务发件箱", "weight": 14},
+    {"key": "tenant_security", "name": "租户隔离与安全", "weight": 6},
+    {"key": "migration_audit", "name": "迁移与哈希审计", "weight": 4},
+    {"key": "restart_recovery", "name": "PostgreSQL 强制重启恢复", "weight": 10},
+    {"key": "performance", "name": "性能", "weight": 3},
     {"key": "observability", "name": "可观测性", "weight": 2},
 ]
 
@@ -473,12 +526,44 @@ def build_financial_ledger_case(
         private_validator_ref=reference,
         metrics=FINANCIAL_LEDGER_METRICS,
         hard_caps=FINANCIAL_LEDGER_HARD_GATES,
+        metric_caps=[
+            {
+                "metric_key": "api_business",
+                "min_score": 100,
+                "max_score": 70,
+                "reason": "FastAPI 业务层是交付合同的一部分；缺失或不完整时最高 70 分",
+            },
+            {
+                "metric_key": "boundary_contract",
+                "min_score": 100,
+                "max_score": 85,
+                "reason": "金额类型、非有限 JSON 或跨租户原交易边界未全部守住",
+            },
+            {
+                "metric_key": "concurrency",
+                "min_score": 100,
+                "max_score": 80,
+                "reason": "并发转账或并发幂等没有完全线性化",
+            },
+            {
+                "metric_key": "crash_outbox",
+                "min_score": 100,
+                "max_score": 80,
+                "reason": "强杀恢复或事务发件箱未全部成立",
+            },
+            {
+                "metric_key": "restart_recovery",
+                "min_score": 100,
+                "max_score": 65,
+                "reason": "数据库强制重启后余额、幂等记录或审计链未完整恢复",
+            },
+        ],
         critical=True,
         critical_min_score=80,
     )
     return {
         "slug": "ultra.strong-consistency-financial-ledger-001",
-        "version": "1.0.0",
+        "version": "1.3.0",
         "category": "ultra-backend",
         "title": "BACKEND ULTRA · 强一致金融账本与事务发件箱",
         "description": (
@@ -493,9 +578,9 @@ def build_financial_ledger_case(
         ),
         "tools": ["filesystem", "search", "shell"],
         "limits": {
-            "max_steps": 80,
+            "max_steps": 160,
             "time_target_seconds": 2400,
-            "max_runtime_seconds": 2400,
+            "max_runtime_seconds": 7200,
             "validator_timeout_seconds": 600,
             "token_budget": 60000,
             "network": "disabled",
@@ -535,8 +620,14 @@ def build_financial_ledger_case(
             "tier": "ultra",
             "estimated_minutes": 40,
             "capability": "strong-consistency-financial-ledger-postgresql16",
+            "capability_dimension": "systems_backend",
             "private_validation": True,
-            "score_basis": "backend_quality",
+            "score_basis": "backend_quality_time",
+            "mastery_curve": "frontier_v1",
+            "quality_weight": 95,
+            "time_weight": 5,
+            "frontier_profile": "backend-mastery-gates-v3",
+            "runtime_policy": "40-minute-soft-target-120-minute-safety-cap",
             "deterministic_validation": True,
             "validation_protocol": "seed-committed-ready-kill",
             "scoring_breakdown": FINANCIAL_LEDGER_METRICS,

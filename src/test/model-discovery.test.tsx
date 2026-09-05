@@ -26,7 +26,7 @@ describe("model discovery picker", () => {
       const url = String(input);
       let value: unknown = [];
       if (url.endsWith("/health")) {
-        value = { name: "AgentBench Desktop", version: "5.3.0" };
+        value = { name: "AgentBench Desktop", version: "5.4.1" };
       } else if (url.endsWith("/models/discover")) {
         value = {
           source: "codex-cli",
@@ -49,12 +49,12 @@ describe("model discovery picker", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(<ModelsAndAgents />);
-    fireEvent.click(screen.getByRole("button", { name: /Agent 运行时/ }));
+    fireEvent.click(screen.getByRole("button", { name: /本机 Agent/ }));
     await screen.findByText("Codex CLI");
     fireEvent.click(screen.getByRole("button", { name: "升级 CLI" }));
     expect(screen.getByText("npm install -g @openai/codex")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "关闭" }));
-    fireEvent.click(screen.getByRole("button", { name: /模型目录/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^模型/ }));
     fireEvent.click(screen.getByRole("button", { name: "添加模型" }));
 
     await screen.findByRole("option", { name: /GPT-5.6-Sol/ });

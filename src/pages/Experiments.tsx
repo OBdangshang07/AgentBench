@@ -28,7 +28,7 @@ export default function Experiments() {
 
   if (creating) return <CreateExperiment initialSuiteId={initialSuiteId} onClose={closeCreator} onSaved={() => { closeCreator(); void state.refresh(); }} />;
 
-  return <div className="ab-view ab-experiment-index v53-experiments">
+  return <div className="ab-view ab-agent-document ab-experiment-index v53-experiments">
     <header className="ab-view-header"><div className="ab-view-title"><span className="ab-view-index">运行记录</span><div><h1>评测运行</h1><p>继续草稿、观察进行中的评测，或打开历史结果与评分证据。</p></div></div><div className="ab-header-meta"><button className="ab-run-button" type="button" onClick={openCreator}><Plus size={14} />新建评测</button></div></header>
     <div className="ab-experiment-history">
       <div className="ab-history-intro"><div><span>本机运行记录</span><h2>所有评测</h2><p>每次运行都会固定套件版本、参测对象、运行条件和评分方式。</p></div><FlaskConical size={38} /></div>
@@ -122,7 +122,7 @@ function CreateExperiment({ initialSuiteId = "", onClose, onSaved }: { initialSu
     } catch (value) { setError(value instanceof Error ? value.message : "创建失败"); setBusy(false); }
   }
 
-  return <div className="ab-view v53-eval-wizard">
+  return <div className="ab-view ab-agent-document v53-eval-wizard">
     <header className="ab-view-header"><div className="ab-view-title"><span className="ab-view-index">新建评测</span><div><h1>{wizardSteps[step - 1]}</h1><p>按顺序完成必要配置，高级运行条件已有安全默认值。</p></div></div><button className="ab-ghost-button" type="button" onClick={onClose}><ArrowLeft size={13} />返回运行记录</button></header>
     <nav className="v53-wizard-steps" aria-label="评测创建进度">{wizardSteps.map((label, index) => <button type="button" key={label} className={step === index + 1 ? "active" : step > index + 1 ? "done" : ""} disabled={index + 1 > step} onClick={() => setStep(index + 1)}><span>{step > index + 1 ? <Check size={13} /> : index + 1}</span><strong>{label}</strong></button>)}</nav>
 

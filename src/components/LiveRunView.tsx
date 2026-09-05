@@ -56,7 +56,11 @@ function displayEvent(event: RunEvent): DisplayEvent {
     return { tone: "activity", title: `调用 ${text(payload.tool, "Agent 工具")}`, detail: text(payload.detail, text(payload.status, "正在执行")) };
   }
   if (event.event_type === "live.heartbeat") {
-    return { tone: "activity", title: "Agent 会话保持活跃", detail: `${formatDuration(number(payload.elapsed_ms))} · ${number(payload.workspace_files)} 个工作区文件` };
+    const idle = number(payload.idle_ms);
+    if (payload.stale_signal === true) {
+      return { tone: "warning", title: "Agent 宿主长时间无新活动", detail: `已静默 ${formatDuration(idle)} · 进程仍在，工作区成果会被保留` };
+    }
+    return { tone: "activity", title: "Agent 会话保持活跃", detail: `${formatDuration(number(payload.elapsed_ms))} · 静默 ${formatDuration(idle)} · ${number(payload.workspace_files)} 个工作区文件` };
   }
   if (event.event_type === "live.phase") return { tone: "activity", title: text(payload.summary, "执行阶段已推进"), detail: text(payload.detail, text(payload.phase, `事件 #${event.seq}`)) };
   if (event.event_type === "live.activity") return { tone: "activity", title: text(payload.summary, "Agent 正在处理公开任务"), detail: text(payload.detail, text(payload.status, `事件 #${event.seq}`)) };

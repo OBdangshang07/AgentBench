@@ -23,7 +23,7 @@ from agentbench.ultra_queue_v1 import (
 
 TEST_PRIVATE_REF = {
     "bundle_id": "backend-ultra-extreme",
-    "version": "1.0.2",
+    "version": "1.3.0",
     "validator_id": "distributed-task-queue",
     "manifest_sha256": "a" * 64,
 }
@@ -33,14 +33,19 @@ def test_queue_builder_contains_only_public_material_and_external_validator_ref(
     case = build_queue_ultra_case(TEST_PRIVATE_REF)
     assert build_queue_ultra_catalog(TEST_PRIVATE_REF) == [case]
     assert case["slug"] == "ultra.distributed-task-queue-001"
-    assert case["version"] == "1.0.1"
+    assert case["version"] == "1.3.0"
     assert case["category"] == "ultra-backend"
     assert case["metadata"]["estimated_minutes"] == 40
-    assert case["metadata"]["score_basis"] == "backend_quality"
+    assert case["metadata"]["score_basis"] == "backend_quality_time"
+    assert case["metadata"]["quality_weight"] == 95
+    assert case["metadata"]["time_weight"] == 5
+    assert case["metadata"]["frontier_profile"] == "backend-mastery-gates-v3"
+    assert case["metadata"]["mastery_curve"] == "frontier_v1"
     assert case["attempt_policy"]["max_attempts"] == 1
     assert "multipliers" not in case["attempt_policy"]
     assert "hints" not in case["attempt_policy"]
     assert case["limits"]["time_target_seconds"] == 2400
+    assert case["limits"]["max_runtime_seconds"] == 7200
     assert case["limits"]["token_budget"] == 60000
     assert case["limits"]["validator_cpus"] == 4
     assert case["limits"]["validator_memory"] == "8g"
@@ -80,6 +85,13 @@ def test_queue_builder_contains_only_public_material_and_external_validator_ref(
     }
     assert config["critical"] is True
     assert config["critical_min_score"] == 80
+    assert {item["metric_key"] for item in config["metric_caps"]} == {
+        "api_persistence_state_machine",
+        "lease_fencing",
+        "adversarial_semantics",
+        "concurrency_crash_recovery",
+        "postgres_restart_recovery",
+    }
     assert command["weight"] == 100
     assert "demo_actions" not in case["metadata"]
     assert "demo_response" not in case["metadata"]
@@ -118,7 +130,9 @@ def test_queue_public_contract_mentions_all_required_backend_properties():
         "api_persistence_state_machine",
         "lease_fencing",
         "idempotency_retry_dlq",
+        "adversarial_semantics",
         "concurrency_crash_recovery",
+        "postgres_restart_recovery",
         "dependencies_fairness_backpressure",
         "tenant_security",
         "performance_resources",
@@ -168,7 +182,7 @@ def test_private_protection_matches_the_public_edit_contract():
     ).hexdigest()
 
 
-def test_public_smoke_accepts_the_supplied_scaffold(tmp_path: Path):
+def test_public_smoke_rejects_the_unimplemented_scaffold(tmp_path: Path):
     (tmp_path / "task_queue.py").write_text(QUEUE_TASK_QUEUE_SCAFFOLD, encoding="utf-8")
     (tmp_path / "app.py").write_text(QUEUE_APP_SCAFFOLD, encoding="utf-8")
     (tmp_path / "schema.sql").write_text(QUEUE_SCHEMA_SQL, encoding="utf-8")
@@ -182,5 +196,5 @@ def test_public_smoke_accepts_the_supplied_scaffold(tmp_path: Path):
         timeout=30,
         check=False,
     )
-    assert result.returncode == 0, result.stderr
-    assert "PUBLIC_QUEUE_SMOKE_OK" in result.stdout
+    assert result.returncode != 0
+    assert "AssertionError" in result.stderr

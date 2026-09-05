@@ -14,7 +14,7 @@ describe("benchmark reasoning policy", () => {
     const bodies: Record<string, unknown>[] = [];
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.3.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.4.1" });
       if (url.endsWith("/models")) return json([{ id: "model-1", name: "DeepSeek V4 Pro", enabled: true }]);
       if (url.endsWith("/runners")) return json([{ id: "runner-1", name: "DeepSeek Harness", runner_type: "deepseek_harness", enabled: true, capability: { installed: true }, adapter: { default_agent_mode: "standard", agent_modes: [{ id: "standard", name: "标准模式", description: "完整工具集", source: "system", tools_mode: "native", experimental: false, available: true }, { id: "anchored-standard", name: "Anchored Standard", description: "先锚定再展开", source: "user", tools_mode: "native", experimental: true, available: true }], reasoning_control: { supported: true, verified: true, maximum: "max", note: "Harness 实际使用 MAX 档" } } }]);
       if (url.endsWith("/suites")) return json([{ id: "ultra", name: "Ultra 极限挑战", version: "3", case_count: 2, difficulty_min: 6, difficulty_max: 6 }]);

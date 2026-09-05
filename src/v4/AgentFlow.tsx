@@ -221,6 +221,8 @@ export default function AgentFlow() {
   const active = selected?.status === "running" || selected?.status === "waiting_approval" || selected?.status === "testing" || selected?.status === "cancelling";
   const selectedNode = draft?.nodes.find((node) => node.id === selectedNodeId);
   const createRequested = searchParams.get("new") === "1";
+  const requestedFlowId = searchParams.get("flow") ?? "";
+  const requestedProjectId = searchParams.get("project") ?? "";
 
   useEffect(() => {
     window.localStorage.setItem("agentbench.flow.library", libraryOpen ? "open" : "closed");
@@ -231,8 +233,21 @@ export default function AgentFlow() {
   }, [inspectorOpen]);
 
   useEffect(() => {
-    if (!selectedId && flows?.length) setSelectedId(flows[0].id);
-  }, [flows, selectedId]);
+    if (!flows?.length) return;
+    if (requestedFlowId) {
+      if (flows.some((flow) => flow.id === requestedFlowId)) {
+        if (selectedId !== requestedFlowId) setSelectedId(requestedFlowId);
+        return;
+      }
+      setError("链接中的 Flow 已不存在，已为你打开可用工作流。");
+      const next = new URLSearchParams(searchParams);
+      next.delete("flow");
+      setSearchParams(next, { replace: true });
+    }
+    if (!selectedId) {
+      setSelectedId(flows.find((flow) => flow.project_id === requestedProjectId)?.id ?? flows[0].id);
+    }
+  }, [flows, requestedFlowId, requestedProjectId, selectedId]);
 
   useEffect(() => {
     if (!createRequested || !projects) return;
@@ -306,6 +321,7 @@ export default function AgentFlow() {
         }),
       });
       setSelectedId(flow.id);
+      setSearchParams({ flow: flow.id }, { replace: true });
       loadedFlowId.current = flow.id;
       setDraft(draftFromFlow(flow));
       setSelectedNodeId(flow.nodes[0]?.id);
@@ -593,6 +609,7 @@ export default function AgentFlow() {
     setSelectedNodeId(undefined);
     setInspectorTab("edit");
     setSelectedId(flowId);
+    setSearchParams({ flow: flowId }, { replace: true });
   }
 
   function addNode(type: NodeType) {

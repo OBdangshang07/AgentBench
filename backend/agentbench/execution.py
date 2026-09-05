@@ -69,11 +69,38 @@ class Workspace:
         if base.is_file():
             return [str(base.relative_to(self.root)).replace("\\", "/")]
         files: list[str] = []
-        for item in base.rglob("*"):
-            if item.is_file():
-                files.append(str(item.relative_to(self.root)).replace("\\", "/"))
+        is_junction = getattr(os.path, "isjunction", lambda _path: False)
+        for current, directories, filenames in os.walk(base, topdown=True, followlinks=False):
+            current_path = Path(current)
+            retained_directories: list[str] = []
+            for name in directories:
+                target = current_path / name
+                try:
+                    resolved = target.resolve()
+                except OSError:
+                    continue
+                # Native runners mount large dependency trees into the workspace
+                # with symlinks or Windows junctions.  They are tools, not model
+                # artifacts, and resolving them would escape the authorized root.
+                if (
+                    target.is_symlink()
+                    or is_junction(target)
+                    or not resolved.is_relative_to(self.root)
+                ):
+                    continue
+                retained_directories.append(name)
+            directories[:] = retained_directories
+            for name in filenames:
+                target = current_path / name
+                try:
+                    resolved = target.resolve()
+                except OSError:
+                    continue
+                if target.is_symlink() or not resolved.is_relative_to(self.root):
+                    continue
+                files.append(str(target.relative_to(self.root)).replace("\\", "/"))
                 if len(files) >= max_items:
-                    break
+                    return sorted(files)
         return sorted(files)
 
     def search_text(

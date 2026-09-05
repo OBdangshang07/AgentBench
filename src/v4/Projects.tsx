@@ -111,7 +111,7 @@ export default function Projects() {
       setModalOpen(false);
       await refresh();
       ux.notify({ kind: "success", title: "项目已添加", message: "下一步选择 Agent 和模型，然后输入任务。" });
-      navigate("/studio?new=1");
+      navigate(`/studio?new=1&project=${encodeURIComponent(created.id)}`);
     } catch (value) {
       setFormError(value instanceof Error ? value.message : "无法创建项目");
     } finally {
@@ -145,7 +145,7 @@ export default function Projects() {
 
   async function startSession(project: Project) {
     ux.setSelectedProjectId(project.id);
-    navigate("/studio?new=1");
+    navigate(`/studio?new=1&project=${encodeURIComponent(project.id)}`);
   }
 
   async function togglePin(project: Project) {
@@ -176,30 +176,29 @@ export default function Projects() {
   }
 
   return (
-    <div className="v4-page">
+    <div className="v4-page ab-projects-screen">
       <header className="v4-page-head">
         <div><span>本地工作区</span><h1>项目</h1><p>每个项目对应一个明确授权的目录，也是会话、任务和自动化的工作边界。</p></div>
         <div><button className="v4-button primary" type="button" onClick={openCreate}><Plus size={16} />添加项目</button></div>
       </header>
 
-      <section className="v4-panel v4-filter-bar">
+      <section className="v4-filter-bar ab-project-toolbar">
         <label><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索项目、目录或分支" /></label>
         <div>{(["all", "recent", "running", "archived"] as const).map((value) => <button key={value} className={filter === value ? "active" : ""} type="button" onClick={() => setFilter(value)}>{value === "all" ? "全部" : value === "recent" ? "最近" : value === "running" ? "运行中" : "已归档"}</button>)}</div>
         <span>{visible.length} 个已授权目录</span>
       </section>
 
       {error && <div className="v4-error">{error}<button type="button" onClick={() => void refresh()}>重试</button></div>}
-      <section className="v4-project-grid">
+      <section className="v4-project-grid ab-project-list">
         {visible.map((project) => (
-          <article key={project.id} className={`v4-project-card v4-panel${project.pinned ? " featured" : ""}${project.archived ? " archived" : ""}`}>
+          <article key={project.id} className={`v4-project-card ab-project-row${project.pinned ? " featured" : ""}${project.archived ? " archived" : ""}`}>
             <header><span className="v4-project-logo">{project.name.slice(0, 2).toUpperCase()}</span><div><button className="v5-project-name" type="button" onClick={() => navigate(`/projects/${project.id}`)}>{project.name}</button><code>{project.root_path}</code></div><button type="button" title={project.pinned ? "取消置顶" : "置顶"} onClick={() => void togglePin(project)}>{project.pinned ? <Pin size={16} fill="currentColor" /> : <MoreHorizontal size={17} />}</button></header>
-            <p>{project.description || "本地 Agent 工作区，所有文件操作都限制在已授权项目根目录内。"}</p>
-            <div className="v4-project-tags"><span><ShieldCheck size={12} />{project.permission_profile}</span>{project.branch && <span><GitBranch size={12} />{project.branch}</span>}{project.active_sessions > 0 && <span className="live"><i />{project.active_sessions} RUNNING</span>}</div>
-            <dl><div><dt>{project.session_count}</dt><dd>会话</dd></div><div><dt>{project.active_sessions}</dt><dd>活跃 Agent</dd></div><div><dt>{project.pending_approvals}</dt><dd>待审批</dd></div></dl>
-            <footer><span><GitBranch size={13} />{project.branch || "local workspace"}</span><div><button type="button" title="项目详情" onClick={() => navigate(`/projects/${project.id}`)}><ExternalLink size={15} /></button>{project.archived ? <button type="button" title="恢复项目" onClick={() => void restore(project)}><RotateCcw size={15} />恢复</button> : <><button type="button" title="归档项目" onClick={() => void archive(project)}><Archive size={15} /></button><button className="primary" type="button" onClick={() => void startSession(project)}><MessageSquarePlus size={15} />Agent 会话</button></>}</div></footer>
+            <div className="ab-project-access"><span><ShieldCheck size={12} />{project.permission_profile}</span><span><GitBranch size={12} />{project.branch || "local workspace"}</span>{project.active_sessions > 0 && <span className="live"><i />{project.active_sessions} 个运行中</span>}</div>
+            <dl><div><dt>{project.session_count}</dt><dd>会话</dd></div><div><dt>{project.active_sessions}</dt><dd>活跃</dd></div><div><dt>{project.pending_approvals}</dt><dd>待审批</dd></div></dl>
+            <footer><button type="button" title="项目详情" onClick={() => navigate(`/projects/${project.id}`)}><ExternalLink size={15} />详情</button>{project.archived ? <button type="button" title="恢复项目" onClick={() => void restore(project)}><RotateCcw size={15} />恢复</button> : <><button type="button" title="归档项目" onClick={() => void archive(project)}><Archive size={15} /></button><button className="primary" type="button" onClick={() => void startSession(project)}><MessageSquarePlus size={15} />开始任务</button></>}</footer>
           </article>
         ))}
-        <button className="v4-add-project v4-panel" type="button" onClick={openCreate}><span><FolderGit2 size={24} /></span><strong>添加本地项目</strong><small>授权一个目录供 Agent 操作</small></button>
+        <button className="v4-add-project ab-project-add-row" type="button" onClick={openCreate}><span><FolderGit2 size={18} /></span><strong>添加本地项目</strong><small>授权一个目录供 Agent 操作</small><Plus size={15} /></button>
       </section>
       {!loading && !visible.length && projects?.length ? <div className="v4-empty"><Search size={26} /><strong>没有匹配项目</strong><span>清除搜索词或切换筛选条件</span></div> : null}
 

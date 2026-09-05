@@ -8,7 +8,9 @@ import shutil
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
+from pathlib import Path
 from typing import Any
 
 import jsonschema
@@ -82,17 +84,118 @@ def _extract_structured_answer(
     }
 
 
-def _normalize_symbolic_candidate(candidate: Any) -> str:
+def _normalize_symbolic_candidate(
+    candidate: Any, *, prefer_scenario_scalar: bool = False
+) -> str:
     """Normalize common human math notation before strict symbolic comparison."""
 
-    text = str(candidate).strip().strip("`$")
+    text = re.sub(r"[\x00-\x1f\x7f]", "", str(candidate)).strip().strip("`$")
+    text = text.translate(
+        str.maketrans(
+            {
+                "（": "(",
+                "）": ")",
+                "［": "[",
+                "］": "]",
+                "｛": "{",
+                "｝": "}",
+                "₀": "0",
+                "₁": "1",
+                "₂": "2",
+                "₃": "3",
+                "₄": "4",
+                "₅": "5",
+                "₆": "6",
+                "₇": "7",
+                "₈": "8",
+                "₉": "9",
+            }
+        )
+    )
+    # A scalar result field may include both the general formula and a later,
+    # explicitly labelled specialization, for example
+    # ``Phi(H)=...; 给定数据 H=3 时为 -90pi-18sqrt(3)pi``.  When the validator
+    # declares no variables, the specialization is the value being anchored.
+    # Requiring both the scenario marker and ``时为``/``结果为`` keeps this
+    # narrow: an ordinary formula field or an incidental equality is untouched.
+    scenario_scalars: list[re.Match[str]] = []
+    if prefer_scenario_scalar:
+        scenario_scalars.extend(
+            re.finditer(
+                r"(?:给定(?:数据)?|本次(?:数据)?|本次数值)"
+                r"[^；;。\r\n]{0,180}?"
+                r"(?:时|结果|数值(?:核验)?|通量)\s*(?:为|=)\s*"
+                r"([^；;。\r\n]+)",
+                text,
+            )
+        )
+        # Hidden-parameter questions often use a result field for both the
+        # general classification and a requested numerical specialization:
+        # ``...; α=3 时 E[S]=100``.  Match only that explicit parameter/time
+        # structure in a validator-declared constant field; a generic equality
+        # or a variable-valued formula cannot take this path.
+        scenario_scalars.extend(
+            re.finditer(
+                r"(?:α|alpha)\s*=\s*[+-]?\d+(?:\.\d+)?\s*时"
+                r"[^；;。\r\n]{0,120}?(?:为|=)\s*([^；;。\r\n]+)",
+                text,
+                flags=re.I,
+            )
+        )
+    if scenario_scalars:
+        text = max(scenario_scalars, key=lambda match: match.start()).group(1).strip()
+
+    # A structured coefficient field may explain a vector using an auxiliary
+    # scalar, for example ``β=c(1,1,1)^T，其中 c=-x-y+2z``.  In that narrow
+    # presentation, the explicitly introduced scalar is the field value.  Greek
+    # coordinate/vector assignments are intentionally not matched here.
+    scalar_definitions = list(
+        re.finditer(
+            r"(?:其中|式中|where)\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
+            r"([^，,；;。\r\n]+)",
+            text,
+            flags=re.I,
+        )
+    )
+    if scenario_scalars:
+        pass
+    elif scalar_definitions:
+        text = scalar_definitions[-1].group(2).strip()
+    else:
+        # A structured scalar field may lead with its ordinary mathematical
+        # label and then append a proof summary, e.g. ``K=(pi-2log(2))/10；...``.
+        # The labelled value before the first sentence delimiter is
+        # unambiguous; the appended reasoning is evaluated by the rubric.
+        leading_assignment = re.match(
+            r"\s*[A-Za-z_][A-Za-z0-9_]*(?:\s*\([^()]*\))?\s*=\s*"
+            r"([^；;。\r\n]+)",
+            text,
+        )
+        if leading_assignment:
+            text = leading_assignment.group(1).strip()
+    text = text.replace("\\left", "").replace("\\right", "")
+    text = re.sub(r"\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}", r"((\1)/(\2))", text)
+    # Models frequently emit the compact LaTeX form ``\frac12``.  It is
+    # unambiguous for single-token numerator/denominator and should not turn a
+    # correct final answer into an anchor failure.
+    text = re.sub(r"\\frac\s*([0-9A-Za-z])\s*([0-9A-Za-z])", r"((\1)/(\2))", text)
+    text = re.sub(r"\\(?:quad|qquad|,|;|!|:)\s*", " ", text)
     text = text.replace("\\cdot", "*").replace("\\times", "*")
-    text = text.replace("\\pi", "pi").replace("\\ln", "ln")
+    text = text.replace("\\pi", "pi").replace("\\ln", "ln").replace("\\log", "log")
     text = re.sub(r"\\sqrt\{([^{}]+)\}", r"sqrt(\1)", text)
+    # Expand the Unicode radical before translating adjacent constants such as
+    # ``π``.  Otherwise ``√3π`` first becomes ``√3pi`` and the radical's
+    # token matcher incorrectly swallows ``pi`` as part of its argument.
+    text = re.sub(r"√\s*\(([^()]*)\)", r"sqrt(\1)", text)
+    text = re.sub(r"√\s*([0-9]+(?:\.[0-9]+)?)", r"sqrt(\1)", text)
+    text = re.sub(r"√\s*([A-Za-z_][A-Za-z0-9_]*)", r"sqrt(\1)", text)
     text = text.translate(
         str.maketrans(
             {
                 "π": "pi",
+                "λ": "lambda",
+                "α": "alpha",
+                "β": "beta",
                 "·": "*",
                 "×": "*",
                 "−": "-",
@@ -103,8 +206,11 @@ def _normalize_symbolic_candidate(candidate: Any) -> str:
             }
         )
     )
-    text = re.sub(r"√\s*\(([^()]*)\)", r"sqrt(\1)", text)
-    text = re.sub(r"√\s*([A-Za-z0-9]+)", r"sqrt(\1)", text)
+    # ``18π√3`` is conventional implicit multiplication.  After Unicode
+    # normalization it becomes ``18pisqrt(3)``; split the two known constants
+    # before the strict name allow-list so they are not mistaken for an unknown
+    # identifier named ``pisqrt``.
+    text = re.sub(r"pi(?=sqrt\()", "pi*", text)
     # Chinese exam answers commonly omit both the multiplication sign and
     # parentheses around a one-token function argument (for example
     # ``2sin1`` or ``cos pi``). SymPy otherwise reads ``sin1`` as an unknown
@@ -114,12 +220,62 @@ def _normalize_symbolic_candidate(candidate: Any) -> str:
         r"\1(\2)",
         text,
     )
-    # A final-answer field often contains a label or the complete equation.  Only
-    # the right-hand side is the candidate expression being compared.
-    if "=" in text:
-        text = text.rsplit("=", 1)[1]
+    # Structured final-answer fields still tend to carry a short explanatory
+    # suffix (for example ``-x-y+2z，其中 α=(x,y,z)^T``).  The expression
+    # anchor checks the field value, while the rubric checks that explanation.
+    text = re.split(r"(?:，|,|；|;)\s*(?:其中|式中|where)", text, maxsplit=1)[0]
+    # Remove an explicitly marked parenthetical equivalent/approximation before
+    # looking for a labelled equation.  Otherwise a value such as
+    # ``2（即 M~Poisson(2)，λ_M=8×1/4=2）`` is incorrectly reduced to the last
+    # equality inside the annotation (``2）``) instead of the asserted value.
+    # The marker requirement keeps ordinary function parentheses untouched.
+    text = re.split(
+        r"\s*[（(]\s*(?:即(?:为)?|亦即|约(?:为)?|也就是|i\.?\s*e\.?|approximately|approx\.?)\s*",
+        text,
+        maxsplit=1,
+        flags=re.I,
+    )[0]
     if "≈" in text:
         text = text.split("≈", 1)[0]
+    # Pull out an explicitly asserted non-zero symbolic constraint before the
+    # generic equation split.  Long explanations may contain later equalities;
+    # choosing the constraint with the richest variable set avoids replacing the
+    # answer with a trailing auxiliary ``c = ...`` clause.
+    nonzero_candidates = re.findall(
+        r"(?<![A-Za-z0-9_])"
+        r"([+-]?\s*(?:\d+(?:\.\d+)?\s*\*?\s*)?[A-Za-z_][A-Za-z0-9_]*"
+        r"(?:\s*[+\-]\s*(?:\d+(?:\.\d+)?\s*\*?\s*)?"
+        r"[A-Za-z_][A-Za-z0-9_]*)*)\s*(?:≠|!=)\s*0",
+        text,
+    )
+    if nonzero_candidates:
+        text = max(
+            nonzero_candidates,
+            key=lambda item: (len(set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", item))), len(item)),
+        ).strip()
+    # A final-answer field often contains a label or the complete equation.  Only
+    # the right-hand side is the candidate expression being compared.  This runs
+    # after suffix removal so an explanatory ``α=(...)`` does not win the split.
+    elif "=" in text:
+        text = text.rsplit("=", 1)[1]
+    # A non-zero constraint is represented by its left-hand expression in the
+    # answer anchor.  Accept the ordinary prose wrappers used in Chinese exam
+    # answers without treating ``R`` or ``且`` as symbolic variables.
+    nonzero = re.search(
+        r"(?:^|[，,；;]\s*)(?:且\s*)?([^，,；;]+?)\s*(?:≠|!=)\s*0"
+        r"(?=\s|$|[（(])",
+        text,
+    )
+    if nonzero and not nonzero_candidates:
+        text = nonzero.group(1).strip()
+    # A function answer may append its domain, e.g. ``f(u)=...\quad(u>0)``.
+    # The domain is graded by the rubric; the deterministic expression anchor
+    # compares only the function body.
+    text = re.sub(
+        r"\s*[,;，；]?\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*(?:>=|<=|>|<|≥|≤)\s*[^()]+\)\s*$",
+        "",
+        text,
+    )
     return text.strip().replace("^", "**")
 
 
@@ -141,6 +297,37 @@ class ScoreResult:
     status: str
     components: list[ValidationResult]
     dimensions: list[ValidationResult]
+
+
+def _apply_mastery_curve(score: float, curve: str) -> float:
+    """Map raw coverage to a transparent frontier-mastery scale.
+
+    Frontier cases contain many independently necessary obligations.  A plain
+    arithmetic mean makes several material gaps look like an 80+ result.  This
+    monotone curve preserves 0 and 100, but reserves the top band for nearly
+    complete hidden-test coverage.  It never changes validator evidence or
+    turns an incorrect result into a correct one.
+    """
+
+    if curve != "frontier_v1":
+        return score
+    points = (
+        (0.0, 0.0),
+        (40.0, 24.0),
+        (60.0, 42.0),
+        (70.0, 54.0),
+        (80.0, 67.0),
+        (90.0, 80.0),
+        (95.0, 89.0),
+        (98.0, 95.0),
+        (100.0, 100.0),
+    )
+    value = min(100.0, max(0.0, float(score)))
+    for (left_x, left_y), (right_x, right_y) in zip(points, points[1:], strict=False):
+        if value <= right_x:
+            ratio = (value - left_x) / (right_x - left_x)
+            return left_y + ratio * (right_y - left_y)
+    return 100.0
 
 
 class ScoringEngine:
@@ -222,8 +409,19 @@ class ScoringEngine:
             results.extend(produced)
 
         score_basis = str((definition.get("metadata") or {}).get("score_basis") or "balanced")
-        quality_only = score_basis == "backend_quality"
-        quality_weight = 100.0 if quality_only else QUALITY_WEIGHT
+        quality_only = score_basis in {"backend_quality", "quality_only"}
+        quality_time = score_basis == "backend_quality_time"
+        metadata = definition.get("metadata") or {}
+        quality_weight = (
+            max(0.0, min(100.0, float(metadata.get("quality_weight", 90.0))))
+            if quality_time
+            else 100.0 if quality_only else QUALITY_WEIGHT
+        )
+        time_weight = (
+            max(0.0, 100.0 - quality_weight)
+            if quality_time
+            else 0.0 if quality_only else TIME_WEIGHT
+        )
         declared_weight = sum(item.weight for item in results)
         if declared_weight:
             quality_scale = quality_weight / declared_weight
@@ -250,7 +448,7 @@ class ScoringEngine:
         results.append(
             ValidationResult(
                 "time_efficiency",
-                0.0 if quality_only else TIME_WEIGHT,
+                time_weight,
                 round(time_score, 2),
                 "passed",
                 {
@@ -272,7 +470,7 @@ class ScoringEngine:
         results.append(
             ValidationResult(
                 "step_efficiency",
-                0.0 if quality_only else STEP_WEIGHT,
+                0.0 if (quality_only or quality_time) else STEP_WEIGHT,
                 round(step_score, 2),
                 "passed",
                 {
@@ -289,18 +487,25 @@ class ScoringEngine:
         total_tokens = max(0, tokens_input) + max(0, tokens_output)
         tokens_reported = total_tokens > 0 and token_budget > 0
         if tokens_reported:
-            token_ratio = min(1.0, total_tokens / token_budget)
+            # Keep the real ratio for evidence.  Clamping at 100% made a modest
+            # overrun and a multi-budget runaway indistinguishable in reports.
+            token_ratio = total_tokens / token_budget
             if token_ratio <= 0.25:
                 token_score = 100.0
+            elif token_ratio <= 1.0:
+                token_score = 100.0 - ((token_ratio - 0.25) / 0.75) * 90.0
             else:
-                token_score = max(10.0, 100.0 - ((token_ratio - 0.25) / 0.75) * 90.0)
+                # Token budgets remain a soft target, like time targets.  The
+                # final one-percent weight is deliberately small, but exceeding
+                # the declared budget must still be explicit and may reach zero.
+                token_score = max(0.0, 10.0 - (token_ratio - 1.0) * 40.0)
         else:
             token_ratio = None
             token_score = 50.0
         results.append(
             ValidationResult(
                 "token_efficiency",
-                0.0 if quality_only else TOKEN_WEIGHT,
+                0.0 if (quality_only or quality_time) else TOKEN_WEIGHT,
                 round(token_score, 2),
                 "passed" if tokens_reported else "partial",
                 {
@@ -311,10 +516,18 @@ class ScoringEngine:
                     "budget_used_percent": round(token_ratio * 100, 2)
                     if token_ratio is not None
                     else None,
-                    "reported": tokens_reported,
-                    "note": None
+                    "budget_exceeded": bool(token_ratio is not None and token_ratio > 1.0),
+                    "over_budget_tokens": max(0, total_tokens - token_budget)
                     if tokens_reported
-                    else "Token 未上报或任务未声明预算，使用中性分",
+                    else None,
+                    "reported": tokens_reported,
+                    "note": (
+                        "超过 Token 软预算；继续保留结果并按超额比例扣分"
+                        if token_ratio is not None and token_ratio > 1.0
+                        else None
+                        if tokens_reported
+                        else "Token 未上报或任务未声明预算，使用中性分"
+                    ),
                     "scoring_profile": scoring_profile,
                 },
             )
@@ -348,6 +561,25 @@ class ScoringEngine:
                         "reason": str(raw_cap.get("reason") or "触发严重错误评分上限"),
                     }
                 )
+        raw_total = round(total, 2)
+        mastery_curve = str(metadata.get("mastery_curve") or "")
+        curved_total = _apply_mastery_curve(total, mastery_curve)
+        if mastery_curve:
+            total = curved_total
+            results.append(
+                ValidationResult(
+                    "mastery_curve",
+                    0.0,
+                    round(total, 2),
+                    "passed" if total == 100 else "partial",
+                    {
+                        "curve": mastery_curve,
+                        "raw_quality_score": raw_total,
+                        "calibrated_score": round(total, 2),
+                        "note": "前沿掌握度曲线保留满分，仅压缩存在实质缺口的高分段",
+                    },
+                )
+            )
         score_before_cap = round(total, 2)
         if applied_caps:
             total = min(total, min(item["max_score"] for item in applied_caps))
@@ -366,7 +598,7 @@ class ScoringEngine:
                 )
             )
         dimensions = self._dimensions(results, scoring_profile)
-        if applied_caps:
+        if applied_caps or mastery_curve:
             for dimension in dimensions:
                 if dimension.validator_type != "objective_quality":
                     continue
@@ -375,6 +607,8 @@ class ScoringEngine:
                     "score_before_cap": dimension.score,
                     "applied_score_cap": round(total, 2),
                     "hard_failures": applied_caps,
+                    "mastery_curve": mastery_curve or None,
+                    "raw_quality_score": raw_total,
                 }
                 dimension.score = min(dimension.score, round(total, 2))
                 dimension.status = "partial" if dimension.score > 0 else "failed"
@@ -489,6 +723,10 @@ class ScoringEngine:
                 return self._boolean(
                     kind, weight, not matches, {"patterns": patterns, "matches": matches}
                 )
+            if kind == "research_claims":
+                return self._validate_research_claims(
+                    weight, config, workspace, definition
+                )
             if kind == "command":
                 limits = definition.get("limits") or {}
                 result, private_provenance = self._command_result(workspace, config, limits)
@@ -520,6 +758,280 @@ class ScoringEngine:
         ) as exc:
             return ValidationResult(kind, weight, 0, "failed", {"error": str(exc)})
 
+    def _validate_research_claims(
+        self,
+        weight: float,
+        config: dict[str, Any],
+        workspace: Workspace,
+        definition: dict[str, Any],
+    ) -> ValidationResult:
+        """Deterministically audit research citations and copied numeric facts.
+
+        The semantic judge still grades reasoning and decision quality.  This
+        validator covers the parts that should not depend on judge generosity:
+        JSON shape, citation existence, page targeting, and numeric fidelity for
+        claims explicitly labelled as facts.
+        """
+
+        report_path = str(config.get("report_path") or "report.md")
+        claims_path = str(config.get("claims_path") or "claims.json")
+        min_claims = max(1, int(config.get("min_claims", 12)))
+        citation_pattern = re.compile(r"S\d+:p\d+")
+        number_pattern = re.compile(
+            r"(?<![A-Za-z0-9])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
+        )
+        percent_pattern = re.compile(
+            r"(?<![A-Za-z0-9])([-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)\s*%"
+        )
+
+        def normalized_numbers(text: str) -> list[str]:
+            normalized: list[str] = []
+            for match in number_pattern.finditer(text):
+                raw_number = match.group(0).replace(",", "")
+                try:
+                    value = Decimal(raw_number)
+                    normalized.append(
+                        format(value.quantize(Decimal(1)), "f")
+                        if value == value.to_integral_value()
+                        else format(value.normalize(), "f")
+                    )
+                except InvalidOperation:
+                    normalized.append(raw_number)
+            return normalized
+
+        source_pages: dict[str, str] = {}
+        for path, content in (definition.get("initial_files") or {}).items():
+            source_match = re.match(r"^(S\d+)", Path(str(path)).name, flags=re.I)
+            if not source_match or not isinstance(content, str) or content.startswith("base64:"):
+                continue
+            source_id = source_match.group(1).upper()
+            markers = list(re.finditer(r"\[p(\d+)\]", content, flags=re.I))
+            # A source's title/date/version are document metadata and apply to
+            # every cited page.  Without this prefix, a faithful claim such as
+            # ``董事会材料（2026-06-18）... [S1:p1]`` is incorrectly treated as
+            # inventing the date because the date appears before the first [p1].
+            document_metadata = content[: markers[0].start()].strip() if markers else ""
+            for index, marker in enumerate(markers):
+                start = marker.end()
+                end = markers[index + 1].start() if index + 1 < len(markers) else len(content)
+                page_text = content[start:end].strip()
+                source_pages[f"{source_id}:P{marker.group(1)}"] = "\n".join(
+                    part for part in (document_metadata, page_text) if part
+                )
+
+        try:
+            report = workspace.read_file(report_path)
+            payload = json.loads(workspace.read_file(claims_path).lstrip("\ufeff"))
+            # The public task contract asks for a ``claims.json`` list of claim
+            # records but does not require an object wrapper.  Accept both the
+            # direct array form and the documented ``{"claims": [...]}`` form
+            # so a valid, unambiguous submission is not rejected by a hidden
+            # serialization preference.
+            claims = payload if isinstance(payload, list) else (
+                payload.get("claims") if isinstance(payload, dict) else None
+            )
+            if not isinstance(claims, list):
+                raise ValueError("claims.json must contain a claims array")
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return self._graded(
+                "research_claims",
+                weight,
+                0.0,
+                {
+                    "error": str(exc),
+                    "report_path": report_path,
+                    "claims_path": claims_path,
+                    "score_caps": [
+                        {
+                            "key": "research_claims_unreadable",
+                            "max_score": 45,
+                            "reason": "研究主张清单缺失或无法解析",
+                        }
+                    ],
+                },
+            )
+
+        # ``type`` and ``confidence`` are required by the public contract, but
+        # that contract intentionally does not prescribe an English-only enum.
+        # Keep the deterministic check language-neutral and leave semantic
+        # appropriateness to the rubric judges.  Only explicit fact labels are
+        # subjected to copied-number fidelity checks below.
+        fact_types = {"fact", "known_fact", "known fact", "事实", "已知事实"}
+        schema_valid = 0
+        total_citations = 0
+        invalid_citations: list[dict[str, Any]] = []
+        numeric_mismatches: list[dict[str, Any]] = []
+        derived_numeric_claims: list[dict[str, Any]] = []
+        cited_sources: set[str] = set()
+        fact_claims = 0
+        for index, item in enumerate(claims):
+            if not isinstance(item, dict):
+                continue
+            claim = str(item.get("claim") or "").strip()
+            citations = item.get("citations")
+            claim_type = str(item.get("type") or "").strip().lower()
+            confidence = str(item.get("confidence") or "").strip().lower()
+            if (
+                claim
+                and isinstance(citations, list)
+                and all(isinstance(value, str) for value in citations)
+                and bool(claim_type)
+                and bool(confidence)
+            ):
+                schema_valid += 1
+            else:
+                continue
+            # The task's public example uses Markdown-style ``[S2:p1]`` while
+            # JSON submissions also commonly store the bare ``S2:p1`` token.
+            # They identify the same page and must be audited identically.
+            normalized_citations = [
+                str(value).strip().strip("[]").strip().upper() for value in citations
+            ]
+            total_citations += len(normalized_citations)
+            for citation in normalized_citations:
+                if citation not in source_pages:
+                    invalid_citations.append({"claim_index": index, "citation": citation})
+                else:
+                    cited_sources.add(citation.split(":", 1)[0])
+            if claim_type not in fact_types:
+                continue
+            fact_claims += 1
+            claim_numbers = normalized_numbers(claim)
+            if not claim_numbers:
+                continue
+            cited_text = "\n".join(
+                source_pages[citation]
+                for citation in normalized_citations
+                if citation in source_pages
+            )
+            source_numbers = set(normalized_numbers(cited_text))
+            missing = [value for value in claim_numbers if value not in source_numbers]
+            if missing:
+                # Permit only an explicitly marked percentage that can be
+                # recomputed from two numbers on the cited pages.  This covers
+                # transparent statements such as ``31/47 = 66.0%`` while a bare
+                # unsupported number (or a wrong calculation) still triggers the
+                # hard cap.
+                percent_values: set[str] = set()
+                for percent_match in percent_pattern.finditer(claim):
+                    percent_values.update(normalized_numbers(percent_match.group(1)))
+                source_decimals: list[Decimal] = []
+                for source_number in source_numbers:
+                    try:
+                        source_decimals.append(Decimal(source_number))
+                    except InvalidOperation:
+                        continue
+                supported_derived: list[str] = []
+                for missing_value in missing:
+                    if missing_value not in percent_values:
+                        continue
+                    try:
+                        target = Decimal(missing_value)
+                    except InvalidOperation:
+                        continue
+                    tolerance = max(Decimal("0.11"), abs(target) * Decimal("0.001"))
+                    if any(
+                        denominator != 0
+                        and abs((numerator / denominator * Decimal(100)) - target)
+                        <= tolerance
+                        for numerator in source_decimals
+                        for denominator in source_decimals
+                    ):
+                        supported_derived.append(missing_value)
+                if supported_derived:
+                    missing = [value for value in missing if value not in supported_derived]
+                    derived_numeric_claims.append(
+                        {
+                            "claim_index": index,
+                            "numbers": supported_derived,
+                            "method": "cited_ratio_percentage",
+                            "citations": normalized_citations,
+                        }
+                    )
+            if missing:
+                numeric_mismatches.append(
+                    {
+                        "claim_index": index,
+                        "numbers": missing,
+                        "citations": normalized_citations,
+                    }
+                )
+
+        report_citations = [value.upper() for value in citation_pattern.findall(report)]
+        invalid_report_citations = sorted(
+            {citation for citation in report_citations if citation not in source_pages}
+        )
+        schema_score = 100.0 * schema_valid / max(1, len(claims))
+        coverage_score = min(
+            100.0,
+            55.0 * len(claims) / min_claims
+            + 25.0 * min(1.0, total_citations / max(1, min_claims))
+            + 20.0 * min(1.0, len(cited_sources) / max(1, len({
+                key.split(":", 1)[0] for key in source_pages
+            }))),
+        )
+        citation_checks = total_citations + len(report_citations)
+        citation_failures = len(invalid_citations) + len(invalid_report_citations)
+        citation_score = (
+            100.0 * max(0, citation_checks - citation_failures) / max(1, citation_checks)
+        )
+        numeric_score = 100.0 * max(
+            0, fact_claims - len(numeric_mismatches)
+        ) / max(1, fact_claims)
+        score = (
+            0.20 * schema_score
+            + 0.20 * coverage_score
+            + 0.25 * citation_score
+            + 0.35 * numeric_score
+        )
+        caps: list[dict[str, Any]] = []
+        if invalid_citations or invalid_report_citations:
+            caps.append(
+                {
+                    "key": "research_invalid_citation",
+                    "max_score": 65,
+                    "reason": "存在无法定位到给定资料页的引用",
+                }
+            )
+        if numeric_mismatches:
+            caps.append(
+                {
+                    "key": "research_numeric_mismatch",
+                    "max_score": 75,
+                    "reason": "事实型主张中的数字未出现在所引资料页",
+                }
+            )
+        if len(claims) < min_claims:
+            caps.append(
+                {
+                    "key": "research_claim_coverage",
+                    "max_score": 85,
+                    "reason": f"claims.json 少于要求的 {min_claims} 项主张",
+                }
+            )
+        return self._graded(
+            "research_claims",
+            weight,
+            score,
+            {
+                "components": {
+                    "schema": round(schema_score, 2),
+                    "coverage": round(coverage_score, 2),
+                    "citations": round(citation_score, 2),
+                    "numeric_fidelity": round(numeric_score, 2),
+                },
+                "claims": len(claims),
+                "fact_claims": fact_claims,
+                "citations": total_citations,
+                "sources_cited": sorted(cited_sources),
+                "invalid_citations": invalid_citations[:20],
+                "invalid_report_citations": invalid_report_citations[:20],
+                "numeric_mismatches": numeric_mismatches[:20],
+                "derived_numeric_claims": derived_numeric_claims[:20],
+                "score_caps": caps,
+            },
+        )
+
     def _validate_symbolic_json(
         self,
         weight: float,
@@ -527,6 +1039,34 @@ class ScoringEngine:
         final_answer: str,
         workspace: Workspace,
     ) -> ValidationResult:
+        cap_value = config.get("score_cap_on_failure")
+        try:
+            failure_cap = (
+                min(100.0, max(0.0, float(cap_value))) if cap_value is not None else None
+            )
+        except (TypeError, ValueError):
+            failure_cap = None
+        cap_threshold = min(
+            100.0, max(0.0, float(config.get("score_cap_threshold", 100.0)))
+        )
+
+        def anchor_evidence(evidence: dict[str, Any], score: float) -> dict[str, Any]:
+            if failure_cap is None or score >= cap_threshold:
+                return evidence
+            return {
+                **evidence,
+                "score_caps": [
+                    {
+                        "key": str(config.get("score_cap_key") or "answer_anchor_failed"),
+                        "max_score": failure_cap,
+                        "reason": str(
+                            config.get("score_cap_reason")
+                            or "确定性最终答案锚点缺失或不等价"
+                        ),
+                    }
+                ],
+            }
+
         try:
             from sympy import E, cos, exp, log, pi, simplify, sin, sqrt, symbols
             from sympy.parsing.sympy_parser import (
@@ -602,18 +1142,154 @@ class ScoringEngine:
                         },
                     }
 
+                    scenario_scalar_preference = (
+                        spec.get("variables") is not None
+                        and not bool(spec.get("variables"))
+                    )
+
                     def parse_expression(
                         candidate: Any,
                         allowed_locals=local_dict,
                         aliases=keyword_aliases,
                         parser_locals=parse_locals,
+                        field_variables=variables,
+                        prefer_scenario_scalar=scenario_scalar_preference,
                     ):
-                        text = _normalize_symbolic_candidate(candidate)
+                        raw_candidate = str(candidate)
+                        assignment_context = raw_candidate
+                        # ``extension_answer`` is sometimes a self-contained
+                        # derivation rather than a bare formula.  The suite asks
+                        # for that field but does not forbid explanatory work in
+                        # it, so locate the last explicit function assignment for
+                        # the declared variable before applying the strict parser.
+                        # This stays fail-closed: only a concrete ``name(u)=...``
+                        # equation is extracted, and the resulting RHS still goes
+                        # through the ordinary allow-list and equivalence checks.
+                        function_assignments: list[tuple[int, str]] = []
+                        for variable in field_variables:
+                            pattern = re.compile(
+                                rf"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*\s*\(\s*"
+                                rf"{re.escape(variable)}\s*\)\s*=\s*"
+                                r"([^，；。\r\n]+)"
+                            )
+                            function_assignments.extend(
+                                (match.start(), match.group(1))
+                                for match in pattern.finditer(raw_candidate)
+                            )
+                        if function_assignments:
+                            assignment_start, raw_candidate = max(
+                                function_assignments, key=lambda pair: pair[0]
+                            )
+                            assignment_context = assignment_context[assignment_start:]
+                        text = _normalize_symbolic_candidate(
+                            raw_candidate,
+                            prefer_scenario_scalar=prefer_scenario_scalar,
+                        )
+                        # A bare finite decimal is an exact structured scalar,
+                        # not attribute syntax.  Convert it to an integer ratio
+                        # before the general dot ban; all other dotted text still
+                        # fails closed.  This makes ``2.625`` exactly equal to
+                        # ``21/8`` instead of relying on floating tolerance.
+                        if re.fullmatch(r"[+-]?(?:\d+\.\d*|\d*\.\d+)", text):
+                            decimal_value = Decimal(text)
+                            numerator, denominator = decimal_value.as_integer_ratio()
+                            text = f"({numerator}/{denominator})"
                         if len(text) > 2000 or "__" in text or "." in text:
                             raise ValueError("unsafe symbolic expression")
                         if not re.fullmatch(r"[A-Za-z0-9_+\-*/(),\s]+", text):
                             raise ValueError("unsupported symbolic notation")
                         names = set(re.findall(r"[A-Za-z][A-Za-z0-9]*", text))
+                        unknown_names = names - set(allowed_locals)
+                        # A derivation may display the general antiderivative
+                        # after an already-stated final answer, then determine a
+                        # constant immediately afterwards, for example
+                        # ``f(u)=...+C, C=0``.  Treat only an explicit later
+                        # numeric assignment as resolving that symbol.  This is
+                        # narrower than accepting arbitrary extra names and keeps
+                        # the symbolic anchor fail-closed for unresolved constants.
+                        for unknown_name in sorted(unknown_names):
+                            constant_pattern = re.compile(
+                                rf"(?<![A-Za-z0-9_]){re.escape(unknown_name)}\s*=\s*"
+                                r"([+-]?(?:\d+(?:\.\d+)?|\d+\s*/\s*\d+))"
+                                r"(?![A-Za-z0-9_.])"
+                            )
+                            resolved = list(constant_pattern.finditer(assignment_context))
+                            if not resolved:
+                                continue
+                            replacement = resolved[-1].group(1).replace(" ", "")
+                            text = re.sub(
+                                rf"(?<![A-Za-z0-9_]){re.escape(unknown_name)}"
+                                r"(?![A-Za-z0-9_])",
+                                f"({replacement})",
+                                text,
+                            )
+                        names = set(re.findall(r"[A-Za-z][A-Za-z0-9]*", text))
+                        unknown_names = names - set(allowed_locals)
+                        # Parameter names are dummy variables.  A correct answer
+                        # may use (x,y,z) where the reference uses (a1,a2,a3).
+                        # Permit only a complete one-to-one positional rename;
+                        # constants/functions or a partial/mismatched rename still
+                        # fail closed.  Ordering by first appearance preserves the
+                        # candidate's declared coordinate order.
+                        declared_variables = [
+                            name for name in allowed_locals if name not in allowed_functions
+                        ]
+                        if (
+                            unknown_names
+                            and not (names & set(declared_variables))
+                            and len(unknown_names) == len(declared_variables)
+                        ):
+                            # Indexed coordinates carry their own positional
+                            # meaning.  In ``2x3-x1-x2`` the first appearance is
+                            # x3, but it must map to a3 rather than a1.  Prefer a
+                            # complete numeric-suffix correspondence and retain
+                            # first-appearance ordering only for unindexed dummy
+                            # names.
+                            candidate_indexed = {
+                                int(match.group(2)): name
+                                for name in unknown_names
+                                if (
+                                    match := re.fullmatch(
+                                        r"([A-Za-z_]+)([0-9]+)", name
+                                    )
+                                )
+                            }
+                            declared_indexed = {
+                                int(match.group(2)): name
+                                for name in declared_variables
+                                if (
+                                    match := re.fullmatch(
+                                        r"([A-Za-z_]+)([0-9]+)", name
+                                    )
+                                )
+                            }
+                            if (
+                                len(candidate_indexed) == len(unknown_names)
+                                and len(declared_indexed) == len(declared_variables)
+                                and candidate_indexed.keys() == declared_indexed.keys()
+                            ):
+                                candidate_order = [
+                                    candidate_indexed[index]
+                                    for index in sorted(candidate_indexed)
+                                ]
+                                declared_variables = [
+                                    declared_indexed[index]
+                                    for index in sorted(declared_indexed)
+                                ]
+                            else:
+                                candidate_order = sorted(
+                                    unknown_names,
+                                    key=text.find,
+                                )
+                            for candidate_name, declared_name in zip(
+                                candidate_order, declared_variables, strict=True
+                            ):
+                                text = re.sub(
+                                    rf"(?<![A-Za-z_]){re.escape(candidate_name)}(?![A-Za-z0-9_])",
+                                    declared_name,
+                                    text,
+                                )
+                            names = set(re.findall(r"[A-Za-z][A-Za-z0-9]*", text))
                         if not names.issubset(allowed_locals):
                             raise ValueError(
                                 f"unsupported symbolic names: {sorted(names - set(allowed_locals))}"
@@ -634,6 +1310,14 @@ class ScoringEngine:
                     expected_expr = parse_expression(expected)
                     equivalent = simplify(candidate_expr - expected_expr) == 0
                     method = "symbolic_simplify"
+                    if not equivalent and bool(spec.get("equivalent_up_to_nonzero_scalar")):
+                        try:
+                            ratio = simplify(candidate_expr / expected_expr)
+                            equivalent = bool(ratio != 0 and not ratio.free_symbols)
+                        except (TypeError, ValueError, ZeroDivisionError):
+                            equivalent = False
+                        if equivalent:
+                            method = "symbolic_nonzero_scalar_equivalence"
                     if not equivalent:
                         comparisons = 0
                         equivalent = True
@@ -665,13 +1349,139 @@ class ScoringEngine:
                         "variables": variables,
                     }
                 else:
-                    normalized_actual = str(value).strip().casefold()
+                    def normalize_literal(item: Any) -> str:
+                        # JSON arrays/objects are already unambiguous structured
+                        # literals.  Canonicalize them before comparison so a
+                        # valid value such as ``[0, 1]`` matches an accepted
+                        # compact spelling ``[0,1]`` instead of being rejected
+                        # because Python's ``str(list)`` inserts spaces.
+                        raw = (
+                            json.dumps(
+                                item,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            )
+                            if isinstance(item, (list, dict))
+                            else str(item)
+                        )
+                        raw = raw.translate(
+                            str.maketrans(
+                                {
+                                    "₀": "0",
+                                    "₁": "1",
+                                    "₂": "2",
+                                    "₃": "3",
+                                    "₄": "4",
+                                    "₅": "5",
+                                    "₆": "6",
+                                    "₇": "7",
+                                    "₈": "8",
+                                    "₉": "9",
+                                    "（": "(",
+                                    "）": ")",
+                                }
+                            )
+                        )
+                        return re.sub(
+                            r"\s*([⊕+])\s*",
+                            r"\1",
+                            raw.strip().casefold(),
+                        )
+
+                    normalized_actual = normalize_literal(value)
+                    # Structured literal fields sometimes repeat a narrow label,
+                    # for example ``J = J2(1) ⊕ J1(1)``.  Strip only recognised
+                    # answer/type labels; arbitrary left-hand prose still fails.
+                    labeled_literal = re.fullmatch(
+                        r"\s*(?:j|jordan(?:[_\s-]?type)?|type|answer|答案)\s*=\s*(.+)",
+                        normalized_actual,
+                    )
+                    if labeled_literal:
+                        normalized_actual = labeled_literal.group(1).strip()
                     accepted = [expected, *(spec.get("accepted") or [])]
-                    equivalent = normalized_actual in {
-                        str(item).strip().casefold() for item in accepted
-                    }
+                    normalized_accepted = {normalize_literal(item) for item in accepted}
+                    normalized_actual = re.sub(
+                        r"\s*([⊕+])\s*", r"\1", normalized_actual
+                    )
+                    equivalent = normalized_actual in normalized_accepted
+                    match_method = "literal_exact"
+                    if not equivalent:
+                        # Infinity is often written with an explicit positive sign
+                        # and a parenthetical proof note.  Accept it only when the
+                        # configured literals themselves allow infinity and the
+                        # note contains an affirmative divergence marker without a
+                        # contradiction marker.
+                        infinite_allowed = bool(
+                            normalized_accepted
+                            & {"∞", "+∞", "infinite", "diverges", "无穷"}
+                        )
+                        infinite_annotated = re.fullmatch(
+                            r"\s*\+?∞(?:\s*[（(]\s*(.*?)\s*[)）])?\s*",
+                            normalized_actual,
+                        )
+                        if infinite_allowed and infinite_annotated:
+                            annotation = infinite_annotated.group(1) or "∞"
+                            affirmative = re.search(
+                                r"(?:不存在有限|无有限|发散|无穷|∞|infinite|diverges)",
+                                annotation,
+                            )
+                            contradiction = re.search(
+                                r"(?:并非|不是|不等于|而非|not|instead)",
+                                annotation,
+                            )
+                            equivalent = affirmative is not None and contradiction is None
+                            if equivalent:
+                                match_method = "literal_infinite_annotation"
+                    if not equivalent:
+                        # A short, affirmative parenthetical is presentation, not
+                        # a different literal answer.  Keep this deliberately
+                        # narrow so contradictory or arbitrary prose cannot pass.
+                        annotated = re.fullmatch(
+                            r"\s*(.*?)\s*[（(]\s*(.*?)\s*[)）]\s*",
+                            normalized_actual,
+                        )
+                        affirmative_annotation = (
+                            r"(?:不存在有限方差|无有限方差|二阶矩发散|发散|"
+                            r"无穷|无限|infinite|diverges|no finite variance)"
+                        )
+                        if annotated:
+                            base, annotation = annotated.groups()
+                            equivalent = (
+                                base.strip() in normalized_accepted
+                                and re.fullmatch(
+                                    affirmative_annotation, annotation.strip()
+                                )
+                                is not None
+                            )
+                            if equivalent:
+                                match_method = "literal_affirmative_annotation"
+                    if not equivalent:
+                        # ``literal，即 explanation`` still declares the exact
+                        # literal before the explanatory suffix.  Reject suffixes
+                        # containing explicit contradiction markers.
+                        explanatory = re.fullmatch(
+                            r"\s*(.*?)\s*(?:，|,)\s*(?:即|也就是|i\.e\.)\s*(.+)",
+                            normalized_actual,
+                        )
+                        if explanatory:
+                            base, explanation = explanatory.groups()
+                            contradiction = re.search(
+                                r"(?:并非|不是|不等于|而非|not|instead)",
+                                explanation,
+                            )
+                            equivalent = (
+                                base.strip() in normalized_accepted
+                                and explanation.strip() != ""
+                                and contradiction is None
+                            )
+                            if equivalent:
+                                match_method = "literal_explanatory_suffix"
                     score = 100.0 if equivalent else 0.0
-                    field_evidence[str(dotted_path)] = {"matched": equivalent}
+                    field_evidence[str(dotted_path)] = {
+                        "matched": equivalent,
+                        "method": match_method,
+                    }
                 field_scores[str(dotted_path)] = score
                 weighted_total += score * field_weight
             score = weighted_total / declared_total if declared_total else 0.0
@@ -679,14 +1489,22 @@ class ScoringEngine:
                 "symbolic_json",
                 weight,
                 score,
-                {
-                    "field_scores": field_scores,
-                    "field_evidence": field_evidence,
-                    "answer_format": extraction,
-                },
+                anchor_evidence(
+                    {
+                        "field_scores": field_scores,
+                        "field_evidence": field_evidence,
+                        "answer_format": extraction,
+                    },
+                    score,
+                ),
             )
         except (ImportError, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
-            return self._graded("symbolic_json", weight, 0.0, {"error": str(exc)})
+            return self._graded(
+                "symbolic_json",
+                weight,
+                0.0,
+                anchor_evidence({"error": str(exc)}, 0.0),
+            )
 
     def _validate_constraint_plan(
         self,
@@ -1066,6 +1884,35 @@ class ScoringEngine:
                         "key": str(cap["key"]),
                         "max_score": maximum,
                         "reason": str(cap.get("reason") or "触发严重错误评分上限"),
+                    }
+                )
+        configured_metric_caps = config.get("metric_caps") or []
+        if isinstance(configured_metric_caps, list):
+            for cap in configured_metric_caps:
+                if not isinstance(cap, dict):
+                    continue
+                key = str(cap.get("metric_key") or cap.get("key") or "")
+                if not key:
+                    continue
+                try:
+                    value = float(metric_values.get(key, 0))
+                    minimum = float(cap.get("min_score", 100))
+                    maximum = min(100.0, max(0.0, float(cap["max_score"])))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if value >= minimum:
+                    continue
+                score_caps.append(
+                    {
+                        "key": str(cap.get("key") or f"{key}_below_mastery"),
+                        "metric_key": key,
+                        "metric_score": round(value, 2),
+                        "required_score": round(minimum, 2),
+                        "max_score": maximum,
+                        "reason": str(
+                            cap.get("reason")
+                            or f"关键指标 {key} 未达到 {minimum:g} 分"
+                        ),
                     }
                 )
         output: list[ValidationResult] = []

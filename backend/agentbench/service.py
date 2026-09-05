@@ -4,23 +4,26 @@ import base64
 import copy
 import fnmatch
 import hashlib
+import io
 import json
 import logging
 import os
 import re
 import secrets as secure_random
 import shutil
+import stat
 import statistics
 import subprocess
 import sys
 import threading
 import time
 import uuid
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import httpx
@@ -105,6 +108,12 @@ _VIEWER_SECRET_PATTERNS = (
         r"\s*[:=]\s*[^\s,;]+"
     ),
 )
+
+
+FRONTEND_IMPORT_MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+FRONTEND_IMPORT_MAX_EXPANDED_BYTES = 500 * 1024 * 1024
+FRONTEND_IMPORT_MAX_FILE_BYTES = 100 * 1024 * 1024
+FRONTEND_IMPORT_MAX_FILES = 10_000
 _VIEWER_PRIVATE_KEYS = {
     "api_key",
     "apikey",
@@ -439,9 +448,7 @@ def benchmark_reasoning_condition(
     source = "direct"
     verified = True
     note = "请求档位可直接传递给 Agent"
-    if runner_type == "codex_cli" and requested == "max":
-        effective, source, note = "xhigh", "capped", "Codex 当前最高标准化档位为 XHigh"
-    elif runner_type == "deepseek_harness":
+    if runner_type == "deepseek_harness":
         effective, _ = _harness_reasoning_effort(requested)
         source = "mapped" if effective != requested else "direct"
         note = f"Harness 实际使用 {effective.upper()} 档"
@@ -541,6 +548,7 @@ def _harness_safe_settings(value: Any, key: str = "") -> Any:
 def public_definition(definition: dict[str, Any]) -> dict[str, Any]:
     """Remove reference answers and private validator payloads from API responses."""
     output = copy.deepcopy(definition)
+    output.pop("_private_frontier_variants", None)
     metadata = output.get("metadata") or {}
     metadata.pop("demo_actions", None)
     metadata.pop("demo_response", None)
@@ -586,6 +594,97 @@ def public_definition(definition: dict[str, Any]) -> dict[str, Any]:
         if hidden:
             config["private"] = True
     return output
+
+
+def evaluator_migration_contract(definition: dict[str, Any]) -> dict[str, Any]:
+    """Return the candidate-visible contract used to authorize checker repairs.
+
+    A digest-pinned private validator reference is evaluator provenance, not task
+    content.  It may change after a checker bug while the instruction, seeded files,
+    limits, public metric weights and all other candidate-visible requirements remain
+    frozen.  Rejudging against a current revision is rejected if anything else changed.
+    """
+
+    private_variants = definition.get("_private_frontier_variants")
+    output = public_definition(definition)
+    if private_variants is not None:
+        canonical_variants = json.dumps(
+            private_variants, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode()
+        output["_private_frontier_variants_commitment"] = hashlib.sha256(
+            canonical_variants
+        ).hexdigest()
+    for validator in output.get("validators") or []:
+        config = validator.get("config") or {}
+        config.pop("private_validator_ref", None)
+    return output
+
+
+def _deep_merge_frontier_variant(
+    target: dict[str, Any], patch: dict[str, Any]
+) -> None:
+    """Merge one private variant patch; mappings recurse and all other values replace."""
+
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _deep_merge_frontier_variant(target[key], value)
+        else:
+            target[key] = copy.deepcopy(value)
+
+
+def _materialize_private_frontier_variant(
+    definition: dict[str, Any], seed_hex: str
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Select and apply one hidden prompt variant deterministically from a run seed."""
+
+    output = copy.deepcopy(definition)
+    pool = output.pop("_private_frontier_variants", None)
+    if pool is None:
+        return output, None
+    if not isinstance(pool, dict) or not isinstance(pool.get("variants"), list):
+        raise ValueError("invalid_private_frontier_variant_pool")
+    variants = pool["variants"]
+    if not variants or not all(isinstance(item, dict) for item in variants):
+        raise ValueError("empty_private_frontier_variant_pool")
+    pool_version = str(pool.get("pool_version") or "unversioned")
+    selector = hashlib.sha256(
+        (
+            f"{pool_version}\0{output.get('slug', '')}\0{seed_hex}"
+        ).encode()
+    ).hexdigest()
+    selected_index = int(selector[:16], 16) % len(variants)
+    selected = variants[selected_index]
+    variant_id = str(selected.get("variant_id") or f"variant-{selected_index}")
+    instruction = selected.get("instruction")
+    if not isinstance(instruction, str) or not instruction.strip():
+        raise ValueError(f"private_frontier_variant_instruction_missing:{variant_id}")
+    output["instruction"] = instruction
+    for override in selected.get("validator_config_overrides") or []:
+        if not isinstance(override, dict):
+            raise ValueError(f"invalid_frontier_validator_override:{variant_id}")
+        validator_type = str(override.get("type") or "")
+        occurrence = int(override.get("occurrence", 0) or 0)
+        matches = [
+            validator
+            for validator in output.get("validators") or []
+            if str(validator.get("type") or "") == validator_type
+        ]
+        if occurrence < 0 or occurrence >= len(matches):
+            raise ValueError(
+                f"frontier_variant_validator_missing:{variant_id}:{validator_type}:{occurrence}"
+            )
+        config_patch = override.get("config")
+        if not isinstance(config_patch, dict):
+            raise ValueError(f"invalid_frontier_validator_config:{variant_id}")
+        config = matches[occurrence].setdefault("config", {})
+        _deep_merge_frontier_variant(config, config_patch)
+    output.setdefault("metadata", {})["frontier_variant_pool"] = pool_version
+    return output, {
+        "variant_id": variant_id,
+        "variant_index": selected_index,
+        "pool_version": pool_version,
+        "selector_sha256": selector,
+    }
 
 
 class EvaluationService:
@@ -637,8 +736,9 @@ class EvaluationService:
     ) -> dict[str, str] | None:
         uses_private_reference = any(
             isinstance((validator.get("config") or {}).get("private_validator_ref"), dict)
+            or bool((validator.get("config") or {}).get("private_files"))
             for validator in definition.get("validators") or []
-        )
+        ) or isinstance(definition.get("_private_frontier_variants"), dict)
         if not uses_private_reference:
             return None
         existing = self.database.fetch_one(
@@ -715,14 +815,27 @@ class EvaluationService:
     def recover_interrupted_runs(self) -> None:
         now = utc_now()
         self.database.execute(
-            "UPDATE runs SET status='interrupted', error_code='app_restarted', "
-            "error_message='The desktop app exited while this run was active', completed_at=? "
+            "UPDATE run_attempts SET status='interrupted',error_code='app_restarted',"
+            "error_message='The desktop app exited while this attempt was active',completed_at=? "
+            "WHERE status='running'",
+            (now,),
+        )
+        self.database.execute(
+            "UPDATE runs SET status='interrupted', "
+            "error_code=CASE WHEN status IN ('validating','judging') "
+            "THEN 'app_restarted_during_validation' ELSE 'app_restarted' END, "
+            "error_message=CASE WHEN status IN ('validating','judging') "
+            "THEN 'The app restarted after the candidate answer was submitted; resume validation only' "
+            "ELSE 'The desktop app exited while this run was active' END, completed_at=? "
             "WHERE status IN ('preparing','running','validating','judging')",
             (now,),
         )
         self.database.execute(
             "UPDATE experiments SET status='interrupted', completed_at=? WHERE status='running'",
             (now,),
+        )
+        self.database.execute(
+            "UPDATE experiments SET status='paused',completed_at=NULL WHERE status='pausing'"
         )
 
     # Agent Studio sessions
@@ -2350,11 +2463,10 @@ class EvaluationService:
                     "--sandbox",
                     "read-only" if permission_profile == "readonly" else "workspace-write",
                 )
-            codex_effort = "xhigh" if reasoning_effort == "max" else reasoning_effort
             prompt_index = configured.index("{prompt}") if "{prompt}" in configured else len(configured)
             configured[prompt_index:prompt_index] = [
                 "-c",
-                f'model_reasoning_effort="{codex_effort}"',
+                f'model_reasoning_effort="{reasoning_effort}"',
             ]
             for attachment in attachments:
                 if attachment.get("is_image"):
@@ -3984,7 +4096,7 @@ class EvaluationService:
 
     def _math_experiment_score(self, experiment_id: str) -> dict[str, Any] | None:
         rows = self.database.fetch_all(
-            "SELECT r.score,t.definition_json,"
+            "SELECT r.score,r.status,r.failure_class,t.definition_json,"
             "(SELECT COUNT(*) FROM score_components sc WHERE sc.run_id=r.id) "
             "AS component_count,"
             "(SELECT sc.score FROM score_components sc WHERE sc.run_id=r.id "
@@ -3999,8 +4111,11 @@ class EvaluationService:
             "JOIN test_cases t ON t.id=r.test_case_id WHERE r.experiment_id=?",
             (experiment_id,),
         )
-        weighted_sum = 0.0
-        point_sum = 0.0
+        final_weighted_sum = 0.0
+        raw_weighted_sum = 0.0
+        scheduled_points = 0.0
+        scored_points = 0.0
+        environment_unavailable = 0
         found_math = False
         for row in rows:
             metadata = (_json(row["definition_json"], {}).get("metadata") or {})
@@ -4010,10 +4125,10 @@ class EvaluationService:
             points = float(metadata.get("points") or 0)
             if points <= 0:
                 continue
-            # All scheduled questions contribute to the paper denominator. This
-            # keeps an in-progress paper at its actual awarded points instead of
-            # extrapolating the answered subset to 150.
-            point_sum += points
+            scheduled_points += points
+            if row.get("status") == "environment_unavailable":
+                environment_unavailable += 1
+                continue
             quality_components = [
                 (float(score), float(weight))
                 for score, weight in (
@@ -4026,7 +4141,7 @@ class EvaluationService:
             # legacy score as a compatibility fallback. New/rejudged runs always
             # use pure mathematical answer quality; efficiency never affects the
             # 150-point paper score.
-            quality_score = (
+            raw_quality_score = (
                 sum(score * weight for score, weight in quality_components)
                 / sum(weight for _, weight in quality_components)
                 if quality_components
@@ -4034,18 +4149,43 @@ class EvaluationService:
                 if row.get("score") is not None and int(row.get("component_count") or 0) == 0
                 else None
             )
-            if quality_score is None:
+            # The stored run score carries deterministic answer caps, but may
+            # also contain legacy efficiency weight.  Use it only as an upper
+            # bound on pure answer quality, never as a way to raise that quality.
+            final_quality_score = (
+                min(raw_quality_score, float(row["score"]))
+                if raw_quality_score is not None and row.get("score") is not None
+                else raw_quality_score
+                if raw_quality_score is not None
+                else float(row["score"])
+                if row.get("score") is not None
+                else None
+            )
+            if final_quality_score is None:
                 continue
-            weighted_sum += quality_score * points
-        if not found_math or point_sum <= 0:
+            scored_points += points
+            final_weighted_sum += final_quality_score * points
+            raw_weighted_sum += (
+                raw_quality_score if raw_quality_score is not None else final_quality_score
+            ) * points
+        if not found_math or scheduled_points <= 0:
             return None
-        raw_percentage = weighted_sum / point_sum
-        percentage = round(raw_percentage, 2)
+        final_percentage = (
+            final_weighted_sum / scored_points if scored_points > 0 else 0.0
+        )
+        raw_percentage = raw_weighted_sum / scored_points if scored_points > 0 else 0.0
+        completion_rate = scored_points / scheduled_points * 100.0
         return {
-            "weighted_score": percentage,
-            "exam_score": round(raw_percentage * 1.5, 2),
+            "weighted_score": round(final_percentage, 2),
+            "raw_quality_score": round(raw_percentage, 2),
+            "final_capped_score": round(final_percentage, 2),
+            "exam_score": round(final_weighted_sum / 100.0, 2),
+            "exam_available": round(scored_points, 2),
             "exam_total": 150.0,
-            "exam_scoring_basis": "answer_quality",
+            "completion_rate": round(completion_rate, 2),
+            "environment_unavailable_count": environment_unavailable,
+            "provisional": scored_points < scheduled_points,
+            "exam_scoring_basis": "valid_answer_quality_with_completion",
         }
 
     def update_math_paper_question(
@@ -4427,7 +4567,7 @@ class EvaluationService:
                     requested_effort,
                     int(value.strict_fairness),
                     value.judge_reasoning_effort,
-                    "5.3.0",
+                    "5.4.1",
                     now,
                 ),
             )
@@ -4515,10 +4655,18 @@ class EvaluationService:
         )
         for row in rows:
             row["participants"] = _json(row.pop("participants_json"), [])
+            suite_metadata = self._suite_runtime_metadata(row["id"])
             math_score = self._math_experiment_score(row["id"])
             if math_score:
-                row["avg_score"] = math_score["weighted_score"]
                 row.update(math_score)
+                if suite_metadata.get("kind") != "six-dimension":
+                    row["avg_score"] = math_score["weighted_score"]
+            if suite_metadata.get("kind") == "six-dimension":
+                capability_score = self._capability_experiment_score(row["id"])
+                if capability_score is not None:
+                    row["avg_score"] = capability_score
+                    row["capability_score"] = capability_score
+                    row["score_basis"] = "six_dimension_equal_weight"
         return rows
 
     def get_experiment(self, experiment_id: str) -> dict[str, Any]:
@@ -4551,11 +4699,47 @@ class EvaluationService:
         )
         math_score = self._math_experiment_score(experiment_id)
         if math_score and row["summary"]:
-            row["summary"]["avg_score"] = math_score["weighted_score"]
             row["summary"].update(math_score)
+            if row["suite_metadata"].get("kind") != "six-dimension":
+                row["summary"]["avg_score"] = math_score["weighted_score"]
         if row["suite_metadata"].get("kind") == "frontend" and row["summary"]:
             row["summary"].update(self._frontend_experiment_score(experiment_id))
+        if row["suite_metadata"].get("kind") == "six-dimension" and row["summary"]:
+            capability_score = self._capability_experiment_score(experiment_id)
+            if capability_score is not None:
+                row["summary"]["avg_score"] = capability_score
+                row["summary"]["capability_score"] = capability_score
+                row["summary"]["score_basis"] = "six_dimension_equal_weight"
         return row
+
+    def capability_report(self, experiment_id: str) -> dict[str, Any]:
+        """Return the auditable six-dimension report for one experiment."""
+
+        from .capability_report import build_capability_report
+
+        return build_capability_report(self.database, experiment_id)
+
+    def _capability_experiment_score(self, experiment_id: str) -> float | None:
+        """Return the participant-average six-dimension score for summary cards."""
+
+        profiles = self.capability_report(experiment_id).get("profiles") or []
+        scores = [
+            float(profile["overall_score"])
+            for profile in profiles
+            if profile.get("overall_score") is not None
+        ]
+        return round(statistics.fmean(scores), 2) if scores else None
+
+    def capability_panel_svg(
+        self, experiment_id: str, profile_id: str | None = None
+    ) -> str:
+        """Render a 16:9 SVG panel suitable for video overlays and thumbnails."""
+
+        from .capability_report import render_capability_panel_svg
+
+        return render_capability_panel_svg(
+            self.capability_report(experiment_id), profile_id=profile_id
+        )
 
     def _suite_runtime_metadata(self, experiment_id: str) -> dict[str, Any]:
         definitions = self.database.fetch_all(
@@ -4566,6 +4750,18 @@ class EvaluationService:
             (experiment_id,),
         )
         metadata = [(_json(row["definition_json"], {}).get("metadata") or {}) for row in definitions]
+        capability_dimensions = {
+            str(item.get("capability_dimension"))
+            for item in metadata
+            if item.get("capability_dimension")
+        }
+        if len(capability_dimensions) == 6:
+            return {
+                "kind": "six-dimension",
+                "capability_report": True,
+                "capability_dimensions": sorted(capability_dimensions),
+                "manual_scoring": any(bool(item.get("manual_scoring")) for item in metadata),
+            }
         frontend = [item for item in metadata if item.get("suite_kind") == "frontend"]
         if not frontend:
             return {"kind": "benchmark"}
@@ -4609,9 +4805,14 @@ class EvaluationService:
 
     def start_experiment(self, experiment_id: str) -> dict[str, Any]:
         experiment = self.get_experiment(experiment_id)
-        if experiment["status"] not in {"draft", "interrupted"}:
+        previous_status = str(experiment["status"])
+        if previous_status == "running":
+            # POST /start is intentionally idempotent. In particular, a UI retry
+            # after a lost HTTP response must not submit every remaining run twice.
+            return experiment
+        if previous_status not in {"draft", "paused", "interrupted"}:
             raise ValueError("experiment_not_startable")
-        if experiment["status"] == "interrupted":
+        if previous_status in {"paused", "interrupted"}:
             stopping = self.database.fetch_one(
                 "SELECT COUNT(*) AS count FROM runs WHERE experiment_id=? "
                 "AND status IN ('preparing','running','validating','judging')",
@@ -4623,23 +4824,55 @@ class EvaluationService:
         if not preflight["ok"]:
             detail = "\n- ".join(preflight["errors"])
             raise ValueError(f"评测启动前检查未通过：\n- {detail}")
-        self.database.execute(
-            "UPDATE experiments SET status='running',started_at=?,completed_at=NULL WHERE id=?",
-            (utc_now(), experiment_id),
-        )
+        with self._state_lock:
+            current = self.database.fetch_one(
+                "SELECT status FROM experiments WHERE id=?", (experiment_id,)
+            )
+            if not current:
+                raise KeyError("experiment_not_found")
+            if current["status"] == "running":
+                return self.get_experiment(experiment_id)
+            if current["status"] not in {"draft", "paused", "interrupted"}:
+                raise ValueError("experiment_not_startable")
+            active = self.database.fetch_one(
+                "SELECT COUNT(*) AS count FROM runs WHERE experiment_id=? "
+                "AND status IN ('preparing','running','validating','judging')",
+                (experiment_id,),
+            )
+            if active and int(active["count"] or 0):
+                raise ValueError("套件仍在停止当前项目，请等待状态稳定后再继续")
+            self.database.execute(
+                "UPDATE experiments SET status='running',started_at=COALESCE(started_at,?),"
+                "completed_at=NULL WHERE id=?",
+                (utc_now(), experiment_id),
+            )
         semaphore = threading.Semaphore(int(experiment["concurrency"]))
         self._experiment_semaphores[experiment_id] = semaphore
+        # Dispatch in frozen suite order.  A bare SELECT allowed SQLite/thread
+        # scheduling to choose later cases first, so identical experiments could
+        # expose models to different task order, cache state, or rate-limit state.
+        # Grouping by case position also keeps participants interleaved per case.
         runs = self.database.fetch_all(
-            "SELECT id FROM runs WHERE experiment_id=? AND status IN ('queued','interrupted')",
+            "SELECT r.id FROM runs r "
+            "JOIN experiments e ON e.id=r.experiment_id "
+            "LEFT JOIN suite_cases sc ON sc.suite_id=e.suite_id "
+            "AND sc.test_case_id=r.test_case_id "
+            "WHERE r.experiment_id=? AND r.status IN ('queued','interrupted') "
+            "ORDER BY r.repetition,sc.position,r.rowid",
             (experiment_id,),
         )
         for run in runs:
             self.executor.submit(self._run_with_semaphore, run["id"], semaphore)
         self.database.insert_audit(
-            "experiment.started",
+            "experiment.resumed" if previous_status in {"paused", "interrupted"} else "experiment.started",
             "experiment",
             experiment_id,
-            {"warnings": preflight.get("warnings", []), "checks": preflight.get("checks", {})},
+            {
+                "previous_status": previous_status,
+                "remaining_runs": len(runs),
+                "warnings": preflight.get("warnings", []),
+                "checks": preflight.get("checks", {}),
+            },
         )
         return self.get_experiment(experiment_id)
 
@@ -4961,28 +5194,52 @@ class EvaluationService:
         return self.get_experiment(experiment_id)
 
     def pause_experiment(self, experiment_id: str) -> dict[str, Any]:
-        experiment = self.get_experiment(experiment_id)
-        if experiment["status"] != "running":
-            raise ValueError("experiment_not_running")
-        self.database.execute(
-            "UPDATE experiments SET status='interrupted',completed_at=? WHERE id=?",
-            (utc_now(), experiment_id),
-        )
-        self.database.execute(
-            "UPDATE runs SET status='interrupted',error_code='suite_paused',"
-            "error_message='用户暂停了套件；恢复时将重新执行本题',completed_at=? "
-            "WHERE experiment_id=? AND status='queued'",
-            (utc_now(), experiment_id),
-        )
-        active = self.database.fetch_all(
-            "SELECT id FROM runs WHERE experiment_id=? AND status IN ('preparing','running','validating','judging')",
-            (experiment_id,),
-        )
         with self._state_lock:
+            experiment = self.get_experiment(experiment_id)
+            if experiment["status"] in {"pausing", "paused"}:
+                return experiment
+            if experiment["status"] != "running":
+                raise ValueError("experiment_not_running")
+            self.database.execute(
+                "UPDATE experiments SET status='pausing',completed_at=NULL WHERE id=?",
+                (experiment_id,),
+            )
+            active = self.database.fetch_all(
+                "SELECT id,status FROM runs WHERE experiment_id=? "
+                "AND status IN ('preparing','running','validating','judging')",
+                (experiment_id,),
+            )
+            # Candidate execution is interruptible and becomes resumable. Validation
+            # and judging already have a durable final_answer, so let those phases
+            # finish and preserve their result instead of calling the candidate again.
             for row in active:
+                if row["status"] not in {"preparing", "running"}:
+                    continue
                 self._paused_runs.add(row["id"])
                 self._cancel_events.setdefault(row["id"], threading.Event()).set()
-        self.database.insert_audit("experiment.paused", "experiment", experiment_id)
+            if not active:
+                self.database.execute(
+                    "UPDATE experiments SET status='paused' WHERE id=? AND status='pausing'",
+                    (experiment_id,),
+                )
+        progress = self.database.fetch_one(
+            "SELECT COUNT(*) AS total,"
+            "SUM(CASE WHEN status IN ('completed','failed','environment_unavailable','needs_review','cancelled') "
+            "THEN 1 ELSE 0 END) AS preserved,"
+            "SUM(CASE WHEN status IN ('queued','interrupted','preparing','running','validating','judging') "
+            "THEN 1 ELSE 0 END) AS remaining FROM runs WHERE experiment_id=?",
+            (experiment_id,),
+        ) or {"total": 0, "preserved": 0, "remaining": 0}
+        self.database.insert_audit(
+            "experiment.pause_requested",
+            "experiment",
+            experiment_id,
+            {
+                "preserved_runs": int(progress["preserved"] or 0),
+                "remaining_runs": int(progress["remaining"] or 0),
+                "total_runs": int(progress["total"] or 0),
+            },
+        )
         return self.get_experiment(experiment_id)
 
     def skip_run(self, run_id: str) -> dict[str, Any]:
@@ -5171,7 +5428,10 @@ class EvaluationService:
             connection.execute("DELETE FROM run_attempts WHERE run_id=?", (run_id,))
             connection.execute("DELETE FROM artifacts WHERE run_id=?", (run_id,))
             connection.execute("DELETE FROM judge_reviews WHERE run_id=?", (run_id,))
-            connection.execute("DELETE FROM run_validation_seeds WHERE run_id=?", (run_id,))
+            # A retry is another execution of the same committed hidden case,
+            # not permission to draw an easier/different holdout.  Preserve the
+            # seed and its public commitment across retries; explicit new runs
+            # receive fresh seeds in _validation_seed_for_run.
             connection.execute(
                 "UPDATE runs SET status='queued',final_answer=NULL,score=NULL,error_code=NULL,"
                 "error_message=NULL,tokens_input=0,tokens_output=0,cost_usd=0,"
@@ -5233,9 +5493,36 @@ class EvaluationService:
         chat sentence, so a preserved workspace with substantive changes is a valid
         submission for deterministic revalidation.
         """
-        if str(run.get("error_code") or "") != "runtime_safety_limit":
+        recovery_code = str(run.get("error_code") or "")
+        if recovery_code not in {
+            "runtime_safety_limit",
+            "cli_failed",
+            "native_agent_execution_error",
+        }:
             return False
-        if not bool((definition.get("attempt_policy") or {}).get("preserve_workspace")):
+        preserve_requested = bool(
+            (definition.get("attempt_policy") or {}).get("preserve_workspace")
+        )
+        validator_types = {
+            str(item.get("type") or "")
+            for item in (definition.get("validators") or [])
+            if isinstance(item, dict)
+        }
+        artifact_validator_types = {
+            "command",
+            "command_metrics",
+            "file_content",
+            "file_exists",
+            "forbidden_paths",
+            "json_schema",
+        }
+        # Artifact-only Office/data tasks are intrinsically scored from files,
+        # even when an older built-in case predates the explicit
+        # ``preserve_workspace`` flag.  A watchdog must not discard a DOCX/XLSX/
+        # PPTX that was already written.  Answer-based or AI-rubric tasks still
+        # require an explicit opt-in, keeping timeout salvage fail-closed.
+        artifact_only_submission = bool(validator_types) and validator_types <= artifact_validator_types
+        if not preserve_requested and not artifact_only_submission:
             return False
         raw_workspace = str(run.get("workspace_path") or "").strip()
         if not raw_workspace:
@@ -5265,13 +5552,25 @@ class EvaluationService:
                 return True
         return False
 
-    def rejudge_run(self, run_id: str, *, reuse_judge: bool = False) -> dict[str, Any]:
+    def rejudge_run(
+        self,
+        run_id: str,
+        *,
+        reuse_judge: bool = False,
+        use_current_evaluator: bool = False,
+        waive_retry_penalty: bool = False,
+    ) -> dict[str, Any]:
         """Re-score a stored answer without re-running the candidate model.
 
         ``reuse_judge`` is used by deterministic batch revalidation after a parser or
         checker update.  Existing AI-rubric evidence is retained in that mode so a
         historical repair does not create fresh judge cost or change a judge opinion.
+        ``waive_retry_penalty`` is an explicit, audited repair for retries caused by a
+        defective evaluator. It is only available while opting into the current
+        evaluator and never changes the candidate workspace or re-runs the model.
         """
+        if waive_retry_penalty and not use_current_evaluator:
+            raise ValueError("retry_penalty_waiver_requires_current_evaluator")
         run = self.get_run(run_id)
         if run["status"] not in {
             "needs_review",
@@ -5281,7 +5580,25 @@ class EvaluationService:
             "interrupted",
         }:
             raise ValueError("run_not_rejudgeable")
-        definition, _ = self._definition_for_run(run)
+        definition, original_revision = self._definition_for_run(run)
+        evaluation_revision = original_revision
+        if use_current_evaluator:
+            current_revision = self.database.fetch_one(
+                "SELECT tr.id,tr.version,tr.definition_hash,tr.definition_json "
+                "FROM test_cases t JOIN test_case_revisions tr "
+                "ON tr.test_case_id=t.id AND tr.definition_hash=t.definition_hash "
+                "WHERE t.id=?",
+                (run["test_case_id"],),
+            )
+            if not current_revision:
+                raise ValueError("current_evaluator_revision_missing")
+            current_definition = _json(current_revision["definition_json"], {})
+            if evaluator_migration_contract(current_definition) != evaluator_migration_contract(
+                definition
+            ):
+                raise ValueError("current_evaluator_public_contract_changed")
+            definition = current_definition
+            evaluation_revision = current_revision
         preserved_timeout_submission = self._has_preserved_workspace_submission(
             run, definition
         )
@@ -5298,6 +5615,11 @@ class EvaluationService:
             final_answer = (
                 "Agent reached the runtime safety limit; score the preserved workspace "
                 "as the submitted coding result."
+                if str(run.get("error_code") or "") == "runtime_safety_limit"
+                else (
+                    "Agent execution ended after producing workspace artifacts; score the "
+                    "preserved workspace as the submitted coding result."
+                )
             )
         if not final_answer.strip():
             raise ValueError("run_has_no_final_answer")
@@ -5310,11 +5632,26 @@ class EvaluationService:
             "SELECT seed_hex,revealed_at FROM run_validation_seeds WHERE run_id=?",
             (run_id,),
         )
+        seed_committed_during_rejudge = False
+        if not validation_seed:
+            # Older/private-file revisions could reach validation without a
+            # seed because the seed detector only recognized catalog refs. A
+            # deterministic rejudge must recover that submission without
+            # rerunning the candidate. Generate one fresh, unselected seed and
+            # make the late commitment explicit in the audit trail.
+            validation_seed = self._validation_seed_for_run(run_id, definition)
+            seed_committed_during_rejudge = validation_seed is not None
+        frontier_variant: dict[str, Any] | None = None
         if validation_seed:
             definition["limits"] = {
                 **(definition.get("limits") or {}),
                 "_validation_seed": validation_seed["seed_hex"],
             }
+            definition, frontier_variant = _materialize_private_frontier_variant(
+                definition, validation_seed["seed_hex"]
+            )
+        elif definition.get("_private_frontier_variants") is not None:
+            raise ValueError("frontier_variant_seed_missing")
         workspace_path = (
             Path(run["workspace_path"])
             if run.get("workspace_path")
@@ -5341,8 +5678,25 @@ class EvaluationService:
                 "previous_status": run["status"],
                 "previous_score": previous_score,
                 "judge_mode": "reuse" if reuse_judge else "fresh",
+                "evaluator_mode": "current" if use_current_evaluator else "frozen",
+                "original_revision_id": original_revision.get("id"),
+                "evaluation_revision_id": evaluation_revision.get("id"),
+                "retry_penalty_waived": waive_retry_penalty,
             },
         )
+        if seed_committed_during_rejudge and validation_seed:
+            event_sink(
+                "validation.seed_committed",
+                {
+                    "algorithm": "sha256",
+                    "commitment": validation_seed["commitment_sha256"],
+                    "revealed": bool(validation_seed.get("revealed_at")),
+                    "late_recovery": True,
+                    "candidate_model_rerun": False,
+                },
+            )
+        if frontier_variant:
+            event_sink("math.variant_selected", {**frontier_variant, "rejudge": True})
         if preserved_timeout_submission:
             if validation_seed and not validation_seed.get("revealed_at"):
                 revealed_at = utc_now()
@@ -5353,89 +5707,112 @@ class EvaluationService:
                 )
                 validation_seed["revealed_at"] = revealed_at
                 event_sink("validation.seed_revealed", {"reason": "timeout_workspace_salvage"})
+            previous_error_code = str(run.get("error_code") or "")
             event_sink(
-                "run.timeout_workspace_salvaged",
+                (
+                    "run.timeout_workspace_salvaged"
+                    if previous_error_code == "runtime_safety_limit"
+                    else "run.host_failure_workspace_salvaged"
+                ),
                 {
-                    "previous_error_code": run.get("error_code"),
+                    "previous_error_code": previous_error_code,
                     "workspace_preserved": True,
                     "candidate_model_rerun": False,
                 },
             )
-        fresh_judge_callback = self._judge_callback(run, definition, workspace, event_sink)
-        if reuse_judge:
-            stored_judges = self.database.fetch_all(
-                "SELECT score,status,evidence_json FROM validator_results "
-                "WHERE run_id=? AND validator_type='ai_rubric' ORDER BY created_at,id",
+        stored_review_rows = (
+            self.database.fetch_all(
+                "SELECT score,status,evidence_json FROM judge_reviews "
+                "WHERE run_id=? ORDER BY created_at,id",
                 (run_id,),
             )
-            stored_judge_index = 0
+            if reuse_judge
+            else []
+        )
+        fresh_judge_callback = self._judge_callback(
+            run,
+            definition,
+            workspace,
+            event_sink,
+            stored_reviews=stored_review_rows if stored_review_rows else None,
+        )
+        if reuse_judge:
+            if stored_review_rows:
+                judge_callback = fresh_judge_callback
+            else:
+                stored_judges = self.database.fetch_all(
+                    "SELECT score,status,evidence_json FROM validator_results "
+                    "WHERE run_id=? AND validator_type='ai_rubric' ORDER BY created_at,id",
+                    (run_id,),
+                )
+                stored_judge_index = 0
 
-            def reused_judge_callback(
-                config: dict[str, Any], weight: float
-            ) -> ValidationResult:
-                nonlocal stored_judge_index
-                if stored_judge_index < len(stored_judges):
-                    stored = stored_judges[stored_judge_index]
-                    stored_judge_index += 1
-                    evidence = _json(stored.get("evidence_json"), {})
-                    if config.get("scoring_points") and evidence.get("schema") == RUBRIC_SCHEMA:
-                        judge_payload = {
-                            key: evidence[key]
-                            for key in (
-                                "schema",
-                                "rubric_version",
-                                "source_tier",
-                                "solution_path",
-                                "points",
-                                "overall_confidence",
-                                "summary",
-                                "review_flags",
+                def reused_judge_callback(
+                    config: dict[str, Any], weight: float
+                ) -> ValidationResult:
+                    nonlocal stored_judge_index
+                    if stored_judge_index < len(stored_judges):
+                        stored = stored_judges[stored_judge_index]
+                        stored_judge_index += 1
+                        evidence = _json(stored.get("evidence_json"), {})
+                        if config.get("scoring_points") and evidence.get("schema") == RUBRIC_SCHEMA:
+                            judge_payload = {
+                                key: evidence[key]
+                                for key in (
+                                    "schema",
+                                    "rubric_version",
+                                    "source_tier",
+                                    "solution_path",
+                                    "points",
+                                    "overall_confidence",
+                                    "summary",
+                                    "review_flags",
+                                )
+                                if key in evidence
+                            }
+                            rescored = score_rubric(judge_payload, config)
+                            evidence = {
+                                **evidence,
+                                "computed_score": rescored.percentage,
+                                "rubric_evaluation": rescored.as_dict(),
+                                "point_awards": rescored.point_results,
+                                "review_status": (
+                                    "completed" if rescored.status == "passed" else "needs_review"
+                                ),
+                                "review_reasons": rescored.review_flags,
+                                "reused_for_revalidation": True,
+                                "source_run_id": run_id,
+                            }
+                            return ValidationResult(
+                                "ai_rubric",
+                                weight,
+                                rescored.percentage,
+                                "passed" if rescored.status == "passed" else "needs_review",
+                                evidence,
                             )
-                            if key in evidence
-                        }
-                        rescored = score_rubric(judge_payload, config)
                         evidence = {
                             **evidence,
-                            "computed_score": rescored.percentage,
-                            "rubric_evaluation": rescored.as_dict(),
-                            "point_awards": rescored.point_results,
-                            "review_status": (
-                                "completed" if rescored.status == "passed" else "needs_review"
-                            ),
-                            "review_reasons": rescored.review_flags,
                             "reused_for_revalidation": True,
                             "source_run_id": run_id,
                         }
                         return ValidationResult(
                             "ai_rubric",
                             weight,
-                            rescored.percentage,
-                            "passed" if rescored.status == "passed" else "needs_review",
+                            float(stored.get("score") or 0),
+                            str(stored.get("status") or "needs_review"),
                             evidence,
                         )
-                    evidence = {
-                        **evidence,
-                        "reused_for_revalidation": True,
-                        "source_run_id": run_id,
-                    }
+                    if fresh_judge_callback is not None:
+                        return fresh_judge_callback(config, weight)
                     return ValidationResult(
                         "ai_rubric",
                         weight,
-                        float(stored.get("score") or 0),
-                        str(stored.get("status") or "needs_review"),
-                        evidence,
+                        0,
+                        "needs_review",
+                        {"reason": "No reusable or configured judge is available"},
                     )
-                if fresh_judge_callback is not None:
-                    return fresh_judge_callback(config, weight)
-                return ValidationResult(
-                    "ai_rubric",
-                    weight,
-                    0,
-                    "needs_review",
-                    {"reason": "No reusable or configured judge is available"},
-                )
 
-            judge_callback = reused_judge_callback
+                judge_callback = reused_judge_callback
         else:
             judge_callback = fresh_judge_callback
         score = self.scoring.score(
@@ -5485,7 +5862,8 @@ class EvaluationService:
             "ORDER BY attempt_no DESC LIMIT 1",
             (run_id,),
         )
-        multiplier = float(attempt_row["multiplier"]) if attempt_row else 1.0
+        stored_multiplier = float(attempt_row["multiplier"]) if attempt_row else 1.0
+        multiplier = 1.0 if waive_retry_penalty else stored_multiplier
         adjusted_score = (
             round((score.score or 0) * multiplier, 2) if score.score is not None else None
         )
@@ -5503,6 +5881,7 @@ class EvaluationService:
         with self.database.transaction() as connection:
             connection.execute("DELETE FROM validator_results WHERE run_id=?", (run_id,))
             connection.execute("DELETE FROM score_components WHERE run_id=?", (run_id,))
+            connection.execute("DELETE FROM artifacts WHERE run_id=?", (run_id,))
         for component in score.components:
             self.database.execute(
                 "INSERT INTO validator_results(id,run_id,validator_type,weight,score,status,"
@@ -5532,6 +5911,7 @@ class EvaluationService:
                     utc_now(),
                 ),
             )
+        self._record_artifacts(run_id, workspace, event_sink)
         if attempt_row:
             self.database.execute(
                 "UPDATE run_attempts SET raw_score=?,adjusted_score=?,passed=?,result_json=? "
@@ -5546,9 +5926,21 @@ class EvaluationService:
             )
         self.database.execute(
             "UPDATE runs SET status=?,score=?,passed=?,error_code=NULL,error_message=NULL,"
-            "completed_at=? WHERE id=?",
-            (final_status, adjusted_score, int(passed), utc_now(), run_id),
+            "failure_class=?,completed_at=? WHERE id=?",
+            (
+                final_status,
+                adjusted_score,
+                int(passed),
+                None if passed else self._score_failure_class(score),
+                utc_now(),
+                run_id,
+            ),
         )
+        if use_current_evaluator:
+            self.database.execute(
+                "UPDATE runs SET test_revision_id=? WHERE id=?",
+                (evaluation_revision["id"], run_id),
+            )
         event_sink(
             "run.rejudged",
             {
@@ -5558,6 +5950,11 @@ class EvaluationService:
                 "raw_score": score.score,
                 "passed": passed,
                 "judge_mode": "reuse" if reuse_judge else "fresh",
+                "evaluator_mode": "current" if use_current_evaluator else "frozen",
+                "evaluation_revision_id": evaluation_revision.get("id"),
+                "retry_penalty_waived": waive_retry_penalty,
+                "stored_attempt_multiplier": stored_multiplier,
+                "applied_attempt_multiplier": multiplier,
             },
         )
         self.database.insert_audit(
@@ -5569,6 +5966,12 @@ class EvaluationService:
                 "previous_score": previous_score,
                 "score": adjusted_score,
                 "judge_mode": "reuse" if reuse_judge else "fresh",
+                "evaluator_mode": "current" if use_current_evaluator else "frozen",
+                "original_revision_id": original_revision.get("id"),
+                "evaluation_revision_id": evaluation_revision.get("id"),
+                "retry_penalty_waived": waive_retry_penalty,
+                "stored_attempt_multiplier": stored_multiplier,
+                "applied_attempt_multiplier": multiplier,
             },
         )
         self._refresh_experiment(run["experiment_id"])
@@ -5649,16 +6052,46 @@ class EvaluationService:
             )
             if not experiment or experiment["status"] != "running":
                 return
-            self._execute_run(run_id)
+            self._execute_run(run_id, require_running=True)
 
-    def _execute_run(self, run_id: str) -> None:
-        run = self.database.fetch_one("SELECT * FROM runs WHERE id=?", (run_id,))
-        if not run or run["status"] not in {"queued", "interrupted"}:
-            return
-        cancel_event = threading.Event()
+    def _should_resume_validation(self, run: dict[str, Any]) -> bool:
+        if run.get("status") != "interrupted" or not str(run.get("final_answer") or "").strip():
+            return False
+        if run.get("error_code") in {
+            "suite_paused_after_submission",
+            "app_restarted_during_validation",
+        }:
+            return True
+        reached_scoring = self.database.fetch_one(
+            "SELECT 1 AS ok FROM run_events WHERE run_id=? "
+            "AND event_type IN ('run.validating','run.judging') LIMIT 1",
+            (run["id"],),
+        )
+        return bool(reached_scoring)
+
+    def _execute_run(self, run_id: str, *, require_running: bool = False) -> None:
         with self._state_lock:
+            run = self.database.fetch_one("SELECT * FROM runs WHERE id=?", (run_id,))
+            if not run or run["status"] not in {"queued", "interrupted"}:
+                return
+            if require_running:
+                experiment = self.database.fetch_one(
+                    "SELECT status FROM experiments WHERE id=?", (run["experiment_id"],)
+                )
+                if not experiment or experiment["status"] != "running":
+                    return
+            resume_validation = self._should_resume_validation(run)
+            cancel_event = threading.Event()
             self._cancel_events[run_id] = cancel_event
-        seq = 0
+            self.database.execute(
+                "UPDATE runs SET status=?,started_at=COALESCE(started_at,?),completed_at=NULL,"
+                "error_code=NULL,error_message=NULL WHERE id=?",
+                ("interrupted" if resume_validation else "preparing", utc_now(), run_id),
+            )
+        seq_row = self.database.fetch_one(
+            "SELECT COALESCE(MAX(seq),0) AS seq FROM run_events WHERE run_id=?", (run_id,)
+        )
+        seq = int(seq_row["seq"] or 0) if seq_row else 0
         event_lock = threading.Lock()
 
         def event_sink(event_type: str, payload: dict[str, Any]) -> None:
@@ -5671,10 +6104,25 @@ class EvaluationService:
                 )
 
         try:
-            self.database.execute(
-                "UPDATE runs SET status='preparing',started_at=?,completed_at=NULL WHERE id=?",
-                (utc_now(), run_id),
-            )
+            if resume_validation:
+                event_sink(
+                    "run.validating",
+                    {"resumed": True, "candidate_model_rerun": False},
+                )
+                resumed = self.rejudge_run(run_id)
+                self.database.execute(
+                    "UPDATE run_attempts SET status=?,completed_at=COALESCE(completed_at,?) "
+                    "WHERE id=(SELECT id FROM run_attempts WHERE run_id=? "
+                    "ORDER BY attempt_no DESC LIMIT 1)",
+                    (resumed["status"], utc_now(), run_id),
+                )
+                self.database.insert_audit(
+                    "run.validation_resumed",
+                    "run",
+                    run_id,
+                    {"candidate_model_rerun": False, "status": resumed["status"]},
+                )
+                return
             model = self.get_model(run["model_id"])
             runner = self.database.fetch_one(
                 "SELECT * FROM agent_runners WHERE id=?", (run["runner_id"],)
@@ -5788,6 +6236,7 @@ class EvaluationService:
                 },
             )
             validation_seed = self._validation_seed_for_run(run_id, definition)
+            frontier_variant: dict[str, Any] | None = None
             if validation_seed:
                 definition["limits"] = {
                     **(definition.get("limits") or {}),
@@ -5801,6 +6250,11 @@ class EvaluationService:
                         "revealed": bool(validation_seed.get("revealed_at")),
                     },
                 )
+                definition, frontier_variant = _materialize_private_frontier_variant(
+                    definition, validation_seed["seed_hex"]
+                )
+                if frontier_variant:
+                    event_sink("math.variant_selected", frontier_variant)
             metadata = definition.get("metadata") or {}
             workspace_root = self.settings.workspaces_dir.resolve()
             workspace_path = (workspace_root / run_id).resolve()
@@ -5862,13 +6316,21 @@ class EvaluationService:
             passed = False
             previous_summary = ""
             client: ModelClient | None = None
-            for attempt_no in range(1, max_attempts + 1):
+            previous_attempt = self.database.fetch_one(
+                "SELECT COALESCE(MAX(attempt_no),0) AS attempt_no FROM run_attempts WHERE run_id=?",
+                (run_id,),
+            )
+            attempt_offset = int(previous_attempt["attempt_no"] or 0) if previous_attempt else 0
+            for attempt_index in range(1, max_attempts + 1):
+                # Interrupted attempts remain in the audit trail. Continue numbering
+                # instead of colliding with UNIQUE(run_id, attempt_no) on resume.
+                attempt_no = attempt_offset + attempt_index
                 task_temp.mkdir(parents=True, exist_ok=True)
                 attempt_instruction = self._attempt_instruction(
-                    definition["instruction"], attempt_no, hints, previous_summary
+                    definition["instruction"], attempt_index, hints, previous_summary
                 )
                 attempt_definition = {**definition, "instruction": attempt_instruction}
-                multiplier = multipliers[attempt_no - 1]
+                multiplier = multipliers[attempt_index - 1]
                 attempt_id = new_id()
                 attempt_started = utc_now()
                 self.database.execute(
@@ -5900,6 +6362,7 @@ class EvaluationService:
                         limits=limits,
                         system_prompt=runner["system_prompt"],
                         event_sink=event_sink,
+                        cancellation_check=cancel_event.is_set,
                     )
                     result = harness.run(attempt_instruction)
                 else:
@@ -5940,37 +6403,100 @@ class EvaluationService:
                     )
                 cost, cost_source = self._usage_cost(model, cumulative_usage)
                 attempt_cost, _ = self._usage_cost(model, result.usage)
+                capacity_pause = bool(
+                    not result.ok
+                    and self._is_resource_exhaustion_failure(
+                        result.error_code, result.error_message
+                    )
+                )
+                if capacity_pause and not cancel_event.is_set():
+                    try:
+                        self.pause_experiment(run["experiment_id"])
+                        self.database.insert_audit(
+                            "experiment.auto_paused",
+                            "experiment",
+                            run["experiment_id"],
+                            {
+                                "run_id": run_id,
+                                "reason": "model_capacity_exhausted",
+                                "provider_error_code": result.error_code,
+                                "provider_error": str(result.error_message or "")[:1000],
+                            },
+                        )
+                    except (KeyError, ValueError):
+                        # A simultaneous user pause/cancel may win the state race.
+                        # The existing terminal state remains authoritative.
+                        pass
                 if cancel_event.is_set():
                     with self._state_lock:
                         paused = run_id in self._paused_runs
                         skipped = run_id in self._skipped_runs
                     terminal_status = "interrupted" if paused else "cancelled"
-                    terminal_code = "suite_paused" if paused else "suite_skipped" if skipped else None
+                    preserved_submission = bool(result.ok and str(result.final_answer or "").strip())
+                    terminal_code = (
+                        "suite_paused_after_submission"
+                        if paused and preserved_submission
+                        else "model_capacity_exhausted" if paused and capacity_pause
+                        else "suite_paused" if paused
+                        else "suite_skipped" if skipped
+                        else None
+                    )
                     terminal_message = (
-                        "用户暂停了套件；恢复时将重新执行本题"
-                        if paused
+                        "用户暂停了套件；模型最终答案已保留，恢复时只继续验证"
+                        if paused and preserved_submission
+                        else (
+                            "检测到模型额度、余额或速率限制，套件已自动暂停；"
+                            f"恢复额度后可继续。原始错误：{str(result.error_message or result.error_code or '')[:1000]}"
+                        ) if paused and capacity_pause
+                        else "用户暂停了套件；恢复时将重新执行本题" if paused
                         else "用户跳过了此项目" if skipped else None
                     )
                     self.database.execute(
-                        "UPDATE run_attempts SET status=?,completed_at=? WHERE id=?",
-                        (terminal_status, utc_now(), attempt_id),
-                    )
-                    self.database.execute(
-                        "UPDATE runs SET status=?,error_code=?,error_message=?,completed_at=? WHERE id=?",
+                        "UPDATE run_attempts SET status=?,tokens_input=?,tokens_output=?,cost_usd=?,"
+                        "duration_ms=?,steps=?,error_code=?,error_message=?,completed_at=? WHERE id=?",
                         (
                             terminal_status,
+                            result.usage.input_tokens,
+                            result.usage.output_tokens,
+                            attempt_cost,
+                            result.duration_ms,
+                            result.steps,
                             terminal_code,
                             terminal_message,
+                            utc_now(),
+                            attempt_id,
+                        ),
+                    )
+                    self.database.execute(
+                        "UPDATE runs SET status=?,final_answer=?,steps=?,tokens_input=?,tokens_output=?,"
+                        "cost_usd=?,cost_source=?,duration_ms=?,attempt_count=?,error_code=?,"
+                        "error_message=?,telemetry_status=?,completed_at=? WHERE id=?",
+                        (
+                            terminal_status,
+                            result.final_answer if preserved_submission else None,
+                            cumulative_steps,
+                            cumulative_usage.input_tokens,
+                            cumulative_usage.output_tokens,
+                            cost,
+                            cost_source,
+                            cumulative_duration,
+                            attempt_no,
+                            terminal_code,
+                            terminal_message,
+                            telemetry_status,
                             utc_now(),
                             run_id,
                         ),
                     )
                     event_sink(
                         "run.interrupted" if paused else "run.skipped" if skipped else "run.cancelled",
-                        {},
+                        {"candidate_answer_preserved": preserved_submission},
                     )
                     return
                 if not result.ok:
+                    failure_class = self._failure_class(
+                        result.error_code, result.error_message, phase="execution"
+                    )
                     infrastructure_failure = result.error_code in {
                         "cli_missing",
                         "cli_unavailable",
@@ -5980,9 +6506,12 @@ class EvaluationService:
                         "model_error",
                         "harness_model_not_active",
                         "harness_preset_unavailable",
-                    }
-                    failure_class = self._failure_class(
-                        result.error_code, result.error_message, phase="execution"
+                    } or failure_class == "runtime_environment_failure"
+                    previous_answer = self.database.fetch_one(
+                        "SELECT final_answer FROM runs WHERE id=?", (run_id,)
+                    )
+                    failure_answer = result.final_answer or (
+                        previous_answer.get("final_answer") if previous_answer else None
                     )
                     self.database.execute(
                         "UPDATE run_attempts SET status=?,tokens_input=?,tokens_output=?,cost_usd=?,"
@@ -6007,7 +6536,7 @@ class EvaluationService:
                         "error_message=?,telemetry_status=?,failure_class=?,completed_at=? WHERE id=?",
                         (
                             terminal_status,
-                            result.final_answer,
+                            failure_answer,
                             cumulative_steps,
                             cumulative_usage.input_tokens,
                             cumulative_usage.output_tokens,
@@ -6031,6 +6560,41 @@ class EvaluationService:
                             "attempt_consumed": not infrastructure_failure,
                         },
                     )
+                    # A later repair attempt may fail because the native Agent host
+                    # itself crashes (for example a transient Windows IOCP handle
+                    # failure).  A fully scored earlier attempt and its workspace are
+                    # still valid evidence. Re-run only the evaluator against the
+                    # preserved workspace; never call the candidate model again.
+                    if infrastructure_failure and attempt_no > 1:
+                        previous_scored = self.database.fetch_one(
+                            "SELECT attempt_no,raw_score FROM run_attempts WHERE run_id=? "
+                            "AND status='completed' AND raw_score IS NOT NULL "
+                            "ORDER BY attempt_no DESC LIMIT 1",
+                            (run_id,),
+                        )
+                        if previous_scored and failure_answer:
+                            try:
+                                recovered = self.rejudge_run(run_id)
+                                self.database.insert_audit(
+                                    "run.retry_host_failure_recovered",
+                                    "run",
+                                    run_id,
+                                    {
+                                        "failed_attempt": attempt_no,
+                                        "preserved_attempt": previous_scored["attempt_no"],
+                                        "preserved_raw_score": previous_scored["raw_score"],
+                                        "host_error_code": result.error_code,
+                                        "host_error": str(result.error_message or "")[:1000],
+                                        "rejudged_score": recovered.get("score"),
+                                    },
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "Could not recover scored attempt after native host failure for %s",
+                                    run_id,
+                                )
+                            else:
+                                return
                     # A native coding Agent can be stopped by the runtime watchdog
                     # after it has already written a usable submission to disk.  Do
                     # not discard that work or require the user to discover the
@@ -6264,7 +6828,7 @@ class EvaluationService:
                         "passed": passed,
                     },
                 )
-                if passed or attempt_no == max_attempts or score.status != "scored":
+                if passed or attempt_index == max_attempts or score.status != "scored":
                     break
                 previous_summary = self._attempt_feedback(score)
                 event_sink(
@@ -6451,6 +7015,16 @@ class EvaluationService:
             return "permission_mismatch"
         if code in {"command_timeout", "runtime_safety_limit"} or "timed out" in detail:
             return "agent_timeout"
+        if code == "cli_failed" and any(
+            marker in detail
+            for marker in (
+                "postqueuedcompletionstatus",
+                "the handle is invalid",
+                "invalid handle",
+                "句柄无效",
+            )
+        ):
+            return "runtime_environment_failure"
         if code in {
             "cli_missing",
             "cli_unavailable",
@@ -6464,6 +7038,35 @@ class EvaluationService:
         }:
             return "runtime_environment_failure"
         return "agent_solution_failure"
+
+    @staticmethod
+    def _is_resource_exhaustion_failure(
+        error_code: str | None, message: str | None
+    ) -> bool:
+        if str(error_code or "").lower() not in {
+            "model_error",
+            "native_agent_execution_error",
+            "harness_model_not_active",
+        }:
+            return False
+        detail = f"{error_code or ''} {message or ''}".lower()
+        markers = (
+            "insufficient_quota",
+            "quota exceeded",
+            "quota has been exceeded",
+            "resource_exhausted",
+            "rate limit",
+            "rate_limit",
+            "too many requests",
+            "status code 429",
+            "http 429",
+            "credit balance",
+            "billing hard limit",
+            "额度不足",
+            "额度已用完",
+            "余额不足",
+        )
+        return any(marker in detail for marker in markers)
 
     @staticmethod
     def _score_failure_class(score) -> str:
@@ -6677,6 +7280,21 @@ class EvaluationService:
                     "ELECTRON_RUN_AS_NODE": "1",
                     "USERPROFILE": str(zcode_runtime_root),
                     "HOME": str(zcode_runtime_root),
+                    # ZCode can autonomously invoke host CLIs while running in its
+                    # official headless yolo mode.  Password and confirmation
+                    # prompts have no terminal client here, so tools such as psql
+                    # would otherwise wait until the whole-task watchdog fires.
+                    # Force common subprocesses into deterministic non-interactive
+                    # behavior; a model can still provide explicit credentials in
+                    # its own command when the task intentionally supplies them.
+                    "CI": "1",
+                    "DEBIAN_FRONTEND": "noninteractive",
+                    "GCM_INTERACTIVE": "Never",
+                    "GIT_TERMINAL_PROMPT": "0",
+                    "PIP_NO_INPUT": "1",
+                    "POETRY_NO_INTERACTION": "1",
+                    "PGCONNECT_TIMEOUT": "5",
+                    "PGPASSWORD": "__agentbench_no_interactive_password__",
                 }
             )
             event_sink(
@@ -6773,6 +7391,7 @@ class EvaluationService:
         live_text_last_emit = 0.0
         live_text_last_length = 0
         zcode_live_final_seen = False
+        last_live_activity_at = time.monotonic()
 
         def workspace_state() -> dict[str, tuple[int, int]]:
             return _live_workspace_state(workspace.root)
@@ -6784,6 +7403,8 @@ class EvaluationService:
             nonlocal live_line_count, live_text_buffer, live_text_stream
             nonlocal live_text_last_emit, live_text_last_length
             nonlocal zcode_live_final_seen
+            nonlocal last_live_activity_at
+            last_live_activity_at = time.monotonic()
             with live_lock:
                 live_line_count += 1
                 line_no = live_line_count
@@ -6860,7 +7481,7 @@ class EvaluationService:
                 )
 
         def heartbeat_callback(elapsed_ms: int) -> None:
-            nonlocal previous_workspace_state
+            nonlocal previous_workspace_state, last_live_activity_at
             current_state = workspace_state()
             changes: list[dict[str, Any]] = []
             for path, (size, modified) in current_state.items():
@@ -6879,9 +7500,12 @@ class EvaluationService:
             for path in previous_workspace_state.keys() - current_state.keys():
                 changes.append({"path": path, "change": "deleted", "size": 0})
             previous_workspace_state = current_state
+            if changes:
+                last_live_activity_at = time.monotonic()
             for change in changes[:12]:
                 event_sink("live.file_change", change)
             phase, summary = _harness_activity_phase(changes, elapsed_ms)
+            idle_ms = max(0, int((time.monotonic() - last_live_activity_at) * 1000))
             event_sink(
                 "live.heartbeat",
                 {
@@ -6889,6 +7513,8 @@ class EvaluationService:
                     "line_count": live_line_count,
                     "workspace_files": len(current_state),
                     "changes": len(changes),
+                    "idle_ms": idle_ms,
+                    "stale_signal": idle_ms >= 10 * 60 * 1000,
                     **(
                         {"phase": phase, "summary": summary}
                         if runner["runner_type"] == "deepseek_harness"
@@ -7795,13 +8421,32 @@ class EvaluationService:
                 "effort_verified": judge_condition["verified"],
             }
             files = workspace.list_files()[:50]
+            capability_dimension = str(
+                (definition.get("metadata") or {}).get("capability_dimension") or ""
+            )
+            research_review = capability_dimension == "research_writing"
+            if research_review:
+                priority_names = {"report.md": 0, "claims.json": 1}
+                files.sort(
+                    key=lambda path: (
+                        priority_names.get(Path(path).name.casefold(), 2),
+                        path.casefold(),
+                    )
+                )
             file_samples: dict[str, str] = {}
-            sample_budget = 50_000
+            sample_budget = 140_000 if research_review else 50_000
             for path in files[:20]:
                 if sample_budget <= 0:
                     break
                 try:
-                    sample = workspace.read_file(path, min(4_000, sample_budget))
+                    preferred_research_output = (
+                        research_review
+                        and Path(path).name.casefold() in {"report.md", "claims.json"}
+                    )
+                    per_file_limit = 50_000 if preferred_research_output else (
+                        12_000 if research_review else 4_000
+                    )
+                    sample = workspace.read_file(path, min(per_file_limit, sample_budget))
                 except OSError:
                     continue
                 file_samples[path] = sample
@@ -7828,12 +8473,23 @@ class EvaluationService:
                         "invalid implication, wrong interval/domain/branch, sign/orientation error, "
                         "or unsupported key equality is a mathematical defect and MUST reduce the "
                         "award by at least 0.5 marks. Do not call such a defect presentation-only. "
+                        "A false equation, false universal claim, or invalid lemma is still a "
+                        "mathematical defect even if the candidate later stops using it; explicitly "
+                        "record and deduct it. A scoring point marked mandatory represents a required "
+                        "proof route or audit obligation: an alternative method may supplement it but "
+                        "cannot replace it, and anything short of fully establishing it activates the "
+                        "configured question-level cap. Honor each point's minimum_defect_deduction "
+                        "when it is stricter than the global minimum. "
                         "Use defect_severity=minor for a local repairable logical gap, major when a "
                         "key argument is absent or wrong, and fatal when the scoring point is not "
                         "established. Full credit requires a complete, rigorous derivation with no "
                         "unresolved review flag and confidence at or above the configured full-credit "
                         "threshold. Award only multiples of 0.5 marks. Numerical checks do not replace "
-                        "proof and unverifiable claims of tool verification earn no credit."
+                        "proof and unverifiable claims of tool verification earn no credit. Merely naming "
+                        "a theorem, formula, keyword, or target result without applying it to the submitted "
+                        "work earns no point. Evidence must quote or precisely locate the candidate's actual "
+                        "formula or inference. A correct final answer without supporting derivation earns only "
+                        "the explicitly final-answer point; an incorrect final answer makes that point fatal."
                     )
             else:
                 judge_instruction = (
@@ -7893,7 +8549,20 @@ class EvaluationService:
                     judge_temp.mkdir(parents=True, exist_ok=True)
                     judge_environment = _json(runner.get("env_json"), {})
                     judge_environment.update(
-                        {"TEMP": str(judge_temp), "TMP": str(judge_temp), "TMPDIR": str(judge_temp)}
+                        {
+                            "TEMP": str(judge_temp),
+                            "TMP": str(judge_temp),
+                            "TMPDIR": str(judge_temp),
+                            # Judge workspaces live below the benchmark data
+                            # directory, which may itself be nested in a large
+                            # source repository.  Prevent native judge CLIs from
+                            # discovering and scanning that unrelated parent
+                            # repository; the copied submission remains fully
+                            # visible inside ``judge_workspace``.
+                            "GIT_CEILING_DIRECTORIES": str(
+                                self.settings.workspaces_dir.resolve()
+                            ),
+                        }
                     )
                     judge_args = self._studio_native_options(
                         _json(runner.get("args_json"), []),
@@ -7908,15 +8577,38 @@ class EvaluationService:
                     try:
                         if runner["runner_type"] == "deepseek_harness":
                             provider = str(model_settings.get("agent_provider") or "")
-                            judge_args, judge_harness_root, actual_effort, _ = (
+                            (
+                                judge_args,
+                                judge_harness_root,
+                                actual_effort,
+                                _,
+                                actual_mode,
+                            ) = (
                                 self._prepare_harness_run_config(
                                     judge_args,
                                     provider,
                                     str(model["model_name"]),
                                     str(judge_condition["effective"] or judge_effort),
+                                    HARNESS_DEFAULT_MODE,
+                                    str(runner["executable"]),
                                 )
                             )
                             judge_runtime_identity["effective_reasoning_effort"] = actual_effort
+                            judge_runtime_identity.update(
+                                {
+                                    "effective_agent_mode": actual_mode["id"],
+                                    "agent_mode_verified": True,
+                                }
+                            )
+                            judge_environment.update(
+                                {
+                                    "AGENTBENCH_DSH_PACKAGE_ROOT": str(
+                                        actual_mode["_package_root"]
+                                    ),
+                                    "DSH_TOOLS_MODE": str(actual_mode["tools_mode"]),
+                                    "DSH_PERMISSION_MODE": "read-only",
+                                }
+                            )
                         elif runner["runner_type"] == "qoder_cli":
                             judge_args = self._qoder_benchmark_options(judge_args)
                             judge_qoder_root = self._prepare_qoder_run_config()
@@ -8057,14 +8749,46 @@ class EvaluationService:
 
         return callback
 
-    def _judge_callback(self, run, definition, workspace, event_sink):
-        primary = self._single_judge_callback(
-            run,
-            definition,
-            workspace,
-            event_sink,
-            anonymous_slot="primary",
-        )
+    def _judge_callback(
+        self, run, definition, workspace, event_sink, stored_reviews=None
+    ):
+        stored_by_slot: dict[str, dict[str, Any]] = {}
+        for stored in stored_reviews or []:
+            evidence = _json(stored.get("evidence_json"), {})
+            slot = str(evidence.get("anonymous_slot") or "primary")
+            stored_by_slot[slot] = {**stored, "evidence": evidence}
+
+        def slot_callback(slot: str, model_id=None, runner_id=None):
+            stored = stored_by_slot.get(slot)
+            if stored is not None:
+                def reused(_config: dict[str, Any], weight: float) -> ValidationResult:
+                    status = str(stored.get("status") or "needs_review")
+                    return ValidationResult(
+                        "ai_rubric",
+                        weight,
+                        float(stored.get("score") or 0),
+                        "passed" if status == "completed" else status,
+                        {
+                            **stored["evidence"],
+                            "reused_for_revalidation": True,
+                            "source_run_id": run.get("id"),
+                        },
+                    )
+
+                return reused
+            if stored_reviews is not None:
+                return None
+            return self._single_judge_callback(
+                run,
+                definition,
+                workspace,
+                event_sink,
+                judge_model_id=model_id,
+                judge_runner_id=runner_id,
+                anonymous_slot=slot,
+            )
+
+        primary = slot_callback("primary")
         if primary is None:
             return None
         secondary_model_id = self.get_setting("judge_model_id_secondary")
@@ -8075,14 +8799,8 @@ class EvaluationService:
             and secondary_runner_id
             and secondary_model_id != run["model_id"]
         ):
-            secondary = self._single_judge_callback(
-                run,
-                definition,
-                workspace,
-                event_sink,
-                judge_model_id=secondary_model_id,
-                judge_runner_id=secondary_runner_id,
-                anonymous_slot="secondary",
+            secondary = slot_callback(
+                "secondary", secondary_model_id, secondary_runner_id
             )
         tiebreaker_model_id = self.get_setting("judge_model_id_tiebreaker")
         tiebreaker_runner_id = self.get_setting("judge_runner_id_tiebreaker")
@@ -8092,14 +8810,8 @@ class EvaluationService:
             and tiebreaker_runner_id
             and tiebreaker_model_id != run["model_id"]
         ):
-            tiebreaker = self._single_judge_callback(
-                run,
-                definition,
-                workspace,
-                event_sink,
-                judge_model_id=tiebreaker_model_id,
-                judge_runner_id=tiebreaker_runner_id,
-                anonymous_slot="tiebreaker",
+            tiebreaker = slot_callback(
+                "tiebreaker", tiebreaker_model_id, tiebreaker_runner_id
             )
         threshold_setting = self.get_setting("judge_disagreement_threshold")
         disagreement_threshold = float(
@@ -8107,6 +8819,28 @@ class EvaluationService:
         )
 
         def callback(config: dict[str, Any], weight: float) -> ValidationResult:
+            def usable_review(item: ValidationResult) -> bool:
+                if item.status == "passed":
+                    return True
+                if item.status != "needs_review" or item.score <= 0:
+                    return False
+                evidence = item.evidence if isinstance(item.evidence, dict) else {}
+                reasons = set(evidence.get("review_reasons") or [])
+                point_awards = evidence.get("point_awards")
+                # A fully structured score whose caveat is point-level confidence
+                # or an already-applied dependency rule is still useful to a
+                # three-judge consensus.  Dependency violations are resolved by
+                # ``score_rubric`` before this point (blocked awards are zeroed),
+                # so stopping after the first judge would defeat a rubric that
+                # explicitly requires three opinions.  Schema failure, missing
+                # judge, disagreement and critical failure remain blocking.
+                return (
+                    bool(reasons)
+                    and reasons <= {"low_point_confidence", "dependency_violation"}
+                    and isinstance(point_awards, list)
+                    and bool(point_awards)
+                )
+
             required_judges = int(config.get("required_judges", 1) or 1)
             if required_judges >= 2 and secondary is None:
                 return ValidationResult(
@@ -8121,11 +8855,24 @@ class EvaluationService:
                         "required_judges": required_judges,
                     },
                 )
+            if required_judges >= 3 and tiebreaker is None:
+                return ValidationResult(
+                    "ai_rubric",
+                    weight,
+                    0,
+                    "needs_review",
+                    {
+                        "reason": "Strict exam rubric requires a third anonymous judge",
+                        "review_status": "needs_review",
+                        "review_reasons": ["required_third_judge_missing"],
+                        "required_judges": required_judges,
+                    },
+                )
             first = primary(config, weight)
-            if first.status != "passed" or secondary is None:
+            if not usable_review(first) or secondary is None:
                 return first
             second = secondary(config, weight)
-            if second.status != "passed":
+            if not usable_review(second):
                 return ValidationResult(
                     "ai_rubric",
                     weight,
@@ -8175,7 +8922,7 @@ class EvaluationService:
                         },
                     )
                 third = tiebreaker(config, weight)
-                if third.status != "passed":
+                if not usable_review(third):
                     return ValidationResult(
                         "ai_rubric",
                         weight,
@@ -8192,6 +8939,25 @@ class EvaluationService:
                         },
                     )
                 reviews.append(third)
+            elif required_judges >= 3:
+                third = tiebreaker(config, weight)
+                if not usable_review(third):
+                    return ValidationResult(
+                        "ai_rubric",
+                        weight,
+                        0,
+                        "needs_review",
+                        {
+                            "reason": "Third anonymous judge did not return a valid review",
+                            "review_status": "needs_review",
+                            "review_reasons": ["third_judge_invalid"],
+                            "rubric_source": config.get("rubric_source"),
+                            "rubric_version": config.get("rubric_version"),
+                            "source_tier": config.get("source_tier"),
+                            "reviews": [first.evidence, second.evidence, third.evidence],
+                        },
+                    )
+                reviews.append(third)
             point_sets = [
                 item.evidence.get("point_awards")
                 for item in reviews
@@ -8199,6 +8965,15 @@ class EvaluationService:
                 and isinstance(item.evidence.get("point_awards"), list)
             ]
             consensus_points: list[dict[str, Any]] = []
+            consensus_mode = str(config.get("consensus_mode") or "median")
+            substantive_severities = {"minor", "major", "fatal"}
+            severity_rank = {
+                "none": 0,
+                "presentation": 1,
+                "minor": 2,
+                "major": 3,
+                "fatal": 4,
+            }
             if config.get("scoring_points") and len(point_sets) == len(reviews):
                 for point in config["scoring_points"]:
                     point_id = str(point["point_id"])
@@ -8213,28 +8988,130 @@ class EvaluationService:
                         judge_awards = [
                             float(entry.get("awarded_points", 0)) for entry in candidates
                         ]
+                        judge_severities = [
+                            str(entry.get("defect_severity") or "none")
+                            for entry in candidates
+                        ]
+                        defect_detected = any(
+                            severity in substantive_severities
+                            for severity in judge_severities
+                        )
+                        conservative = (
+                            consensus_mode == "defect_aware" and defect_detected
+                        ) or (
+                            config.get("marking_mode") == "strict_exam"
+                            and len(reviews) == 2
+                        )
                         awarded = (
                             min(judge_awards)
-                            if config.get("marking_mode") == "strict_exam" and len(reviews) == 2
+                            if conservative
                             else statistics.median(judge_awards)
                         )
+                        if consensus_mode == "defect_aware" and defect_detected:
+                            representative = min(
+                                candidates,
+                                key=lambda entry: (
+                                    float(entry.get("awarded_points", 0)),
+                                    -severity_rank.get(
+                                        str(entry.get("defect_severity") or "none"), 0
+                                    ),
+                                ),
+                            )
+                            consensus_severity = max(
+                                judge_severities,
+                                key=lambda severity: severity_rank.get(severity, 0),
+                            )
+                        else:
+                            representative = min(
+                                candidates,
+                                key=lambda entry: abs(
+                                    float(entry.get("awarded_points", 0)) - awarded
+                                ),
+                            )
+                            consensus_severity = str(
+                                representative.get("defect_severity") or "none"
+                            )
                         consensus_points.append(
                             {
-                                **candidates[0],
+                                **representative,
                                 "awarded_points": round(awarded, 6),
+                                "max_points": float(point["max_points"]),
+                                "critical": bool(point.get("critical", False)),
+                                "mandatory": bool(point.get("mandatory", False)),
+                                "minimum_defect_deduction": float(
+                                    point.get("minimum_defect_deduction", 0.0) or 0.0
+                                ),
+                                "defect_severity": consensus_severity,
                                 "judge_awards": judge_awards,
+                                "judge_defect_severities": judge_severities,
+                                "defect_aware_minimum_applied": bool(
+                                    consensus_mode == "defect_aware" and defect_detected
+                                ),
                             }
                         )
                 max_total = sum(float(point["max_points"]) for point in config["scoring_points"])
-                consensus_score = (
+                consensus_score_before_cap = (
                     sum(float(point["awarded_points"]) for point in consensus_points)
                     / max_total
                     * 100
                     if max_total and len(consensus_points) == len(config["scoring_points"])
                     else statistics.median(item.score for item in reviews)
                 )
+                critical_failures = [
+                    str(point["point_id"])
+                    for point in consensus_points
+                    if bool(point.get("critical"))
+                    and float(point.get("awarded_points", 0)) <= 0
+                ]
+                mandatory_failures = [
+                    str(point["point_id"])
+                    for point in consensus_points
+                    if bool(point.get("mandatory"))
+                    and float(point.get("awarded_points", 0)) + 1e-9
+                    < float(point.get("max_points", 0))
+                ]
+                critical_defects = [
+                    str(point["point_id"])
+                    for point in consensus_points
+                    if bool(point.get("critical"))
+                    and str(point.get("defect_severity") or "none")
+                    in substantive_severities
+                ]
+                consensus_caps: list[tuple[str, float]] = []
+                if critical_failures:
+                    consensus_caps.append(
+                        (
+                            "critical_failure_score_cap",
+                            float(config.get("critical_failure_score_cap", 60.0)),
+                        )
+                    )
+                if mandatory_failures:
+                    consensus_caps.append(
+                        (
+                            "mandatory_failure_score_cap",
+                            float(config.get("mandatory_failure_score_cap", 100.0)),
+                        )
+                    )
+                if critical_defects:
+                    consensus_caps.append(
+                        (
+                            "critical_defect_score_cap",
+                            float(config.get("critical_defect_score_cap", 100.0)),
+                        )
+                    )
+                consensus_score = min(
+                    [
+                        consensus_score_before_cap,
+                        *(cap for _reason, cap in consensus_caps),
+                    ]
+                )
             else:
                 consensus_score = statistics.median(item.score for item in reviews)
+                consensus_score_before_cap = consensus_score
+                critical_failures = []
+                mandatory_failures = []
+                critical_defects = []
+                consensus_caps = []
             evidence = {
                 "summary": "Anonymous multi-judge consensus",
                 "judge_count": len(reviews),
@@ -8246,15 +9123,40 @@ class EvaluationService:
                 "source_tier": config.get("source_tier"),
                 "review_status": "completed",
                 "review_reasons": [],
+                "advisory_review_reasons": sorted(
+                    {
+                        reason
+                        for item in reviews
+                        for reason in (
+                            item.evidence.get("review_reasons", [])
+                            if isinstance(item.evidence, dict)
+                            else []
+                        )
+                    }
+                ),
                 "consensus_method": (
                     (
-                        "per_point_conservative_minimum_then_deterministic_sum"
-                        if config.get("marking_mode") == "strict_exam" and len(reviews) == 2
-                        else "per_point_median_then_deterministic_sum"
+                        "per_point_defect_aware_then_deterministic_sum_and_caps"
+                        if consensus_mode == "defect_aware"
+                        else (
+                            "per_point_conservative_minimum_then_deterministic_sum"
+                            if config.get("marking_mode") == "strict_exam"
+                            and len(reviews) == 2
+                            else "per_point_median_then_deterministic_sum"
+                        )
                     )
                     if consensus_points
                     else "median_question_score"
                 ),
+                "consensus_mode": consensus_mode,
+                "consensus_score_before_cap": round(consensus_score_before_cap, 2),
+                "critical_failures": critical_failures,
+                "mandatory_failures": mandatory_failures,
+                "critical_defects": critical_defects,
+                "active_question_caps": [
+                    {"reason": reason, "cap": cap}
+                    for reason, cap in consensus_caps
+                ],
                 "point_awards": consensus_points,
                 "point_awards_by_judge": point_sets,
                 "reviews": [item.evidence for item in reviews],
@@ -8435,17 +9337,151 @@ class EvaluationService:
                 "rubric_version": rubric.get("version", "1.0"),
                 "dimensions": scores,
                 "critical_defects": defects,
+                "raw_manual_score": raw_total,
+                "capped_manual_score": total,
             }
             with self.database.transaction() as connection:
-                connection.execute("DELETE FROM score_components WHERE run_id=?", (run_id,))
-                connection.execute(
-                    "INSERT INTO score_components(id,run_id,dimension,score,weight,evidence_json,created_at) "
-                    "VALUES (?,?,?,?,100,?,?)",
-                    (new_id(), run_id, "manual_quality", total, json.dumps(evidence_payload, ensure_ascii=False), now),
+                manual_validator = connection.execute(
+                    "SELECT id,weight,evidence_json FROM validator_results "
+                    "WHERE run_id=? AND validator_type='manual_rubric' "
+                    "ORDER BY created_at LIMIT 1",
+                    (run_id,),
+                ).fetchone()
+                manual_weight = float(manual_validator["weight"]) if manual_validator else 100.0
+                if manual_validator:
+                    validator_evidence = _json(manual_validator["evidence_json"], {})
+                    validator_evidence.update(evidence_payload)
+                    connection.execute(
+                        "UPDATE validator_results SET score=?,status=?,evidence_json=? WHERE id=?",
+                        (
+                            total,
+                            "passed" if total >= 60 and not defects else "failed",
+                            json.dumps(validator_evidence, ensure_ascii=False),
+                            manual_validator["id"],
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        "INSERT INTO validator_results(id,run_id,validator_type,weight,score,status,"
+                        "evidence_json,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                        (
+                            new_id(), run_id, "manual_rubric", manual_weight, total,
+                            "passed" if total >= 60 and not defects else "failed",
+                            json.dumps(evidence_payload, ensure_ascii=False), now,
+                        ),
+                    )
+
+                manual_dimension = connection.execute(
+                    "SELECT id FROM score_components WHERE run_id=? AND dimension='manual_quality' "
+                    "ORDER BY created_at LIMIT 1",
+                    (run_id,),
+                ).fetchone()
+                if manual_dimension:
+                    connection.execute(
+                        "UPDATE score_components SET score=?,weight=?,evidence_json=? WHERE id=?",
+                        (
+                            total, manual_weight,
+                            json.dumps(
+                                {
+                                    **evidence_payload,
+                                    "components": ["manual_rubric"],
+                                    "contribution": round(total * manual_weight / 100.0, 2),
+                                },
+                                ensure_ascii=False,
+                            ),
+                            manual_dimension["id"],
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        "INSERT INTO score_components(id,run_id,dimension,score,weight,evidence_json,created_at) "
+                        "VALUES (?,?,?,?,?,?,?)",
+                        (
+                            new_id(), run_id, "manual_quality", total, manual_weight,
+                            json.dumps(
+                                {
+                                    **evidence_payload,
+                                    "components": ["manual_rubric"],
+                                    "contribution": round(total * manual_weight / 100.0, 2),
+                                },
+                                ensure_ascii=False,
+                            ),
+                            now,
+                        ),
+                    )
+
+                component_rows = connection.execute(
+                    "SELECT dimension,score,weight,evidence_json FROM score_components "
+                    "WHERE run_id=? ORDER BY created_at",
+                    (run_id,),
+                ).fetchall()
+                total_weight = sum(float(item["weight"]) for item in component_rows)
+                weighted_score = (
+                    sum(float(item["score"]) * float(item["weight"]) for item in component_rows)
+                    / total_weight
+                    if total_weight
+                    else total
                 )
+                # A critical defect is a final-score cap, not merely a cap on the
+                # manual subscore; efficiency points must never lift it above 59.
+                final_score = round(min(weighted_score, 59.0) if defects else weighted_score, 2)
+                passed = final_score >= 60.0 and not defects
+                evidence_payload["final_weighted_score"] = final_score
+
+                validator_rows = connection.execute(
+                    "SELECT validator_type,weight,score,status,evidence_json FROM validator_results "
+                    "WHERE run_id=? ORDER BY created_at",
+                    (run_id,),
+                ).fetchall()
+                result_payload = {
+                    "components": [
+                        {
+                            "validator_type": item["validator_type"],
+                            "weight": float(item["weight"]),
+                            "score": float(item["score"]),
+                            "status": item["status"],
+                            "evidence": _json(item["evidence_json"], {}),
+                        }
+                        for item in validator_rows
+                    ],
+                    "dimensions": [
+                        {
+                            "validator_type": item["dimension"],
+                            "weight": float(item["weight"]),
+                            "score": float(item["score"]),
+                            "status": "passed" if float(item["score"]) == 100 else "partial"
+                            if float(item["score"]) > 0 else "failed",
+                            "evidence": _json(item["evidence_json"], {}),
+                        }
+                        for item in component_rows
+                    ],
+                    "objective_score": total,
+                    "pass_threshold": 60.0,
+                    "manual_review_id": review_id,
+                }
+                attempt = connection.execute(
+                    "SELECT id,multiplier FROM run_attempts WHERE run_id=? "
+                    "ORDER BY attempt_no DESC LIMIT 1",
+                    (run_id,),
+                ).fetchone()
+                adjusted_score = final_score
+                if attempt:
+                    adjusted_score = round(final_score * float(attempt["multiplier"]), 2)
+                    connection.execute(
+                        "UPDATE run_attempts SET raw_score=?,adjusted_score=?,passed=?,result_json=? "
+                        "WHERE id=?",
+                        (
+                            final_score, adjusted_score, int(passed),
+                            json.dumps(result_payload, ensure_ascii=False), attempt["id"],
+                        ),
+                    )
                 connection.execute(
-                    "UPDATE runs SET score=?,status='completed',passed=?,completed_at=? WHERE id=?",
-                    (total, int(total >= 60), now, run_id),
+                    "UPDATE runs SET score=?,status='completed',passed=?,failure_class=?,completed_at=? "
+                    "WHERE id=?",
+                    (
+                        adjusted_score, int(passed),
+                        None if passed else "agent_solution_failure", now, run_id,
+                    ),
                 )
             self.database.insert_audit("run.manual_rubric_submitted", "run", run_id, evidence_payload)
         else:
@@ -8496,14 +9532,8 @@ class EvaluationService:
             raise KeyError("manual_review_evidence_not_found")
         return path
 
-    def frontend_preview_status(self, run_id: str) -> dict[str, Any]:
-        row = self.database.fetch_one("SELECT workspace_path FROM runs WHERE id=?", (run_id,))
-        if not row or not row.get("workspace_path"):
-            return {"available": False, "kind": "none", "reason": "workspace_not_ready"}
-        root = Path(row["workspace_path"]).resolve()
-        allowed = (self.settings.data_dir / "frontend-portfolios").resolve()
-        if not root.is_relative_to(allowed) or not root.is_dir():
-            return {"available": False, "kind": "none", "reason": "workspace_invalid"}
+    @staticmethod
+    def _frontend_preview_status_for_root(root: Path) -> dict[str, Any]:
         candidates = [root / "dist" / "index.html", root / "build" / "index.html", root / "index.html"]
         candidates.extend(sorted(root.glob("*.html")))
         candidates.extend(sorted(root.glob("*.svg")))
@@ -8517,6 +9547,204 @@ class EvaluationService:
                 scripts = data.get("scripts") if isinstance(data.get("scripts"), dict) else {}
                 return {"available": False, "kind": "project", "scripts": list(scripts), "reason": "build_required"}
         return {"available": False, "kind": "none", "reason": "entry_not_found"}
+
+    def frontend_preview_status(self, run_id: str) -> dict[str, Any]:
+        row = self.database.fetch_one("SELECT workspace_path FROM runs WHERE id=?", (run_id,))
+        if not row or not row.get("workspace_path"):
+            return {"available": False, "kind": "none", "reason": "workspace_not_ready"}
+        root = Path(row["workspace_path"]).resolve()
+        allowed = (self.settings.data_dir / "frontend-portfolios").resolve()
+        if not root.is_relative_to(allowed) or not root.is_dir():
+            return {"available": False, "kind": "none", "reason": "workspace_invalid"}
+        return self._frontend_preview_status_for_root(root)
+
+    @staticmethod
+    def _frontend_archive_member(info: zipfile.ZipInfo) -> PurePosixPath:
+        raw_name = info.filename.replace("\\", "/")
+        member = PurePosixPath(raw_name)
+        windows_devices = {
+            "con", "prn", "aux", "nul",
+            *(f"com{index}" for index in range(1, 10)),
+            *(f"lpt{index}" for index in range(1, 10)),
+        }
+        if (
+            not raw_name
+            or raw_name.startswith("/")
+            or member.is_absolute()
+            or any(part in {"", ".", ".."} for part in member.parts)
+            or any(":" in part or part.rstrip(" .") != part for part in member.parts)
+            or any(part.split(".", 1)[0].casefold() in windows_devices for part in member.parts)
+        ):
+            raise ValueError("frontend_import_archive_path_invalid")
+        unix_mode = (info.external_attr >> 16) & 0xFFFF
+        if stat.S_ISLNK(unix_mode):
+            raise ValueError("frontend_import_archive_link_forbidden")
+        file_type = stat.S_IFMT(unix_mode)
+        if file_type and file_type not in {stat.S_IFREG, stat.S_IFDIR}:
+            raise ValueError("frontend_import_archive_special_file_forbidden")
+        if info.flag_bits & 0x1:
+            raise ValueError("frontend_import_archive_encrypted")
+        return member
+
+    def import_frontend_artifact(
+        self, run_id: str, filename: str, content: bytes
+    ) -> dict[str, Any]:
+        run = self.get_run(run_id)
+        if not run.get("frontend"):
+            raise ValueError("frontend_import_not_available")
+        if run["status"] not in {
+            "cancelled",
+            "failed",
+            "environment_unavailable",
+            "needs_review",
+        }:
+            raise ValueError("frontend_import_run_not_replaceable")
+        if not content or len(content) > FRONTEND_IMPORT_MAX_UPLOAD_BYTES:
+            raise ValueError("frontend_import_upload_too_large")
+
+        original_name = Path(filename).name
+        suffix = Path(original_name).suffix.lower()
+        if suffix not in {".html", ".htm", ".zip"}:
+            raise ValueError("frontend_import_type_invalid")
+
+        portfolio_root = self._frontend_workspace_root(run["experiment_id"])
+        import_root = (portfolio_root / "_imports" / run_id).resolve()
+        if not import_root.is_relative_to(portfolio_root):
+            raise ValueError("frontend_import_path_invalid")
+        import_root.mkdir(parents=True, exist_ok=True)
+        staging = (import_root / f".stage-{new_id()}").resolve()
+        destination = (import_root / f"import-{new_id()}").resolve()
+        if not staging.is_relative_to(import_root) or not destination.is_relative_to(import_root):
+            raise ValueError("frontend_import_path_invalid")
+        staging.mkdir()
+
+        file_count = 0
+        expanded_bytes = 0
+        try:
+            if suffix in {".html", ".htm"}:
+                (staging / "index.html").write_bytes(content)
+                file_count = 1
+                expanded_bytes = len(content)
+            else:
+                try:
+                    archive = zipfile.ZipFile(io.BytesIO(content), "r")
+                except (zipfile.BadZipFile, OSError) as exc:
+                    raise ValueError("frontend_import_archive_invalid") from exc
+                with archive:
+                    members: list[tuple[zipfile.ZipInfo, PurePosixPath]] = []
+                    seen: set[str] = set()
+                    for info in archive.infolist():
+                        member = self._frontend_archive_member(info)
+                        collision_key = member.as_posix().casefold()
+                        if collision_key in seen:
+                            raise ValueError("frontend_import_archive_duplicate_path")
+                        seen.add(collision_key)
+                        if info.is_dir():
+                            continue
+                        file_count += 1
+                        expanded_bytes += int(info.file_size)
+                        if file_count > FRONTEND_IMPORT_MAX_FILES:
+                            raise ValueError("frontend_import_archive_too_many_files")
+                        if int(info.file_size) > FRONTEND_IMPORT_MAX_FILE_BYTES:
+                            raise ValueError("frontend_import_archive_file_too_large")
+                        if expanded_bytes > FRONTEND_IMPORT_MAX_EXPANDED_BYTES:
+                            raise ValueError("frontend_import_archive_expanded_too_large")
+                        members.append((info, member))
+                    if not members:
+                        raise ValueError("frontend_import_archive_empty")
+                    actual_total = 0
+                    for info, member in members:
+                        target = (staging / Path(*member.parts)).resolve()
+                        if not target.is_relative_to(staging):
+                            raise ValueError("frontend_import_archive_path_invalid")
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        actual_file = 0
+                        with archive.open(info, "r") as source, target.open("wb") as output:
+                            while chunk := source.read(1024 * 1024):
+                                actual_file += len(chunk)
+                                actual_total += len(chunk)
+                                if actual_file > FRONTEND_IMPORT_MAX_FILE_BYTES:
+                                    raise ValueError("frontend_import_archive_file_too_large")
+                                if actual_total > FRONTEND_IMPORT_MAX_EXPANDED_BYTES:
+                                    raise ValueError("frontend_import_archive_expanded_too_large")
+                                output.write(chunk)
+                    expanded_bytes = actual_total
+
+            content_root = staging
+            preview = self._frontend_preview_status_for_root(content_root)
+            visible = [item for item in staging.iterdir() if item.name != "__MACOSX"]
+            if preview["kind"] == "none" and len(visible) == 1 and visible[0].is_dir():
+                nested_preview = self._frontend_preview_status_for_root(visible[0])
+                if nested_preview["kind"] != "none":
+                    content_root = visible[0]
+                    preview = nested_preview
+            if preview["kind"] == "none":
+                raise ValueError("frontend_import_entry_not_found")
+
+            imported_at = utc_now()
+            manifest = {
+                "schema": "agentbench.frontend-import.v1",
+                "run_id": run_id,
+                "original_name": original_name,
+                "original_sha256": hashlib.sha256(content).hexdigest(),
+                "uploaded_bytes": len(content),
+                "expanded_bytes": expanded_bytes,
+                "file_count": file_count,
+                "preview": preview,
+                "scripts_executed": False,
+                "previous_workspace_path": run.get("workspace_path"),
+                "imported_at": imported_at,
+            }
+            (content_root / ".agentbench-import.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            if content_root == staging:
+                staging.replace(destination)
+            else:
+                content_root.replace(destination)
+                shutil.rmtree(staging)
+        except Exception:
+            if staging.exists() and staging.is_relative_to(import_root):
+                shutil.rmtree(staging)
+            raise
+
+        self.stop_frontend_preview(run_id)
+        entry = str(
+            preview.get("entry")
+            or ("package.json" if (destination / "package.json").is_file() else ".agentbench-import.json")
+        )
+        entry_name = original_name if suffix in {".html", ".htm"} else Path(entry).name
+        entry_path = (destination / entry).resolve()
+        manifest_path = destination / ".agentbench-import.json"
+        now = utc_now()
+        with self.database.transaction() as connection:
+            connection.execute(
+                "DELETE FROM artifacts WHERE run_id=? AND kind='frontend_import'",
+                (run_id,),
+            )
+            for name, relative, target in (
+                (entry_name, entry, entry_path),
+                (".agentbench-import.json", ".agentbench-import.json", manifest_path),
+            ):
+                connection.execute(
+                    "INSERT INTO artifacts(id,run_id,kind,name,path,size,sha256,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        new_id(), run_id, "frontend_import", name, relative,
+                        target.stat().st_size, hashlib.sha256(target.read_bytes()).hexdigest(), now,
+                    ),
+                )
+            connection.execute(
+                "UPDATE runs SET status='needs_review',score=NULL,passed=NULL,failure_class=NULL,"
+                "workspace_path=?,error_code=NULL,error_message=NULL,completed_at=? WHERE id=?",
+                (str(destination), now, run_id),
+            )
+        if not self.get_manual_review(run_id):
+            self.save_manual_review(run_id, {"reviewer": "本机用户"}, submit=False)
+        self.database.insert_audit("run.frontend_artifact_imported", "run", run_id, manifest)
+        self._refresh_experiment(run["experiment_id"])
+        self._write_frontend_portfolio_manifest(run["experiment_id"])
+        return {"run": self.get_run(run_id), "preview": preview, "import": manifest}
 
     def start_frontend_preview(self, run_id: str) -> dict[str, Any]:
         status = self.frontend_preview_status(run_id)
@@ -8563,19 +9791,36 @@ class EvaluationService:
 
     def _refresh_experiment(self, experiment_id: str) -> None:
         summary = self.database.fetch_one(
-            "SELECT COUNT(*) total,SUM(CASE WHEN status IN ('queued','preparing','running','validating',"
-            "'judging') THEN 1 ELSE 0 END) active FROM runs WHERE experiment_id=?",
+            "SELECT COUNT(*) total,"
+            "SUM(CASE WHEN status IN ('preparing','running','validating','judging') THEN 1 ELSE 0 END) executing,"
+            "SUM(CASE WHEN status IN ('queued','interrupted','preparing','running','validating','judging') "
+            "THEN 1 ELSE 0 END) remaining FROM runs WHERE experiment_id=?",
             (experiment_id,),
         )
-        if summary and summary["total"] and not summary["active"]:
-            current = self.database.fetch_one(
-                "SELECT status FROM experiments WHERE id=?", (experiment_id,)
+        if not summary or not summary["total"]:
+            return
+        current = self.database.fetch_one(
+            "SELECT status FROM experiments WHERE id=?", (experiment_id,)
+        )
+        if not current:
+            return
+        if current["status"] == "pausing" and not int(summary["executing"] or 0):
+            next_status = "paused" if int(summary["remaining"] or 0) else "completed"
+            self.database.execute(
+                "UPDATE experiments SET status=?,completed_at=? WHERE id=? AND status='pausing'",
+                (next_status, None if next_status == "paused" else utc_now(), experiment_id),
             )
-            if current and current["status"] not in {"cancelled", "interrupted"}:
-                self.database.execute(
-                    "UPDATE experiments SET status='completed',completed_at=? WHERE id=?",
-                    (utc_now(), experiment_id),
-                )
+            self.database.insert_audit(
+                "experiment.paused" if next_status == "paused" else "experiment.completed",
+                "experiment",
+                experiment_id,
+            )
+            return
+        if current["status"] == "running" and not int(summary["remaining"] or 0):
+            self.database.execute(
+                "UPDATE experiments SET status='completed',completed_at=? WHERE id=?",
+                (utc_now(), experiment_id),
+            )
 
     def _native_cli_allowed(self) -> bool:
         configured = self.get_setting("allow_native_cli")

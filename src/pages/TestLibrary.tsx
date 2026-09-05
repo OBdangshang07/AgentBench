@@ -1,5 +1,5 @@
 import { useMemo, useState, type FormEvent } from "react";
-import { Check, ChevronRight, FileText, FileUp, Filter, FlaskConical, Layers3, MonitorSmartphone, Search, Shield, Sigma } from "lucide-react";
+import { Check, ChevronRight, FileText, FileUp, Filter, FlaskConical, Layers3, MonitorSmartphone, Search, Sigma } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 import { Button, Field, Modal } from "../components/ui";
 import { api } from "../lib/api";
@@ -63,64 +63,69 @@ export default function TestLibrary() {
   }
 
   return (
-    <div className="ab-view ab-library-view">
+    <div className="ab-view ab-agent-document ab-library-view ab-library-vnext">
       <header className="ab-view-header">
         <div className="ab-view-title"><span className="ab-view-index">能力评测</span><div><h1>测试与套件</h1><p>先按评测目标选择套件，再查看其中的题目、运行要求和评分方式。</p></div></div>
         <div className="ab-header-meta"><span className="ab-meta-pill"><i />{cases.data?.length ?? 0} 项测试</span><span className="ab-meta-pill">{lowCount} 项区分度待关注</span><button className="ab-ghost-button" type="button" onClick={() => setImporting(true)}><FileUp size={13} />导入题包</button></div>
       </header>
 
-      <div className="ab-library-layout">
-        <aside className="ab-collection-pane">
-          <div className="ab-pane-label">推荐套件</div>
-          {mathSuite && <div className="ab-featured-suite ab-math-suite"><span><Sigma size={13} /></span><div><strong>2025 考研数学（一）</strong><small>内置原题 · 22 题 / 150 分</small><nav><Link to={`/experiments?create=1&suite_id=${mathSuite.id}`}>闭卷推理</Link>{mathToolsSuite && <Link to={`/experiments?create=1&suite_id=${mathToolsSuite.id}`}>工具增强</Link>}</nav></div><b>BUILT IN</b></div>}
-          {frontendSuite && <div className="ab-featured-suite ab-frontend-suite"><span><MonitorSmartphone size={13} /></span><div><strong>Xnmk Library 前端工程</strong><small>{frontendSuite.case_count} 项 · D3–Ultra · 纯人工评分</small><nav><Link to={`/experiments?create=1&suite_id=${frontendSuite.id}`}>运行完整套件</Link></nav></div><b>5.2</b></div>}
-          {featuredSuites.slice(0, 2).map((suite) => <Link className="ab-featured-suite" key={suite.id} to={`/experiments?create=1&suite_id=${suite.id}`}><span><FlaskConical size={13} /></span><div><strong>{suite.name}</strong><small>{suite.case_count} 项 · 难度 {suite.difficulty_min ?? 1}–{suite.difficulty_max ?? 1}</small></div><ChevronRight size={11} /></Link>)}
+      <main className="ab-library-document">
+        <section className="ab-suite-section" aria-labelledby="recommended-suites">
+          <div className="ab-document-section-head"><div><span>从目标开始</span><h2 id="recommended-suites">推荐评测套件</h2><p>套件已经组合好题目与评分规则，适合直接发起一次对比评测。</p></div><Link to="/benchmarks">查看全部套件 <ChevronRight size={14} /></Link></div>
+          <div className="ab-suite-strip">
+            {mathSuite && <article className="ab-suite-entry"><span className="ab-suite-mark"><Sigma size={17} /></span><div><small>完整试卷 · 内置题库</small><strong>2025 考研数学（一）</strong><p>22 道原题，150 分制；检验长程推理与答案严谨性。</p></div><nav><Link to={`/experiments?create=1&suite_id=${mathSuite.id}`}>闭卷推理</Link>{mathToolsSuite && <Link to={`/experiments?create=1&suite_id=${mathToolsSuite.id}`}>工具增强</Link>}</nav></article>}
+            {frontendSuite && <article className="ab-suite-entry"><span className="ab-suite-mark"><MonitorSmartphone size={17} /></span><div><small>工程实践 · 人工验收</small><strong>Xnmk Library 前端工程</strong><p>{frontendSuite.case_count} 项真实前端任务，覆盖实现质量与视觉结果。</p></div><nav><Link to={`/experiments?create=1&suite_id=${frontendSuite.id}`}>运行完整套件</Link></nav></article>}
+            {featuredSuites.slice(0, 1).map((suite) => <article className="ab-suite-entry" key={suite.id}><span className="ab-suite-mark"><FlaskConical size={17} /></span><div><small>综合能力 · 难度 {suite.difficulty_min ?? 1}–{suite.difficulty_max ?? 1}</small><strong>{suite.name}</strong><p>{suite.case_count} 个测试项目，适合建立模型能力基线。</p></div><nav><Link to={`/experiments?create=1&suite_id=${suite.id}`}>发起评测</Link></nav></article>)}
+          </div>
+        </section>
 
-          <div className="ab-pane-label spaced">按能力浏览</div>
-          <button className={`ab-collection${!category ? " active" : ""}`} type="button" onClick={() => chooseCategory("")}><span className="ab-collection-icon"><Layers3 size={12} /></span><span><strong>全部测试</strong><small>按真实历史信号排序</small></span><b>{cases.data?.length ?? 0}</b></button>
-          {Object.entries(categoryMeta).map(([key, meta]) => {
-            const Icon = meta.icon;
-            if (!counts[key]) return null;
-            return <button className={`ab-collection${category === key ? " active" : ""}`} type="button" key={key} onClick={() => chooseCategory(key)}><span className="ab-collection-icon"><Icon size={12} /></span><span><strong>{meta.name}</strong><small>{key}</small></span><b>{counts[key]}</b></button>;
-          })}
-          <button className="ab-import-tile" type="button" onClick={() => setImporting(true)}><strong>＋ 导入自定义测试 DSL</strong><span>支持 JSON / YAML，本机校验后加入题库。</span></button>
-        </aside>
-
-        <section className="ab-case-browser">
+        <section className="ab-case-section" aria-labelledby="case-library">
+          <div className="ab-document-section-head"><div><span>按能力浏览</span><h2 id="case-library">浏览单项测试</h2><p>按能力、难度与运行环境缩小范围，选择一项即可查看完整评分依据。</p></div><button type="button" onClick={() => setImporting(true)}><FileUp size={14} />导入自定义测试</button></div>
+          <div className="ab-category-tabs" role="tablist" aria-label="能力分类">
+            <button className={!category ? "active" : ""} type="button" onClick={() => chooseCategory("")}><Layers3 size={14} />全部 <b>{cases.data?.length ?? 0}</b></button>
+            {Object.entries(categoryMeta).map(([key, meta]) => {
+              const Icon = meta.icon;
+              if (!counts[key]) return null;
+              return <button className={category === key ? "active" : ""} type="button" key={key} onClick={() => chooseCategory(key)}><Icon size={14} />{meta.name}<b>{counts[key]}</b></button>;
+            })}
+          </div>
           <div className="ab-browser-toolbar">
             <label className="ab-browser-search"><Search size={13} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索题目、slug 或标签…" /></label>
             <label className="ab-filter-control"><Filter size={12} /><select value={difficulty} onChange={(event) => setDifficulty(Number(event.target.value))}><option value={0}>全部难度</option>{[1, 2, 3, 4, 5, 6].map((value) => <option value={value} key={value}>难度 {value}</option>)}</select></label>
             <label className="ab-filter-control"><select value={environment} onChange={(event) => setEnvironment(event.target.value as typeof environment)}><option value="all">全部环境</option><option value="local">纯本地</option><option value="docker">Docker</option><option value="judge">AI 裁判</option></select></label>
-            <span className="ab-browser-count">{filtered.length} / {cases.data?.length ?? 0}</span>
+            <span className="ab-browser-count">显示 {filtered.length} 项</span>
           </div>
-          <div className="ab-case-columns"><span>TEST CASE</span><span>难度</span><span>验证方式</span><span>满分率</span><span>样本</span></div>
-          <div className="ab-case-list">
-            {cases.loading && <div className="ab-case-empty">正在读取本地测试库…</div>}
-            {cases.error && <div className="ab-case-empty error">{cases.error}</div>}
-            {!cases.loading && filtered.map((item) => <button className={`ab-case-row${selected?.id === item.id ? " active" : ""}`} key={item.id} type="button" onClick={() => setSelectedId(item.id)}>
-              <span className="ab-case-name"><i className={item.low_discrimination ? "warn" : ""} /><span><strong>{item.title}</strong><small>{item.slug}</small></span></span>
-              <span className={`ab-difficulty level-${item.difficulty ?? 1}`}><b>{item.difficulty ?? 1}</b>{difficultyLabel(item.difficulty)}</span>
-              <span className="ab-validator-type">{item.manual_scoring ? "HUMAN" : item.requires_judge ? "AI + RULE" : item.requires_docker ? "PRIVATE" : "RULE"}</span>
-              <span className={Number(item.full_score_rate ?? 0) >= 0.9 ? "ab-rate hot" : "ab-rate"}>{item.full_score_rate == null ? "—" : `${Math.round(item.full_score_rate * 100)}%`}</span>
-              <span className="ab-sample">{item.sample_size ?? 0}</span>
-            </button>)}
-            {!cases.loading && !filtered.length && <div className="ab-case-empty">没有符合当前筛选条件的测试。</div>}
+          <div className="ab-library-workspace">
+            <div className="ab-case-browser">
+              <div className="ab-case-columns"><span>测试项目</span><span>难度</span><span>评分方式</span><span>历史满分率</span></div>
+              <div className="ab-case-list">
+                {cases.loading && <div className="ab-case-empty">正在读取本地测试库…</div>}
+                {cases.error && <div className="ab-case-empty error">{cases.error}</div>}
+                {!cases.loading && filtered.map((item) => <button className={`ab-case-row${selected?.id === item.id ? " active" : ""}`} key={item.id} type="button" onClick={() => setSelectedId(item.id)}>
+                  <span className="ab-case-name"><i className={item.low_discrimination ? "warn" : ""} /><span><strong>{item.title}</strong><small>{categoryName(item.category)} · {item.slug}</small></span></span>
+                  <span className={`ab-difficulty level-${item.difficulty ?? 1}`}><b>{item.difficulty ?? 1}</b>{difficultyLabel(item.difficulty)}</span>
+                  <span className="ab-validator-type">{item.manual_scoring ? "人工评分" : item.requires_judge ? "AI 与规则" : item.requires_docker ? "隔离验证" : "规则验证"}</span>
+                  <span className={Number(item.full_score_rate ?? 0) >= 0.9 ? "ab-rate hot" : "ab-rate"}>{item.full_score_rate == null ? "暂无样本" : `${Math.round(item.full_score_rate * 100)}%`}</span>
+                </button>)}
+                {!cases.loading && !filtered.length && <div className="ab-case-empty">没有符合当前筛选条件的测试。尝试清除分类或降低难度筛选。</div>}
+              </div>
+            </div>
+
+            <aside className="ab-case-inspector">
+              {selected ? <>
+                <div className="ab-inspector-head"><span className={selected.low_discrimination ? "warn" : "healthy"}>{selected.low_discrimination ? "区分度需要关注" : "评分状态正常"}</span><h2>{selected.title}</h2><p>{selected.description}</p><code>{selected.slug}</code></div>
+                <div className="ab-inspector-scroll">
+                  <div className="ab-case-kpis"><div><span>历史样本</span><strong>{selected.sample_size ?? 0}</strong></div><div><span>平均分</span><strong>{selected.avg_score == null ? "—" : selected.avg_score.toFixed(1)}</strong></div><div><span>满分率</span><strong>{selected.full_score_rate == null ? "—" : `${Math.round(selected.full_score_rate * 100)}%`}</strong></div></div>
+                  <section className="ab-inspect-block"><label>任务要求</label><p className="ab-instruction-preview">{selected.definition?.instruction ?? selected.description}</p><div className="ab-contract-tags"><span>{categoryName(selected.category)}</span><span>难度 {selected.difficulty ?? 1}</span><span>约 {selected.estimated_minutes ?? selected.definition?.metadata?.estimated_minutes ?? 5} 分钟</span>{selected.builtin && <span>内置测试</span>}</div></section>
+                  <section className="ab-inspect-block"><label>如何评分<span className="ab-sr-only">VALIDATOR MAP</span></label><div className="ab-validator-map">{validators.map((validator, index) => <div className="ab-validator-item" key={`${validator.type}-${index}`}><b>{index + 1}</b><div><strong>{validatorLabel(validator.type)}</strong><small>{validator.type === "manual_rubric" ? "作品完成后由用户逐项评分" : validator.type === "ai_rubric" ? "复核等价解法与关键得分点" : "通过确定性证据自动验证"}</small></div><em>{validator.weight}%</em></div>)}{!validators.length && <span className="ab-muted">此测试没有公开评分器定义。</span>}</div></section>
+                  {selected.low_discrimination ? <section className="ab-inspect-block"><label>质量提醒</label><div className="ab-diagnosis">历史答案模式较集中。建议增加隐藏实例、冲突证据或失败恢复要求。</div></section> : <section className="ab-inspect-block"><label>质量状态</label><div className="ab-diagnosis healthy"><Check size={13} /> 当前样本未触发低区分度告警。</div></section>}
+                </div>
+                <div className="ab-inspect-actions"><Link className="ab-run-button" to="/benchmarks">选择评测套件</Link><button className="ab-ghost-button" type="button" onClick={() => navigator.clipboard?.writeText(selected.slug)}><FileText size={13} />复制标识</button></div>
+              </> : <div className="ab-case-empty">选择一个测试查看要求与评分方式。</div>}
+            </aside>
           </div>
         </section>
-
-        <aside className="ab-case-inspector">
-          {selected ? <>
-            <div className="ab-inspector-head"><span className={selected.low_discrimination ? "warn" : "healthy"}>{selected.low_discrimination ? "P0 / LOW DISCRIMINATION" : "HEALTHY / CALIBRATED"}</span><h2>{selected.title}</h2><code>{selected.slug}</code><p>{selected.description}</p></div>
-            <div className="ab-inspector-scroll">
-              <div className="ab-case-kpis"><div><span>历史样本</span><strong>{selected.sample_size ?? 0}</strong></div><div><span>平均分</span><strong>{selected.avg_score == null ? "—" : selected.avg_score.toFixed(1)}</strong></div><div><span>满分率</span><strong>{selected.full_score_rate == null ? "—" : `${Math.round(selected.full_score_rate * 100)}%`}</strong></div></div>
-              <section className="ab-inspect-block"><label>TEST CONTRACT</label><p className="ab-instruction-preview">{selected.definition?.instruction ?? selected.description}</p><div className="ab-contract-tags"><span>{categoryName(selected.category)}</span><span>难度 {selected.difficulty ?? 1}</span><span>{selected.estimated_minutes ?? selected.definition?.metadata?.estimated_minutes ?? 5} 分钟</span>{selected.builtin && <span>BUILT IN</span>}</div></section>
-              <section className="ab-inspect-block"><label>VALIDATOR MAP</label><div className="ab-validator-map">{validators.map((validator, index) => <div className="ab-validator-item" key={`${validator.type}-${index}`}><b>{validator.type.slice(0, 2).toUpperCase()}</b><div><strong>{validatorLabel(validator.type)}</strong><small>{validator.type === "manual_rubric" ? "作品完成后由用户逐项评分" : validator.type === "ai_rubric" ? "等价解法与得分点复核" : "确定性证据验证"}</small></div><em>{validator.weight}%</em></div>)}{!validators.length && <span className="ab-muted">没有公开验证器定义</span>}</div></section>
-              {selected.low_discrimination ? <section className="ab-inspect-block"><label>DIAGNOSIS</label><div className="ab-diagnosis">历史满分率或答案模式过于集中。建议增加隐藏实例、冲突证据、失败恢复或性质验证，以提升能力区分度。</div></section> : <section className="ab-inspect-block"><label>QUALITY SIGNAL</label><div className="ab-diagnosis healthy"><Check size={13} /> 当前样本没有触发低区分度告警，继续积累跨模型历史。</div></section>}
-            </div>
-            <div className="ab-inspect-actions"><Link className="ab-ghost-button" to={`/experiments?create=1${featuredSuites[0] ? `&suite_id=${featuredSuites[0].id}` : ""}`}>加入评测</Link><button className="ab-run-button" type="button" onClick={() => navigator.clipboard?.writeText(selected.slug)}><FileText size={13} />复制 Slug</button></div>
-          </> : <div className="ab-case-empty">选择一个测试查看证据与验证器。</div>}
-        </aside>
-      </div>
+      </main>
       {importing && <ImportModal onClose={() => setImporting(false)} onSaved={() => { setImporting(false); void cases.refresh(); }} />}
     </div>
   );

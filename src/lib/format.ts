@@ -8,6 +8,8 @@ export const statusLabel: Record<string, string> = {
   completed: "已完成",
   failed: "失败",
   cancelled: "已取消",
+  pausing: "暂停中",
+  paused: "已暂停",
   interrupted: "被中断",
   environment_unavailable: "运行环境不可用",
   needs_review: "待复核",
@@ -38,7 +40,7 @@ export function formatNumber(value?: number | null, digits = 0) {
 export function statusTone(status: string) {
   if (status === "completed") return "success";
   if (["failed", "cancelled"].includes(status)) return "danger";
-  if (["running", "validating", "judging", "preparing"].includes(status)) return "active";
-  if (["needs_review", "environment_unavailable", "interrupted"].includes(status)) return "warning";
+  if (["running", "validating", "judging", "preparing", "pausing"].includes(status)) return "active";
+  if (["needs_review", "environment_unavailable", "interrupted", "paused"].includes(status)) return "warning";
   return "neutral";
 }

@@ -5,7 +5,7 @@ import App from "../App";
 import { useWorkspaceUx, WorkspaceUxProvider } from "../components/WorkspaceUx";
 
 const systemStatus = {
-  version: "5.3.0",
+  version: "5.4.1",
   data_dir: "C:/AgentBench",
   database: { path: "C:/AgentBench/agentbench.db", ready: true },
   docker: { installed: true, available: true, executable: "docker" },
@@ -111,7 +111,7 @@ describe("AgentBench V4 application shell", () => {
   it("renders the real Agent operations navigation and control center", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.3.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.4.1" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       return json([]);
@@ -119,10 +119,13 @@ describe("AgentBench V4 application shell", () => {
 
     render(<MemoryRouter initialEntries={["/"]}><App /></MemoryRouter>);
 
-    expect(await screen.findByRole("heading", { name: "今天要做什么？" })).toBeInTheDocument();
-    expect(screen.getByText("会话")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "今天要做什么？" }, { timeout: 5_000 })).toBeInTheDocument();
+    expect(screen.getByText("Agent")).toBeInTheDocument();
     expect(screen.getAllByText("能力评测").length).toBeGreaterThan(0);
     expect(screen.getByText("资源与设置")).toBeInTheDocument();
+    expect(screen.getByText("Agent 与模型")).toBeInTheDocument();
+    expect(screen.getByText("工具与 MCP")).toBeInTheDocument();
+    expect(screen.getByText("设置")).toBeInTheDocument();
     expect(screen.getByText("需要你处理")).toBeInTheDocument();
     expect(await screen.findByText(/42\.8万|428K/)).toBeInTheDocument();
     expect(screen.getByText("继续工作")).toBeInTheDocument();
@@ -133,7 +136,7 @@ describe("AgentBench V4 application shell", () => {
     let posted: Record<string, unknown> | null = null;
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.3.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.4.1" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       if (url.endsWith("/runners")) return json([runner]);
@@ -148,11 +151,12 @@ describe("AgentBench V4 application shell", () => {
 
     render(<MemoryRouter initialEntries={["/projects"]}><App /></MemoryRouter>);
     fireEvent.click(await screen.findByRole("button", { name: /添加项目/ }));
+    await screen.findByRole("option", { name: "Codex" }, { timeout: 5_000 });
     fireEvent.change(screen.getByLabelText("项目名称"), { target: { value: "Local Workbench" } });
     fireEvent.change(screen.getByLabelText(/项目根目录/), { target: { value: "D:\\Projects\\Workbench" } });
     fireEvent.click(screen.getByRole("button", { name: /添加并开始会话/ }));
 
-    await waitFor(() => expect(posted).not.toBeNull());
+    await waitFor(() => expect(posted).not.toBeNull(), { timeout: 5_000 });
     expect(posted).toMatchObject({
       name: "Local Workbench",
       root_path: "D:\\Projects\\Workbench",
@@ -165,7 +169,7 @@ describe("AgentBench V4 application shell", () => {
   it("persists workspace density, collapses navigation, runs commands and keeps notifications", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.3.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.4.1" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       if (url.endsWith("/projects")) return json([{ id: "project-1", name: "AgentBench", root_path: "D:/AgentBench" }]);
@@ -198,7 +202,7 @@ describe("AgentBench V4 application shell", () => {
     let acceptanceUpdate: Record<string, unknown> | null = null;
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.3.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.4.1" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       if (url.endsWith("/projects")) return json([{ id: "project-1", name: "AgentBench", root_path: "D:/AgentBench" }]);
@@ -230,6 +234,13 @@ describe("AgentBench V4 application shell", () => {
         { text: "活动记录按时间展示", completed: true },
       ],
     });
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    expect(screen.getByText("修改会立即保存到当前任务，不会离开详情页")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("任务标题"), { target: { value: "完善任务详情闭环" } });
+    fireEvent.click(screen.getByRole("button", { name: /保存任务/ }));
+    await waitFor(() => expect(acceptanceUpdate).toMatchObject({ title: "完善任务详情闭环", priority: "high" }));
+    expect(screen.queryByText("修改会立即保存到当前任务，不会离开详情页")).not.toBeInTheDocument();
   });
 
   it("switches task views and sends one bulk action for selected tasks", async () => {
@@ -237,7 +248,7 @@ describe("AgentBench V4 application shell", () => {
     const secondTask = { ...task, id: "task-2", title: "验证批量操作", priority: "normal" as const };
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.3.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.4.1" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       if (url.endsWith("/projects")) return json([{ id: "project-1", name: "AgentBench", root_path: "D:/AgentBench" }]);

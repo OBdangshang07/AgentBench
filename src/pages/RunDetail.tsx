@@ -79,6 +79,8 @@ export default function RunDetailPage() {
   const openWorkspace = useOpenFolder();
   const [reviewing, setReviewing] = useState(false);
   const [previewError, setPreviewError] = useState("");
+  const [artifactMessage, setArtifactMessage] = useState("");
+  const [importingFrontend, setImportingFrontend] = useState(false);
   const [workspaceHint, setWorkspaceHint] = useState("");
   async function retry() { await api(`/runs/${runId}/retry`, { method: "POST" }); await state.refresh(); }
   if (state.loading) return <LoadingBlock />;
@@ -119,12 +121,31 @@ export default function RunDetailPage() {
       window.open(result.url, "_blank", "noopener,noreferrer");
     } catch (error) { setPreviewError(error instanceof Error ? error.message : "作品暂时无法预览"); }
   }
+  async function importFrontend(file?: File) {
+    if (!file) return;
+    setArtifactMessage("");
+    setPreviewError("");
+    setImportingFrontend(true);
+    try {
+      await apiUpload(
+        `/runs/${run.id}/frontend-import?filename=${encodeURIComponent(file.name)}`,
+        file,
+        file.type || "application/octet-stream",
+      );
+      setArtifactMessage("作品已安全导入并标记为待人工评审；项目脚本没有被执行。");
+      await state.refresh();
+    } catch (error) {
+      setPreviewError(error instanceof Error ? error.message : "作品导入失败");
+    } finally {
+      setImportingFrontend(false);
+    }
+  }
 
   return (
-    <div className="ab-view ab-evidence-view">
+    <div className="ab-view ab-agent-document ab-evidence-view">
       <header className="ab-view-header">
         <div className="ab-view-title"><span className="ab-view-index">运行结果</span><div><h1>{run.frontend ? "作品评审" : "评分与证据"}</h1><p>{run.frontend ? "预览实际交付，按验收项完成人工评分并保留证据。" : "先查看结果，再按需追溯轮次、验证项、裁判理由和工作区产物。"}</p></div></div>
-        <div className="ab-header-meta"><Link className="ab-ghost-button" to={backTo}><ArrowLeft size={13} />返回实验</Link><Link className={`ab-ghost-button${!previousTo ? " disabled" : ""}`} to={previousTo ?? backTo} state={{ from: backTo }} aria-disabled={!previousTo}><ChevronLeft size={13} />上一题</Link><Link className={`ab-ghost-button${!nextTo ? " disabled" : ""}`} to={nextTo ?? backTo} state={{ from: backTo }} aria-disabled={!nextTo}>下一题<ChevronRight size={13} /></Link><span className="ab-meta-pill">RUN / {run.id.slice(0, 8)}</span>{run.frontend && <button className="ab-ghost-button" type="button" onClick={() => void previewFrontend()}><Play size={13} />预览作品</button>}{run.workspace_path && <button className="ab-ghost-button" type="button" onClick={() => void openWorkspace(run.workspace_path!, "工作区")}><FolderOpen size={13} />打开工作区</button>}<a className="ab-ghost-button" href={downloadUrl(`/experiments/${run.experiment_id}/export?format=html`)}><FileDown size={13} />导出报告</a></div>
+        <div className="ab-header-meta"><Link className="ab-ghost-button" to={backTo}><ArrowLeft size={13} />返回实验</Link><Link className={`ab-ghost-button${!previousTo ? " disabled" : ""}`} to={previousTo ?? backTo} state={{ from: backTo }} aria-disabled={!previousTo}><ChevronLeft size={13} />上一题</Link><Link className={`ab-ghost-button${!nextTo ? " disabled" : ""}`} to={nextTo ?? backTo} state={{ from: backTo }} aria-disabled={!nextTo}>下一题<ChevronRight size={13} /></Link><span className="ab-meta-pill">RUN / {run.id.slice(0, 8)}</span>{run.frontend && ["cancelled", "failed", "environment_unavailable", "needs_review"].includes(run.status) && <label className="ab-ghost-button frontend-import-button"><Upload size={13} />{importingFrontend ? "导入中…" : "导入作品"}<input type="file" accept=".html,.htm,.zip,text/html,application/zip" disabled={importingFrontend} onChange={(event) => { void importFrontend(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>}{run.frontend && <button className="ab-ghost-button" type="button" onClick={() => void previewFrontend()}><Play size={13} />预览作品</button>}{run.workspace_path && <button className="ab-ghost-button" type="button" onClick={() => void openWorkspace(run.workspace_path!, "工作区")}><FolderOpen size={13} />打开工作区</button>}<a className="ab-ghost-button" href={downloadUrl(`/experiments/${run.experiment_id}/export?format=html`)}><FileDown size={13} />导出报告</a></div>
       </header>
 
       <div className="ab-run-layout">
@@ -140,6 +161,7 @@ export default function RunDetailPage() {
           <div className="ab-score-hero"><div><div className="ab-big-score"><strong>{scoreable || run.frontend ? run.score?.toFixed(1) ?? "—" : "—"}</strong><span>/ 100</span></div><div className="ab-score-caption">{run.frontend ? <><b>{run.frontend.review?.status === "submitted" ? "人工评分已提交" : run.frontend.review?.status === "draft" ? "人工评分草稿" : "等待人工评分"}</b> · 难度 {run.frontend.difficulty >= 6 ? "ULTRA" : `D${run.frontend.difficulty}`} · 未评分不计 0 分</> : !scoreable ? <><b>本次运行无效</b> · {failureClassNames[run.failure_class ?? ""] ?? "Agent/Runner 未正常完成"} · 未进入能力评分</> : <><b>第 {Math.max(1, passedAttempt?.attempt_no ?? run.attempt_count)} 轮{run.passed ? "通过" : "完成"}</b> · 原始质量 {passedAttempt?.raw_score?.toFixed(1) ?? run.objective_score?.toFixed(1) ?? "—"}{passedAttempt && passedAttempt.multiplier < 1 ? " · 轮次折扣后" : " · 证据已固化"}</>}</div></div>{!run.frontend && dimensions.length > 0 && <div className="ab-score-stack">{dimensions.map((dimension) => { const meta = dimensionNames[dimension.dimension] ?? { label: dimension.dimension, note: "评分维度" }; return <div className="ab-score-part" key={dimension.id}><label>{meta.label} · {dimension.weight.toFixed(0)}%</label><strong>{dimension.score.toFixed(1)}</strong><small>{meta.note}</small><i className="ab-vertical-meter"><i style={{ height: `${Math.max(0, Math.min(100, dimension.score))}%` }} /></i></div>; })}</div>}</div>
           {hardFailures.length > 0 && <div className="error-banner"><strong>严重错误评分上限已生效</strong><span>{hardFailures.map((item) => `${item.reason ?? item.key ?? "严重错误"}（最高 ${Number(item.max_score ?? 0).toFixed(0)} 分）`).join(" · ")}</span></div>}
           {previewError && <div className="error-banner"><strong>预览不可用</strong><span>{previewError}</span></div>}
+          {artifactMessage && <div className="error-banner"><strong>离线作品已接收</strong><span>{artifactMessage}</span></div>}
           {run.frontend && <section className="frontend-source-ledger"><div><span>FIXED SOURCE</span><strong>{run.frontend.source_path}</strong><code>{run.frontend.source_commit}</code></div><a href={run.frontend.source_repository} target="_blank" rel="noreferrer"><ExternalLink size={12} />来源仓库</a></section>}
           <div className="ab-proof-ledger"><div className="ab-ledger-title"><h3>验证义务 / PROOF OBLIGATIONS</h3><span>隐藏数据仅展示摘要，不泄露答案</span></div>{run.validators.length ? run.validators.map((validator, index) => <div className="ab-proof-item" key={validator.id}><i className="ab-proof-index">{String(index + 1).padStart(2, "0")}</i><div className="ab-proof-copy"><strong>{validatorNames[validator.validator_type] ?? validator.validator_type}</strong><small>{evidenceText(validator.evidence)}</small></div><code className="ab-proof-evidence">status = {validator.status}</code><b className="ab-proof-score">{validator.score.toFixed(1)} / 100</b></div>) : <div className="ab-proof-empty">{scoreable ? "这条历史运行没有独立验证器记录，最终分数来自兼容评分路径。" : "Agent/Runner 未正常完成，私有验证器未执行，本次不产生能力分数。"}</div>}</div>
           {mathRubric && <section className="math-rubric-ledger"><div className="ab-ledger-title"><h3>数学逐点评分 / <span>MARKING SCHEME</span></h3><span>{sourceTierNames[mathRubric.tier] ?? mathRubric.tier} · {mathRubric.version}</span></div><div className="math-rubric-source"><div><strong>{mathRubric.source?.title || sourceTierNames[mathRubric.tier] || "评分量表"}</strong><small>{mathRubric.source?.issuing_body || "来源机构未标注"} · 核验状态 {mathRubric.source?.verification_status ?? "未知"}</small></div><b className={mathRubric.reviewStatus === "completed" || mathRubric.reviewStatus === "passed" ? "verified" : "unverified"}>{mathRubric.reviewStatus === "needs_review" ? "需要人工复核" : "逐点计分完成"}</b></div>{mathRubric.pointAwards.length ? <div className="math-point-awards">{mathRubric.pointAwards.map((point) => <div className="math-point-award" key={point.point_id}><div><code>{point.point_id}</code><strong>{point.description}</strong><small>{point.evidence || point.rationale || "裁判未提供证据摘要"}</small></div><b>{Number(point.awarded_points).toFixed(1)} / {Number(point.max_points).toFixed(1)}</b></div>)}</div> : <div className="ab-proof-empty">量表来源已固化；本次运行尚无逐项裁判结果。</div>}{mathRubric.reasons.length > 0 && <div className="error-banner"><strong>复核原因</strong><span>{mathRubric.reasons.join(" · ")}</span></div>}{mathRubric.source?.url && <a className="ab-ghost-button" href={mathRubric.source.url} target="_blank" rel="noreferrer"><ExternalLink size={12} />查看来源</a>}</section>}

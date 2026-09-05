@@ -361,8 +361,10 @@ export interface Experiment {
   started_at?: string;
   completed_at?: string;
   suite_metadata?: {
-    kind: "benchmark" | "frontend";
+    kind: "benchmark" | "frontend" | "six-dimension";
     manual_scoring?: boolean;
+    capability_report?: boolean;
+    capability_dimensions?: string[];
     source_repository?: string;
     source_commit?: string;
     suite_revision?: string;
@@ -390,6 +392,59 @@ export interface Experiment {
     reviewed_weighted_score?: number | null;
     frontend_weighted_score?: number | null;
   };
+}
+
+export interface CapabilityRunResult {
+  run_id: string;
+  slug: string;
+  title: string;
+  dimension: string;
+  status: string;
+  score?: number | null;
+  score_source: string;
+  confidence: number;
+  confidence_label: "high" | "medium" | "low";
+  duration_ms: number;
+  tokens_input: number;
+  tokens_output: number;
+  hard_gates: Array<{ key?: string; reason?: string; max_score?: number }>;
+  run_url: string;
+  preview_recommended?: boolean;
+}
+
+export interface CapabilityDimensionResult {
+  key: string;
+  label: string;
+  short_label: string;
+  score?: number | null;
+  provisional: boolean;
+  completed: number;
+  scored: number;
+  total: number;
+  confidence: number;
+  confidence_label: "high" | "medium" | "low";
+  duration_ms: number;
+  tokens: number;
+  runs: CapabilityRunResult[];
+}
+
+export interface CapabilityProfile {
+  profile_id: string;
+  model: { id: string; name: string; provider: string; route: string };
+  runner: { id: string; name: string; type: string };
+  overall_score?: number | null;
+  overall_complete: boolean;
+  dimensions: CapabilityDimensionResult[];
+  strengths: string[];
+  weaknesses: string[];
+  totals: { runs: number; scored: number; duration_ms: number; tokens: number; cost_usd: number };
+}
+
+export interface CapabilityReport {
+  schema: "agentbench.capability-report/v1";
+  generated_at: string;
+  experiment: { id: string; name: string; status: string; suite_name: string; suite_version: string };
+  profiles: CapabilityProfile[];
 }
 
 export interface RunSummary {

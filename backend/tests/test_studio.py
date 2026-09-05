@@ -640,7 +640,7 @@ def test_native_studio_options_map_permission_effort_and_images() -> None:
     )
     assert "--dangerously-bypass-approvals-and-sandbox" in codex
     assert "--sandbox" not in codex
-    assert 'model_reasoning_effort="xhigh"' in codex
+    assert 'model_reasoning_effort="max"' in codex
     assert codex[codex.index("--image") + 1] == attachment["absolute_path"]
 
     qoder = EvaluationService._studio_native_options(

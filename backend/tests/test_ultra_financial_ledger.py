@@ -12,7 +12,7 @@ from agentbench.ultra_financial_ledger import (
 
 TEST_PRIVATE_REFERENCE = {
     "bundle_id": "backend-ultra-extreme",
-    "version": "1.0.0",
+    "version": "1.3.0",
     "validator_id": "financial-ledger",
     "manifest_sha256": "a" * 64,
 }
@@ -22,7 +22,7 @@ def test_financial_ledger_public_definition_has_no_hidden_material():
     case = build_financial_ledger_case(TEST_PRIVATE_REFERENCE)
     assert build_financial_ledger_catalog(TEST_PRIVATE_REFERENCE) == [case]
     assert case["slug"] == "ultra.strong-consistency-financial-ledger-001"
-    assert case["version"] == "1.0.0"
+    assert case["version"] == "1.3.0"
     assert case["category"] == "ultra-backend"
     assert set(case["initial_files"]) == {"ledger.py", "app.py", "public_smoke.py", "SPEC.md"}
     assert case["initial_files"]["ledger.py"] == LEDGER_SCAFFOLD
@@ -35,7 +35,13 @@ def test_financial_ledger_public_definition_has_no_hidden_material():
         "pass_threshold": 85,
         "preserve_workspace": True,
     }
-    assert case["metadata"]["score_basis"] == "backend_quality"
+    assert case["metadata"]["score_basis"] == "backend_quality_time"
+    assert case["metadata"]["quality_weight"] == 95
+    assert case["metadata"]["time_weight"] == 5
+    assert case["metadata"]["frontier_profile"] == "backend-mastery-gates-v3"
+    assert case["metadata"]["mastery_curve"] == "frontier_v1"
+    assert case["limits"]["time_target_seconds"] == 2400
+    assert case["limits"]["max_runtime_seconds"] == 7200
     assert "demo_actions" not in case["metadata"]
     assert "reference" not in repr(case).lower()
     assert "private_files" not in repr(case)
@@ -51,6 +57,13 @@ def test_financial_ledger_public_definition_has_no_hidden_material():
         item["key"] for item in FINANCIAL_LEDGER_METRICS
     ]
     assert command["config"]["hard_caps"] == FINANCIAL_LEDGER_HARD_GATES
+    assert {item["metric_key"] for item in command["config"]["metric_caps"]} == {
+        "api_business",
+        "boundary_contract",
+        "concurrency",
+        "crash_outbox",
+        "restart_recovery",
+    }
     assert case["metadata"]["hard_gates"] == [
         "data_loss",
         "duplicate_charge",
@@ -77,4 +90,8 @@ def test_financial_ledger_public_contract_mentions_postgres_and_audit_requiremen
     assert "double-entry" in spec
     assert "legacy_postings" in spec
     assert "hash" in spec and "sha-256" in spec
+    assert "ledger_transactions(transaction_id" in spec
+    assert "original_transaction_id" in spec
+    assert "at most 60 seconds" in spec
     assert "PUBLIC_FINANCIAL_LEDGER_SMOKE_OK" in LEDGER_PUBLIC_SMOKE
+    assert "SMOKE_SKIPPED" in LEDGER_PUBLIC_SMOKE

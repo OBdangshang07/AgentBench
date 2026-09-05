@@ -177,7 +177,10 @@ def _scheduler_instance(
     instance = {
         "id": instance_id,
         "horizon": horizon,
-        "renewable_capacity": {"crew": width * 2 + 1, "lab": max(2, width - 1)},
+        # The planted schedule peaks at crew=5 and lab=1.  Keeping exactly that
+        # capacity turns renewable resources into a binding constraint instead
+        # of allowing a generic earliest-start heuristic to coast to the ceiling.
+        "renewable_capacity": {"crew": max(2, width + 2), "lab": 1},
         "nonrenewable_budget": reference_nonrenewable + max(4, task_count // 3),
         "machines": machines,
         "tasks": tasks,
@@ -504,12 +507,16 @@ def _scheduler_private_validator(hidden_payload: dict[str, Any]) -> str:
                     if instance_id == "hidden-small":
                         score = 100.0 if objective["makespan"] <= reference["makespan"] else 0.0
                     elif instance_id == "hidden-medium":
-                        score = 100.0 if gap <= 0.02 else max(0.0, 100.0 * (0.20 - gap) / 0.18)
+                        score = 100.0 if gap <= 0.005 else max(0.0, 100.0 * (0.10 - gap) / 0.095)
+                    elif instance_id == "hidden-large":
+                        score = 100.0 if gap <= 0.02 else max(0.0, 100.0 * (0.14 - gap) / 0.12)
+                    elif instance_id == "hidden-wide":
+                        score = 100.0 if gap <= 0.04 else max(0.0, 100.0 * (0.18 - gap) / 0.14)
                     else:
-                        score = 100.0 if gap <= 0.08 else max(0.0, 100.0 * (0.30 - gap) / 0.22)
+                        score = 100.0 if gap <= 0.06 else max(0.0, 100.0 * (0.22 - gap) / 0.16)
                     budget_gap = max(0.0, (objective["nonrenewable"] - reference["nonrenewable"]) / max(1, reference["nonrenewable"]))
                     completion_gap = max(0.0, (objective["weighted_completion"] - reference["weighted_completion"]) / max(1, reference["weighted_completion"]))
-                    score = 0.75 * score + 25.0 * max(0.0, 1.0 - min(1.0, (budget_gap + completion_gap) / 0.30))
+                    score = 0.80 * score + 20.0 * max(0.0, 1.0 - min(1.0, (budget_gap + completion_gap) / 0.12))
                     optimality_scores.append(round(score, 2))
                 metrics["optimality"] = round(sum(optimality_scores) / max(1, len(optimality_scores)), 2)
                 input_unchanged = hashlib.sha256(hidden_path.read_bytes()).hexdigest() == original_hash
@@ -555,6 +562,21 @@ def _event_private_validator() -> str:
                         if retry == 199:
                             raise
             raise SystemExit(0)
+        if len(sys.argv) > 1 and sys.argv[1] == "idem-worker":
+            from event_store import EventStore
+            path, mode, worker = sys.argv[2], sys.argv[3], int(sys.argv[4])
+            local = EventStore(path)
+            payload = (
+                {"same": True, "nested": {"b": 2, "a": 1}}
+                if mode == "same"
+                else {"winner": worker}
+            )
+            try:
+                versions = local.append("idem", -1, [payload], "shared-command")
+                print(json.dumps({"ok": True, "versions": versions, "payload": payload}))
+            except Exception as exc:
+                print(json.dumps({"ok": False, "error_type": exc.__class__.__name__}))
+            raise SystemExit(0)
         if len(sys.argv) > 1 and sys.argv[1] == "crash-worker":
             from event_store import EventStore
             path, ready_path = sys.argv[2], Path(sys.argv[3])
@@ -564,7 +586,7 @@ def _event_private_validator() -> str:
             ready_path.write_text("ready", encoding="utf-8")
             local.append("crash", -1, batch, "crash-command")
             raise SystemExit(0)
-        keys = ["migration_schema", "idempotency_json", "multiprocess", "crash_atomicity", "integrity_snapshot", "file_integrity"]
+        keys = ["migration_schema", "idempotency_json", "contention_idempotency", "multiprocess", "crash_atomicity", "integrity_snapshot", "model_history", "file_integrity"]
         metrics = {key: 0.0 for key in keys}
         evidence = {}
         root = Path(tempfile.mkdtemp())
@@ -583,6 +605,23 @@ def _event_private_validator() -> str:
             except Exception:
                 evidence[name] = traceback.format_exc()[-3000:]
 
+        def event_matches(row, version, payload):
+            """接受两种等价且不丢信息的公开 read() 表示。
+
+            题面只要求返回事件版本并保留 payload，没有要求被测实现
+            必须选择 {version, payload} 包装形式。字典事件直接添加
+            version 也能无损表达同一结果。
+            """
+            if not isinstance(row, dict) or row.get("version") != version:
+                return False
+            if "payload" in row:
+                return row["payload"] == payload
+            if not isinstance(payload, dict) or "version" in payload:
+                return False
+            flattened = dict(row)
+            flattened.pop("version", None)
+            return flattened == payload
+
         def migration_schema():
             path = root / "legacy.db"
             connection = sqlite3.connect(path)
@@ -590,14 +629,29 @@ def _event_private_validator() -> str:
             connection.execute("INSERT INTO events VALUES ('legacy',0,'{\"old\":true}')")
             connection.commit(); connection.close()
             store = EventStore(path)
-            checks = [store.read("legacy") == [{"version":0,"payload":{"old":True}}]]
+            legacy_rows = store.read("legacy")
+            checks = [
+                len(legacy_rows) == 1
+                and event_matches(legacy_rows[0], 0, {"old":True})
+            ]
             checks.append(store.append("legacy", 0, [{"new":True}], "legacy-command") == [1])
             connection = sqlite3.connect(path)
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             columns = {row[1] for row in connection.execute("PRAGMA table_info(events)")}
             snapshot_columns = {row[1] for row in connection.execute("PRAGMA table_info(snapshots)")}
             connection.close()
-            checks.extend([{"events", "commands", "snapshots"} <= tables, {"stream", "version", "payload", "checksum"} <= columns, {"stream", "version", "state", "checksum"} <= snapshot_columns])
+            event_chain_columns = (
+                {"stream", "version", "payload"} <= columns
+                and (
+                    "checksum" in columns
+                    or {"prev_hash", "event_hash"} <= columns
+                )
+            )
+            checks.extend([
+                {"events", "commands", "snapshots"} <= tables,
+                event_chain_columns,
+                {"stream", "version", "state", "checksum"} <= snapshot_columns,
+            ])
             return 100 * sum(checks) / len(checks), {"checks": checks}
 
         def idempotency_json():
@@ -618,6 +672,93 @@ def _event_private_validator() -> str:
             except (TypeError, ValueError):
                 checks.append(store.read("s") == before)
             return 100 * sum(checks) / len(checks), {"checks": checks}
+
+        def contention_idempotency_test():
+            def run_group(path, mode, workers):
+                EventStore(path)
+                processes = [
+                    subprocess.Popen(
+                        [
+                            sys.executable,
+                            str(Path(__file__).resolve()),
+                            "idem-worker",
+                            str(path),
+                            mode,
+                            str(worker),
+                        ],
+                        cwd=workspace,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                    for worker in range(workers)
+                ]
+                results = []
+                for process in processes:
+                    stdout, stderr = process.communicate(timeout=45)
+                    parsed = None
+                    for line in reversed(stdout.splitlines()):
+                        try:
+                            parsed = json.loads(line)
+                            break
+                        except Exception:
+                            continue
+                    results.append(
+                        {
+                            "exit_code": process.returncode,
+                            "result": parsed,
+                            "stderr": stderr[-1000:],
+                        }
+                    )
+                return results
+
+            same_path = root / "idem-same.db"
+            same = run_group(same_path, "same", 8)
+            same_results = [item["result"] for item in same if isinstance(item["result"], dict)]
+            checks = [
+                all(item["exit_code"] == 0 for item in same),
+                len(same_results) == 8,
+                all(item.get("ok") and item.get("versions") == [0] for item in same_results),
+            ]
+            same_rows = EventStore(same_path).read("idem")
+            checks.append(
+                len(same_rows) == 1
+                and event_matches(same_rows[0], 0, {"same": True, "nested": {"a": 1, "b": 2}})
+            )
+
+            conflict_path = root / "idem-conflict.db"
+            conflict = run_group(conflict_path, "conflict", 6)
+            conflict_results = [
+                item["result"] for item in conflict if isinstance(item["result"], dict)
+            ]
+            winners = [item for item in conflict_results if item.get("ok")]
+            losers = [item for item in conflict_results if not item.get("ok")]
+            checks.extend(
+                [
+                    all(item["exit_code"] == 0 for item in conflict),
+                    len(conflict_results) == 6,
+                    len(winners) == 1 and winners[0].get("versions") == [0],
+                    len(losers) == 5
+                    and all(item.get("error_type") == "ValueError" for item in losers),
+                    len(EventStore(conflict_path).read("idem")) == 1,
+                ]
+            )
+            connection = sqlite3.connect(conflict_path)
+            command_count = connection.execute(
+                "SELECT COUNT(*) FROM commands WHERE command_id='shared-command'"
+            ).fetchone()[0]
+            event_count = connection.execute(
+                "SELECT COUNT(*) FROM events WHERE stream='idem'"
+            ).fetchone()[0]
+            connection.close()
+            checks.extend([command_count == 1, event_count == 1])
+            return 100 * sum(checks) / len(checks), {
+                "checks": checks,
+                "same_workers": same,
+                "conflict_workers": conflict,
+                "command_rows": command_count,
+                "event_rows": event_count,
+            }
 
         def multiprocess_test():
             path = root / "hot.db"
@@ -670,7 +811,11 @@ def _event_private_validator() -> str:
             checks.append(count == 0)
             recovered = EventStore(path)
             checks.append(recovered.append("crash", -1, [{"recovered":True}], "after-crash") == [0])
-            checks.append(recovered.read("crash")[0]["payload"] == {"recovered":True})
+            recovered_rows = recovered.read("crash")
+            checks.append(
+                len(recovered_rows) == 1
+                and event_matches(recovered_rows[0], 0, {"recovered":True})
+            )
             return 100 * sum(checks) / len(checks), {"checks": checks, "surviving_rows": count}
 
         def integrity_snapshot_test():
@@ -702,6 +847,57 @@ def _event_private_validator() -> str:
                 checks.append(True)
             return 100 * sum(checks) / len(checks), {"checks": checks}
 
+        def model_history_test():
+            """Compare a long reopen/replay history against an in-memory model."""
+            path = root / "model-history.db"
+            model = {f"stream-{index}": [] for index in range(5)}
+            commands = {}
+            checks = []
+            for step in range(90):
+                stream = f"stream-{(step * 7 + 3) % 5}"
+                payload = [
+                    {"step": step, "nested": {"z": step % 4, "a": [step, step + 1]}},
+                    {"checksum_source": step * step - 3 * step},
+                ]
+                command = f"history-{step}"
+                store = EventStore(path)
+                expected_version = len(model[stream]) - 1
+                versions = store.append(stream, expected_version, payload, command)
+                expected_versions = list(range(expected_version + 1, expected_version + 3))
+                checks.append(versions == expected_versions)
+                model[stream].extend(payload)
+                commands[command] = (stream, payload, versions)
+                if step % 9 == 0:
+                    # Canonical replay after reopening must return the original
+                    # versions without writing another row.
+                    replay_payload = [
+                        {"nested": {"a": [step, step + 1], "z": step % 4}, "step": step},
+                        {"checksum_source": step * step - 3 * step},
+                    ]
+                    checks.append(
+                        EventStore(path).append(
+                            stream, expected_version, replay_payload, command
+                        )
+                        == versions
+                    )
+                if step % 11 == 0 and len(model[stream]) >= 2:
+                    before = EventStore(path).read(stream)
+                    try:
+                        EventStore(path).append(stream, expected_version - 1, [{"stale": step}], f"stale-{step}")
+                        checks.append(False)
+                    except ConcurrencyError:
+                        checks.append(EventStore(path).read(stream) == before)
+            for stream, expected in model.items():
+                actual = EventStore(path).read(stream)
+                checks.append(len(actual) == len(expected))
+                checks.append(all(event_matches(row, index, payload) for index, (row, payload) in enumerate(zip(actual, expected))))
+            connection = sqlite3.connect(path)
+            event_count = connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+            command_count = connection.execute("SELECT COUNT(*) FROM commands").fetchone()[0]
+            connection.close()
+            checks.extend([event_count == 180, command_count == 90])
+            return 100 * sum(checks) / len(checks), {"checks": checks, "events": event_count, "commands": command_count}
+
         def file_integrity_test():
             smoke = workspace / "public_smoke.py"
             spec = workspace / "SPEC.md"
@@ -712,9 +908,11 @@ def _event_private_validator() -> str:
 
         run_metric("migration_schema", migration_schema)
         run_metric("idempotency_json", idempotency_json)
+        run_metric("contention_idempotency", contention_idempotency_test)
         run_metric("multiprocess", multiprocess_test)
         run_metric("crash_atomicity", crash_test)
         run_metric("integrity_snapshot", integrity_snapshot_test)
+        run_metric("model_history", model_history_test)
         run_metric("file_integrity", file_integrity_test)
         print("AGENTBENCH_METRICS=" + json.dumps({"metrics": metrics, "evidence": evidence}, ensure_ascii=False, separators=(",", ":")))
         '''
@@ -727,9 +925,11 @@ def build_ultra_catalog_v5(event_solution: str) -> list[dict[str, Any]]:
     )
     hidden_payload, _ = _scheduler_payload(
         [
-            ("hidden-small", 10, 3, 1907, True),
-            ("hidden-medium", 18, 4, 2017, False),
-            ("hidden-large", 30, 4, 2203, False),
+            ("hidden-small", 12, 3, 1907, True),
+            ("hidden-medium", 22, 4, 2017, False),
+            ("hidden-large", 36, 4, 2203, False),
+            ("hidden-wide", 60, 5, 2309, False),
+            ("hidden-deep", 96, 6, 2411, False),
         ]
     )
     public_text = json.dumps(public_payload, ensure_ascii=False, indent=2)
@@ -791,16 +991,18 @@ def build_ultra_catalog_v5(event_solution: str) -> list[dict[str, Any]]:
     common_policy = {
         "max_attempts": 3,
         "pass_threshold": 85,
-        "multipliers": [1.0, 0.85, 0.70],
+        "multipliers": [1.0, 0.75, 0.50],
         "preserve_workspace": True,
     }
     event_metrics = [
-        {"key": "migration_schema", "name": "迁移与模式", "weight": 15},
-        {"key": "idempotency_json", "name": "幂等与规范 JSON", "weight": 15},
-        {"key": "multiprocess", "name": "多进程并发", "weight": 20},
-        {"key": "crash_atomicity", "name": "强杀恢复与批次原子性", "weight": 25},
-        {"key": "integrity_snapshot", "name": "哈希链与快照回退", "weight": 20},
-        {"key": "file_integrity", "name": "文件完整性", "weight": 5},
+        {"key": "migration_schema", "name": "迁移与模式", "weight": 8},
+        {"key": "idempotency_json", "name": "幂等与规范 JSON", "weight": 10},
+        {"key": "contention_idempotency", "name": "并发命令幂等线性化", "weight": 16},
+        {"key": "multiprocess", "name": "多进程并发", "weight": 15},
+        {"key": "crash_atomicity", "name": "强杀恢复与批次原子性", "weight": 20},
+        {"key": "integrity_snapshot", "name": "哈希链与快照回退", "weight": 12},
+        {"key": "model_history", "name": "长历史模型核对与重放", "weight": 15},
+        {"key": "file_integrity", "name": "文件完整性", "weight": 4},
     ]
     scheduler_metrics = [
         {"key": "interface", "name": "求解器接口", "weight": 10},
@@ -812,7 +1014,7 @@ def build_ultra_catalog_v5(event_solution: str) -> list[dict[str, Any]]:
     return [
         {
             "slug": "ultra.event-store-crash-consistency-003",
-            "version": "5.0.0",
+            "version": "5.2.0",
             "category": "ultra-engineering",
             "title": "ULTRA · 崩溃一致性事件存储 III",
             "description": "以六个独立维度连续评分跨进程竞争、强杀恢复、迁移、幂等与哈希链完整性。",
@@ -838,6 +1040,13 @@ def build_ultra_catalog_v5(event_solution: str) -> list[dict[str, Any]]:
                     command="python {private_root}/validate_event_store.py",
                     private_files={"validate_event_store.py": event_validator},
                     metrics=event_metrics,
+                    metric_caps=[
+                        {"metric_key": "migration_schema", "min_score": 100, "max_score": 80, "reason": "迁移或公开模式不完整"},
+                        {"metric_key": "contention_idempotency", "min_score": 100, "max_score": 75, "reason": "并发命令幂等未线性化"},
+                        {"metric_key": "crash_atomicity", "min_score": 100, "max_score": 65, "reason": "强杀时出现部分批次或无法恢复"},
+                        {"metric_key": "integrity_snapshot", "min_score": 100, "max_score": 75, "reason": "篡改检测或快照回退不完整"},
+                        {"metric_key": "model_history", "min_score": 100, "max_score": 72, "reason": "长历史重开、重放或过期版本与参考模型不一致"},
+                    ],
                     critical=True,
                     critical_min_score=80,
                 ),
@@ -860,8 +1069,8 @@ def build_ultra_catalog_v5(event_solution: str) -> list[dict[str, Any]]:
             "attempt_policy": {
                 **common_policy,
                 "hints": [
-                    "先把每个失败维度独立定位：初始化迁移用排他事务，写入用 BEGIN IMMEDIATE；规范化和指纹在事务前完成。",
-                    "每个进程使用独立 SQLite 连接并设置 busy_timeout。事件哈希包含 stream/version/previous_hash/canonical_payload；快照保留历史并倒序校验。",
+                    "只根据失败维度、公开合同和本轮可见证据定位问题；不会提供实现策略。",
+                    "复核修复是否覆盖同类并发交错、崩溃点和篡改位置，而不只是当前样例。",
                 ],
             },
             "metadata": {
@@ -869,7 +1078,11 @@ def build_ultra_catalog_v5(event_solution: str) -> list[dict[str, Any]]:
                 "tier": "ultra",
                 "estimated_minutes": 95,
                 "capability": "crash-consistent-multiprocess-engineering",
+                "capability_dimension": "agent_execution",
                 "private_validation": True,
+                "score_basis": "quality_only",
+                "mastery_curve": "frontier_v1",
+                "frontier_profile": "first-pass-reliability-v3",
                 "scoring_breakdown": event_metrics,
                 "demo_actions": [{"tool": "write_file", "arguments": {"path": "event_store.py", "content": event_solution}}],
                 "demo_response": "事件存储实现完成。",
@@ -877,7 +1090,7 @@ def build_ultra_catalog_v5(event_solution: str) -> list[dict[str, Any]]:
         },
         {
             "slug": "ultra.hidden-general-resource-scheduler-003",
-            "version": "5.0.0",
+            "version": "5.2.0",
             "category": "ultra-planning",
             "title": "ULTRA · 隐藏实例通用资源调度器",
             "description": "提交可执行的通用求解器，现场求解未公开的小、中、大型多约束实例并按可行率与最优差距连续评分。",
@@ -905,6 +1118,11 @@ def build_ultra_catalog_v5(event_solution: str) -> list[dict[str, Any]]:
                     command="python {private_root}/evaluate_solver.py",
                     private_files={"evaluate_solver.py": scheduler_validator},
                     metrics=scheduler_metrics,
+                    metric_caps=[
+                        {"metric_key": "constraint_correctness", "min_score": 100, "max_score": 60, "reason": "隐藏实例存在约束违规"},
+                        {"metric_key": "feasibility", "min_score": 100, "max_score": 75, "reason": "未能为全部隐藏实例生成可行解"},
+                        {"metric_key": "stability", "min_score": 100, "max_score": 90, "reason": "重复运行结果不确定或修改输入"},
+                    ],
                     critical=True,
                     critical_min_score=75,
                 ),
@@ -924,8 +1142,8 @@ def build_ultra_catalog_v5(event_solution: str) -> list[dict[str, Any]]:
             "attempt_policy": {
                 **common_policy,
                 "hints": [
-                    "先实现严格的通用校验与拓扑排序，再用最小剩余时间窗选点；联合枚举模式、机器与开始时刻，并维护逐时刻资源占用及机器前后切换间隔。",
-                    "第二阶段加入分支定界：以下界剪枝 makespan，按非可再生消耗和加权完成时间排序候选；保留当前最好可行解，在大型实例达到时间预算时也必须写出结果。",
+                    "只根据失败指标和公开格式自行改进通用求解器；不会公开隐藏实例结构或搜索策略。",
+                    "复核算法在资源紧约束、深依赖和更大规模下的可行性、质量与确定性。",
                 ],
             },
             "metadata": {
@@ -933,9 +1151,13 @@ def build_ultra_catalog_v5(event_solution: str) -> list[dict[str, Any]]:
                 "tier": "ultra",
                 "estimated_minutes": 120,
                 "capability": "hidden-instance-general-constraint-optimization",
+                "capability_dimension": "agent_execution",
                 "private_validation": True,
-                "instance_count": 3,
-                "task_count": 58,
+                "score_basis": "quality_only",
+                "mastery_curve": "frontier_v1",
+                "frontier_profile": "binding-resource-holdout-v3",
+                "instance_count": 5,
+                "task_count": 226,
                 "scoring_breakdown": scheduler_metrics,
                 "demo_actions": [{"tool": "write_file", "arguments": {"path": "solver.py", "content": REFERENCE_SOLVER}}],
                 "demo_response": "通用调度求解器实现完成。",

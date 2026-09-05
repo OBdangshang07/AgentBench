@@ -94,6 +94,12 @@ QUEUE_SPEC = textwrap.dedent(
     close()
     ```
 
+    Every `run_after` and `now` argument accepts a `datetime`, an ISO-8601 string
+    (including a trailing `Z`), or a Unix timestamp as an `int`/`float`; booleans
+    and non-finite numbers are invalid.  Naive datetimes are interpreted as UTC
+    and task envelopes serialize timestamps as ISO-8601 strings.  `expire_leases`
+    returns the non-negative integer count of leases transitioned by that call.
+
     ## HTTP contract
 
     `app.py` must expose `app`.  Use JSON responses and map `TenantForbidden`,
@@ -139,7 +145,9 @@ QUEUE_SPEC = textwrap.dedent(
     due work and tenant/state, and a monotonic `fencing_token`.
 
     Dependencies refer to existing tasks in the same tenant.  Reject missing,
-    duplicate, self, cross-tenant, or cyclic dependencies.  A task is eligible
+    duplicate, self, cross-tenant, or cyclic dependencies.  Missing/cross-tenant
+    dependencies raise either `KeyError` or `InvalidTransition`; callers must not
+    receive the other tenant's payload or status.  A task is eligible
     only when all dependencies are `succeeded`; if one becomes `cancelled` or
     `dead_letter`, atomically propagate the dependent to `dead_letter` with a
     machine-readable error.  A dependency check must not be implemented by a
@@ -161,6 +169,10 @@ QUEUE_SPEC = textwrap.dedent(
     `max_attempts`, a failure or lease expiry goes to the DLQ.  Each committed
     transition writes exactly one `events` row in the same PostgreSQL
     transaction.  Event payloads must not contain another tenant's task data.
+    The stable event names are `submitted`, `claimed`, `heartbeat`, `completed`,
+    `failed_retry`, `failed_dlq`, `lease_expired_retry`, `lease_expired_dlq`,
+    `dependency_failed`, and `cancelled`.  Implementations need emit only the
+    events reached by an operation, but must use these names for those transitions.
 
     ## 幂等、安全、公平与背压（Idempotency, security, fairness, and backpressure）
 
@@ -198,8 +210,13 @@ QUEUE_SPEC = textwrap.dedent(
     ordered audit trail for the requested tenant.  The validator runs concurrent
     HTTP clients, deliberately drops/flushed Redis, kills workers at lease
     boundaries, races stale completions, tests dependency cascades and fairness,
-    and submits a bounded 1,000-task workload.  Run `python public_smoke.py`
-    before handing in the service.
+    and submits a bounded 1,000-task workload.  Full performance credit requires
+    submitting all 1,000 tasks within 60 seconds and completing the full workload
+    within 120 seconds; a slower correct workload receives partial credit.  Run
+    `python public_smoke.py` before handing in the service.  The smoke rejects an
+    untouched `NotImplemented` scaffold.  With `DATABASE_URL` configured it also
+    runs a real submit/claim/complete/reopen flow; otherwise it reports
+    `PUBLIC_QUEUE_SMOKE_STATIC_ONLY` rather than claiming a database pass.
     '''
 ).strip() + "\n"
 
@@ -412,9 +429,11 @@ QUEUE_APP_SCAFFOLD = textwrap.dedent(
 
 QUEUE_PUBLIC_SMOKE = textwrap.dedent(
     r'''
-    """Static/public contract smoke; private tests own PostgreSQL and Redis."""
+    """Public contract smoke with an optional live PostgreSQL/Redis flow."""
 
     import ast
+    import os
+    import tempfile
     from pathlib import Path
 
 
@@ -436,6 +455,26 @@ QUEUE_PUBLIC_SMOKE = textwrap.dedent(
         "cancel", "expire_leases", "reconcile", "get", "list_tasks", "stats",
         "events", "close",
     } <= task_methods
+
+    def is_unimplemented(method):
+        return any(
+            isinstance(node, ast.Raise)
+            and isinstance(node.exc, ast.Name)
+            and node.exc.id == "NotImplementedError"
+            for node in ast.walk(method)
+        )
+
+    required_methods = {
+        "submit", "claim", "claim_many", "heartbeat", "complete", "fail",
+        "cancel", "expire_leases", "reconcile", "get", "list_tasks", "stats",
+        "events", "close",
+    }
+    implementations = {
+        node.name: node
+        for node in classes["TaskQueue"].body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert not [name for name in required_methods if is_unimplemented(implementations[name])]
     assert "psycopg" in task_source.lower()
     assert "redis" in task_source.lower()
     assert "sqlite3" not in task_source.lower()
@@ -447,6 +486,20 @@ QUEUE_PUBLIC_SMOKE = textwrap.dedent(
         and any(isinstance(target, ast.Name) and target.id == "app" for target in node.targets)
         for node in app_tree.body
     )
+    route_literals = set()
+    for node in ast.walk(app_tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            if (
+                isinstance(decorator, ast.Call)
+                and isinstance(decorator.func, ast.Attribute)
+                and decorator.func.attr in {"get", "post", "put", "delete", "patch"}
+                and decorator.args
+                and isinstance(decorator.args[0], ast.Constant)
+                and isinstance(decorator.args[0].value, str)
+            ):
+                route_literals.add(decorator.args[0].value)
     for route in (
         "/healthz",
         "/v1/claim",
@@ -457,12 +510,37 @@ QUEUE_PUBLIC_SMOKE = textwrap.dedent(
         "/v1/tenants/{tenant_id}/tasks/{task_id}/fail",
         "/v1/tenants/{tenant_id}/tasks/{task_id}/cancel",
     ):
-        assert route in app_source
+        assert route in route_literals
 
     schema = source("schema.sql").lower()
     assert "create table if not exists tasks" in schema
     assert "jsonb" in schema and "fencing_token" in schema
     assert "create table if not exists events" in schema
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        print("PUBLIC_QUEUE_SMOKE_STATIC_ONLY: set DATABASE_URL for the live flow")
+        raise SystemExit(0)
+
+    from task_queue import TaskQueue
+
+    redis_url = os.environ.get("REDIS_URL")
+    suffix = next(tempfile._get_candidate_names())
+    tenant = "public-" + suffix
+    task_id = "task-" + suffix
+    queue = TaskQueue(database_url, redis_url, lease_seconds=5)
+    first = queue.submit(tenant, task_id, {"smoke": True}, run_after=0)
+    replay = queue.get(task_id, tenant_id=tenant)
+    assert replay["task_id"] == first["task_id"] and replay["status"] == "pending"
+    claimed = queue.claim("public-worker", tenant_id=tenant)
+    assert claimed and claimed["task_id"] == task_id and claimed["status"] == "leased"
+    completed = queue.complete(
+        task_id, "public-worker", claimed["fencing_token"], {"ok": True}, tenant_id=tenant
+    )
+    assert completed["status"] == "succeeded"
+    queue.close()
+    reopened = TaskQueue(database_url, redis_url)
+    assert reopened.get(task_id, tenant_id=tenant)["status"] == "succeeded"
+    reopened.close()
     print("PUBLIC_QUEUE_SMOKE_OK")
     '''
 ).strip() + "\n"
@@ -472,26 +550,32 @@ QUEUE_METRICS = [
     {
         "key": "api_persistence_state_machine",
         "name": "API、持久化与任务状态机",
-        "weight": 15,
+        "weight": 10,
     },
-    {"key": "lease_fencing", "name": "Lease、心跳与 Fencing Token", "weight": 20},
+    {"key": "lease_fencing", "name": "Lease、心跳与 Fencing Token", "weight": 16},
     {
         "key": "idempotency_retry_dlq",
         "name": "幂等、重试与 DLQ",
-        "weight": 15,
+        "weight": 10,
+    },
+    {
+        "key": "adversarial_semantics",
+        "name": "逻辑时钟、边界输入与优先级语义",
+        "weight": 10,
     },
     {
         "key": "concurrency_crash_recovery",
         "name": "并发安全与强杀恢复",
-        "weight": 20,
+        "weight": 16,
     },
+    {"key": "postgres_restart_recovery", "name": "PostgreSQL 强制重启恢复", "weight": 14},
     {
         "key": "dependencies_fairness_backpressure",
         "name": "依赖、公平调度与背压",
-        "weight": 12,
+        "weight": 10,
     },
     {"key": "tenant_security", "name": "租户隔离与安全", "weight": 5},
-    {"key": "performance_resources", "name": "性能与资源约束", "weight": 8},
+    {"key": "performance_resources", "name": "性能与资源约束", "weight": 4},
     {
         "key": "migration_audit_observability",
         "name": "迁移、审计与可观测性",
@@ -533,7 +617,7 @@ def build_queue_ultra_case(
 
     return {
         "slug": "ultra.distributed-task-queue-001",
-        "version": "1.0.1",
+        "version": "1.3.0",
         "category": "ultra-backend",
         "title": "BACKEND ULTRA · 分布式任务队列与租约恢复",
         "description": (
@@ -548,9 +632,9 @@ def build_queue_ultra_case(
         ),
         "tools": ["filesystem", "search", "shell"],
         "limits": {
-            "max_steps": 80,
+            "max_steps": 160,
             "time_target_seconds": 2400,
-            "max_runtime_seconds": 2400,
+            "max_runtime_seconds": 7200,
             "validator_timeout_seconds": 900,
             "validator_cpus": 4,
             "validator_memory": "8g",
@@ -567,6 +651,38 @@ def build_queue_ultra_case(
                 private_validator_ref=reference,
                 metrics=QUEUE_METRICS,
                 hard_caps=QUEUE_HARD_CAPS,
+                metric_caps=[
+                    {
+                        "metric_key": "api_persistence_state_machine",
+                        "min_score": 100,
+                        "max_score": 75,
+                        "reason": "API、持久化或状态机任一不完整时最高 75 分",
+                    },
+                    {
+                        "metric_key": "lease_fencing",
+                        "min_score": 100,
+                        "max_score": 70,
+                        "reason": "Lease 或 Fencing Token 语义不完整时最高 70 分",
+                    },
+                    {
+                        "metric_key": "adversarial_semantics",
+                        "min_score": 100,
+                        "max_score": 85,
+                        "reason": "逻辑时间、非有限输入、规范 JSON 或优先级语义存在缺口",
+                    },
+                    {
+                        "metric_key": "concurrency_crash_recovery",
+                        "min_score": 100,
+                        "max_score": 75,
+                        "reason": "并发、强杀或 Redis 丢失恢复未全部成立",
+                    },
+                    {
+                        "metric_key": "postgres_restart_recovery",
+                        "min_score": 100,
+                        "max_score": 65,
+                        "reason": "PostgreSQL 强制重启后任务、租约、幂等或事件记录未完整恢复",
+                    },
+                ],
                 critical=True,
                 critical_min_score=80,
             ),
@@ -606,8 +722,14 @@ def build_queue_ultra_case(
             "tier": "ultra",
             "estimated_minutes": 40,
             "capability": "postgresql-redis-distributed-queue-recovery",
+            "capability_dimension": "systems_backend",
             "private_validation": True,
-            "score_basis": "backend_quality",
+            "score_basis": "backend_quality_time",
+            "mastery_curve": "frontier_v1",
+            "quality_weight": 95,
+            "time_weight": 5,
+            "frontier_profile": "backend-mastery-gates-v3",
+            "runtime_policy": "40-minute-soft-target-120-minute-safety-cap",
             "deterministic_validation": True,
             "validation_protocol": "seed-committed-ready-kill",
             "scoring_breakdown": QUEUE_METRICS,

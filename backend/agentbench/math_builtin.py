@@ -7,7 +7,7 @@ from .math_exam import MATH_EXAM_ID, build_published_math_cases
 SOURCE_FILENAME = "ab27a44c5f0cbe5e.pdf"
 SOURCE_SHA256 = "9ebd0eebbbfeef553880cb13af3528bbbb25630b86d7ed22fb5f9c85b0c659bf"
 SOURCE_PAGE_COUNT = 17
-RUBRIC_VERSION = "2025.math1.solution.strict-exam.v3"
+RUBRIC_VERSION = "2025.math1.solution.strict-exam.v4"
 RUBRIC_SOURCE = {
     "source_id": "moe-policy-2025-plus-expert-reconstruction",
     "version": RUBRIC_VERSION,
@@ -21,7 +21,7 @@ RUBRIC_SOURCE = {
     "verification_status": "partially_verified",
     "notes": "官方条文仅证明评卷制度与来源链；逐题评分点由参考解答按踩点给分原则重建。解答题卷面分值按数学一正式题型结构分配为10、10、10、10、15、15。严格制采用0.5分粒度、逻辑缺口强制扣分和至少双匿名裁判，不宣称为官方逐题评分参考。",
 }
-Q20_RUBRIC_VERSION = "2025.math1.solution.q20.corrected.strict-v4"
+Q20_RUBRIC_VERSION = "2025.math1.solution.q20.corrected.strict-v5"
 Q20_RUBRIC_SOURCE = {
     **RUBRIC_SOURCE,
     "version": Q20_RUBRIC_VERSION,
@@ -63,6 +63,9 @@ def _question(
     major_defect_deduction: float = 1.0,
     full_credit_confidence: float = 0.90,
     required_judges: int = 2,
+    critical_failure_score_cap: float = 60.0,
+    answer_anchor_fields: dict[str, Any] | None = None,
+    answer_anchor_failure_cap: float = 60.0,
 ) -> dict[str, Any]:
     obligations = obligations or []
     if mark_values is not None and len(mark_values) != len(obligations):
@@ -124,7 +127,45 @@ def _question(
         "major_defect_deduction": major_defect_deduction,
         "full_credit_confidence": full_credit_confidence,
         "required_judges": required_judges,
+        "critical_failure_score_cap": critical_failure_score_cap,
+        "answer_anchor_fields": answer_anchor_fields or {},
+        "answer_anchor_failure_cap": answer_anchor_failure_cap,
         "review_status": "confirmed",
+    }
+
+
+def _point(
+    question: int,
+    index: int,
+    description: str,
+    max_points: float,
+    *,
+    depends_on: list[str] | None = None,
+    critical: bool = False,
+    carry_forward: bool = False,
+    evidence: list[str] | None = None,
+) -> dict[str, Any]:
+    """Create one strict, evidence-bearing mark instead of a keyword checklist."""
+
+    return {
+        "point_id": f"q{question}.{index}",
+        "description": description,
+        "max_points": max_points,
+        "depends_on": depends_on or [],
+        "mutually_exclusive_with": [],
+        "alternate_for": [],
+        "error_carry_forward": {
+            "enabled": carry_forward,
+            "rule": (
+                "仅当前置数值错误被明确继承、且本步机械推导独立正确时保留本步方法分；"
+                "不得把缺失推导或独立概念错误标为顺延误差。"
+            ),
+            "independent_work_credit": carry_forward,
+            "max_repeated_deduction": 0,
+        },
+        "evidence_required": evidence
+        or ["必须引用考生作答中的具体公式、代入、定理条件或推理句；只出现关键词不得分"],
+        "critical": critical,
     }
 
 
@@ -337,7 +378,20 @@ D. X̄>1+√(2/n)Zα。
             "分别正确处理对数项与反正切项",
             "代入上下限并化简为 3ln2/10+π/10",
         ],
-        mark_values=[3, 4, 3],
+        scoring_points=[
+            _point(17, 1, "写出正确部分分式分解，并可由合并分母直接复核", 2.5),
+            _point(17, 2, "对数部分的原函数及系数正确", 2.0, depends_on=["q17.1"], carry_forward=True),
+            _point(17, 3, "完成平方后反正切部分的原函数、尺度和系数正确", 2.0, depends_on=["q17.1"], carry_forward=True),
+            _point(17, 4, "代入 0、1 两端并合并为 3ln2/10+π/10", 3.5, depends_on=["q17.2", "q17.3"], critical=True, carry_forward=True),
+        ],
+        answer_anchor_fields={
+            "final_answer": {
+                "kind": "expression",
+                "expected": "3*log(2)/10+pi/10",
+                "variables": [],
+                "weight": 1,
+            }
+        },
     ),
     _question(
         18,
@@ -357,7 +411,21 @@ x^2 g_xx + xy g_xy + y^2 g_yy = 1，
             "由 g(x,x)=1 与 g_x(x,x)=2/x 得到 f(1)=1、f'(1)=2",
             "求解常微分方程并得到 f(u)=1/2(ln u)^2+2ln u+1",
         ],
-        mark_values=[2.5, 2.5, 2, 3],
+        scoring_points=[
+            _point(18, 1, "令 u=x/y，逐项写出并正确计算所需一、二阶偏导", 2.0),
+            _point(18, 2, "代回原式并化简为 u²f''(u)+uf'(u)=1", 2.0, depends_on=["q18.1"], critical=True, carry_forward=True),
+            _point(18, 3, "从两项边界条件分别推出 f(1)=1、f'(1)=2", 2.0),
+            _point(18, 4, "解欧拉型方程并正确确定两个积分常数", 2.0, depends_on=["q18.2", "q18.3"], carry_forward=True),
+            _point(18, 5, "给出定义域 u>0 上完整函数 1/2(ln u)²+2lnu+1", 2.0, depends_on=["q18.4"], critical=True, carry_forward=True),
+        ],
+        answer_anchor_fields={
+            "final_answer": {
+                "kind": "expression",
+                "expected": "log(u)**2/2+2*log(u)+1",
+                "variables": ["u"],
+                "weight": 1,
+            }
+        },
     ),
     _question(
         19,
@@ -377,7 +445,12 @@ x^2 g_xx + xy g_xy + y^2 g_yy = 1，
             "必要性方向在相邻区间应用拉格朗日中值定理",
             "由中值点次序与 f' 严格递增推出两段割线斜率严格不等式",
         ],
-        mark_values=[2.5, 2.5, 2.5, 2.5],
+        scoring_points=[
+            _point(19, 1, "充分性：为任意 s<t 选择逼近端点的三点并写出适用的割线斜率不等式", 2.0),
+            _point(19, 2, "充分性：分别取单侧极限得到 f'(s)<f'(t)，极限方向与严格性论证成立", 3.0, depends_on=["q19.1"], critical=True),
+            _point(19, 3, "必要性：在 (x1,x2)、(x2,x3) 分别应用拉格朗日中值定理并得到两个中值点", 2.0),
+            _point(19, 4, "必要性：由 ξ1<ξ2 及 f' 严格递增推出两段割线斜率的严格不等式", 3.0, depends_on=["q19.3"], critical=True),
+        ],
     ),
     _question(
         20,
@@ -396,7 +469,22 @@ I=∬_(Σ1) x dy dz + (y+1) dz dx + (z+2) dx dy。
             "对闭合曲面正确应用高斯公式并计算体积分",
             "正确计算补面通量并作差得到 -2π/√3",
         ],
-        mark_values=[2, 2.5, 3, 2.5],
+        scoring_points=[
+            _point(20, 1, "由旋转轴与母线几何关系推出圆锥面 xy+yz+zx=0，而非仅猜测方程", 2.0),
+            _point(20, 2, "确定截面圆、封闭体和侧面/补面的外法向关系", 2.0, depends_on=["q20.1"]),
+            _point(20, 3, "对 F=(x,y+1,z+2) 正确计算散度，并在正确区域求闭曲面总通量", 2.0, depends_on=["q20.2"], carry_forward=True),
+            _point(20, 4, "独立计算 x+y+z=1 圆盘补面的通量，面积、单位法向和符号正确", 2.0, depends_on=["q20.2"], carry_forward=True),
+            _point(20, 5, "按外侧方向作差并得到侧面通量 -2π/√3", 2.0, depends_on=["q20.3", "q20.4"], critical=True, carry_forward=True),
+        ],
+        answer_anchor_fields={
+            "final_answer": {
+                "kind": "expression",
+                "expected": "-2*pi/sqrt(3)",
+                "accepted": ["-2*sqrt(3)*pi/3"],
+                "variables": [],
+                "weight": 1,
+            }
+        },
         rubric_version=Q20_RUBRIC_VERSION,
         rubric_source=Q20_RUBRIC_SOURCE,
         source_tier="expert_reconstructed",
@@ -420,7 +508,31 @@ I=∬_(Σ1) x dy dz + (y+1) dz dx + (z+2) dx dy。
             "在 a=3 时正确刻画 ker((A-I)^2) 并排除 α=0",
             "保证 β 非零，即 a1+a2≠2a3，并给出 β 的完整参数表达",
         ],
-        mark_values=[4, 4, 3, 4],
+        scoring_points=[
+            _point(21, 1, "实际计算特征多项式，并用 λ=1 为重根的条件得到 a=3", 4.0, critical=True),
+            _point(21, 2, "由两式消元得到 (A-I)²α=0 且 β=(A-I)α", 3.0),
+            _point(21, 3, "在 a=3 时计算 ker((A-I)²)，证明 α 可取任意非零三维列向量", 3.0, depends_on=["q21.1", "q21.2"]),
+            _point(21, 4, "明确 α=(a1,a2,a3)^T 非零这一参数限制", 2.0, depends_on=["q21.3"]),
+            _point(21, 5, "给出 β=(2a3-a1-a2)(1,1,1)^T 并由 β≠0 得 a1+a2≠2a3", 3.0, depends_on=["q21.3"], critical=True),
+        ],
+        answer_anchor_fields={
+            "a": {"kind": "expression", "expected": "3", "variables": [], "weight": 4},
+            "beta_coefficient": {
+                "kind": "expression",
+                "expected": "2*a3-a1-a2",
+                "accepted": ["-(a1+a2-2*a3)"],
+                "variables": ["a1", "a2", "a3"],
+                "weight": 3,
+            },
+            "nonzero_constraint": {
+                "kind": "expression",
+                "expected": "a1+a2-2*a3",
+                "variables": ["a1", "a2", "a3"],
+                "equivalent_up_to_nonzero_scalar": True,
+                "weight": 3,
+            },
+        },
+        answer_anchor_failure_cap=70,
     ),
     _question(
         22,
@@ -443,7 +555,18 @@ Y=0（X≤100），Y=X-100（X>100）。
             "识别泊松稀疏化或等价地对条件二项分布求和",
             "得到 M~Poisson(2)，即 P(M=m)=2^m e^(-2)/m!，m=0,1,2,...",
         ],
-        mark_values=[3.5, 4, 3.5, 4],
+        scoring_points=[
+            _point(22, 1, "写出并正确计算尾概率积分 P(X>100)=1/4", 3.5),
+            _point(22, 2, "按 E[(X-100)1_{X>100}] 建立收敛积分并算得 50", 4.0),
+            _point(22, 3, "由条件二项分布与 Poisson(8) 推导稀疏化结果，或完成等价求和", 3.5),
+            _point(22, 4, "写出完整分布 P(M=m)=e^-2·2^m/m!（m=0,1,…），即 Poisson(2)", 4.0, depends_on=["q22.3"], critical=True),
+        ],
+        answer_anchor_fields={
+            "probability": {"kind": "expression", "expected": "1/4", "variables": [], "weight": 3.5},
+            "expected_value": {"kind": "expression", "expected": "50", "variables": [], "weight": 4},
+            "poisson_lambda": {"kind": "expression", "expected": "2", "variables": [], "weight": 4},
+        },
+        answer_anchor_failure_cap=70,
     ),
 ]
 

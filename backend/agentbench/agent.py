@@ -249,6 +249,18 @@ class AgentHarness:
                 )
             usage.add(decision.usage)
             if self.cancellation_check():
+                # A pause may arrive while the provider request is in flight. If the
+                # same response already contains the candidate's final submission,
+                # return it so the suite can persist it and resume at validation
+                # without charging the candidate model for the same task again.
+                if decision.kind == "final":
+                    return AgentResult(
+                        True,
+                        decision.content,
+                        step,
+                        usage,
+                        int((time.perf_counter() - started) * 1000),
+                    )
                 return AgentResult(
                     False,
                     "",

@@ -24,8 +24,12 @@ def test_ncre_office_catalog_is_frozen_for_v3() -> None:
     ).encode("utf-8")
 
     assert len(office_cases) == 12
+    # Deliberate private-evaluator hotfix: PowerPoint title/body discovery now
+    # accepts custom text-box layouts and custom shows are parsed by XML
+    # semantics (p:/p14: plus arbitrary Relationship attribute order).  The
+    # candidate-visible NCRE contract remains unchanged.
     assert hashlib.sha256(canonical).hexdigest() == (
-        "494efc69335bb6659ad00f297656a33a29488e9dc7cf631e7ff25e117070a412"
+        "3045a25e52f719c017c00de6db3833f50b75768b79ccccbc8e4425be195c61b3"
     )
 
 
@@ -476,6 +480,16 @@ def test_symbolic_json_accepts_common_final_equation_notation_but_rejects_wrong_
             "log(u)**2/2 + 2*log(u) + 1",
             100.0,
         ),
+        (
+            r"f(u)=1+2\ln u+\frac12(\ln u)^2\quad(u>0)",
+            "log(u)**2/2 + 2*log(u) + 1",
+            100.0,
+        ),
+        (
+            "-\u00032π/√3",
+            "-2*pi/sqrt(3)",
+            100.0,
+        ),
         ("I = -2π/√3", "sqrt(2)*pi/4 - 1", 0.0),
     ]
 
@@ -509,6 +523,100 @@ def test_symbolic_json_accepts_common_final_equation_notation_but_rejects_wrong_
             tokens_output=10,
         )
         assert scored.components[0].score == expected_score
+
+
+def test_symbolic_json_accepts_exam_parameter_renaming_and_constraint_prose(
+    tmp_path,
+) -> None:
+    engine = ScoringEngine(DockerExecutor(executable="missing-docker"))
+    workspace = Workspace(tmp_path / "workspace-parameter-alias")
+    definition = {
+        "limits": {"max_steps": 10, "time_target_seconds": 600},
+        "validators": [
+            {
+                "type": "symbolic_json",
+                "weight": 100,
+                "config": {
+                    "fields": {
+                        "a": {
+                            "kind": "expression",
+                            "expected": "3",
+                            "variables": [],
+                            "weight": 4,
+                        },
+                        "beta_coefficient": {
+                            "kind": "expression",
+                            "expected": "2*a3-a1-a2",
+                            "variables": ["a1", "a2", "a3"],
+                            "weight": 3,
+                        },
+                        "nonzero_constraint": {
+                            "kind": "expression",
+                            "expected": "a1+a2-2*a3",
+                            "variables": ["a1", "a2", "a3"],
+                            "equivalent_up_to_nonzero_scalar": True,
+                            "weight": 3,
+                        },
+                    }
+                },
+            }
+        ],
+    }
+    answer = json.dumps(
+        {
+            "a": "3",
+            "beta_coefficient": "-x-y+2z，其中 α=(x,y,z)^T",
+            "nonzero_constraint": "x,y,z∈R，且 -x-y+2z≠0",
+        },
+        ensure_ascii=False,
+    )
+
+    scored = engine.score(
+        definition=definition,
+        final_answer=answer,
+        workspace=workspace,
+        steps=1,
+        duration_ms=1000,
+        tokens_input=10,
+        tokens_output=10,
+    )
+
+    assert scored.components[0].score == 100.0
+
+
+def test_symbolic_json_parameter_renaming_still_rejects_wrong_coefficients(tmp_path) -> None:
+    engine = ScoringEngine(DockerExecutor(executable="missing-docker"))
+    workspace = Workspace(tmp_path / "workspace-wrong-parameter-alias")
+    definition = {
+        "limits": {"max_steps": 10, "time_target_seconds": 600},
+        "validators": [
+            {
+                "type": "symbolic_json",
+                "weight": 100,
+                "config": {
+                    "fields": {
+                        "beta_coefficient": {
+                            "kind": "expression",
+                            "expected": "2*a3-a1-a2",
+                            "variables": ["a1", "a2", "a3"],
+                        }
+                    }
+                },
+            }
+        ],
+    }
+
+    scored = engine.score(
+        definition=definition,
+        final_answer='{"beta_coefficient":"-x-y+3z"}',
+        workspace=workspace,
+        steps=1,
+        duration_ms=1000,
+        tokens_input=10,
+        tokens_output=10,
+    )
+
+    assert scored.components[0].score == 0.0
 
 
 def test_all_v3_math_reference_answers_satisfy_symbolic_validators(tmp_path) -> None:

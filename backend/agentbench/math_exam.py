@@ -168,6 +168,9 @@ def _structured_solution_rubric(question: dict[str, Any], year: int) -> dict[str
         major_defect_deduction=float(question.get("major_defect_deduction", 1.0)),
         full_credit_confidence=float(question.get("full_credit_confidence", 0.90)),
         required_judges=int(question.get("required_judges", 1)),
+        critical_failure_score_cap=float(
+            question.get("critical_failure_score_cap", 60.0)
+        ),
     )
     # These are private judge context fields.  public_definition() removes them
     # before a case is exposed to candidate Agents.
@@ -535,16 +538,41 @@ def build_published_math_cases(manifest: dict[str, Any]) -> dict[str, list[dict[
                     # anonymous judge returns only point awards; the backend derives
                     # the 0-100 question quality from max_points.  There is no hidden
                     # symbolic-vs-AI 40/60 split on this path.
-                    validators = [
+                    anchor_fields = question.get("answer_anchor_fields") or {}
+                    validators = []
+                    if anchor_fields:
+                        validators.append(
+                            {
+                                "type": "symbolic_json",
+                                "weight": 0,
+                                "config": {
+                                    "fields": anchor_fields,
+                                    "score_cap_on_failure": float(
+                                        question.get("answer_anchor_failure_cap", 60.0)
+                                    ),
+                                    "score_cap_threshold": 100,
+                                    "score_cap_key": "math_answer_anchor_failed",
+                                    "score_cap_reason": (
+                                        "确定性最终答案字段缺失或与答案锚点不等价；保留方法分但限制总分"
+                                    ),
+                                },
+                            }
+                        )
+                    validators.append(
                         {
                             "type": "ai_rubric",
                             "weight": 100,
                             "config": structured_rubric,
                         }
-                    ]
-                    response_rule = (
-                        '{"final_answer":"最终结论","solution":"完整、可复核的推导"}'
                     )
+                    response_shape = {
+                        str(field): "化简后的答案"
+                        for field in anchor_fields
+                    }
+                    if not response_shape:
+                        response_shape["final_answer"] = "最终结论"
+                    response_shape["solution"] = "完整、可复核的推导"
+                    response_rule = json.dumps(response_shape, ensure_ascii=False)
                 else:
                     # Legacy imported definitions keep their exact old weighting so
                     # historical runs remain reproducible.  New papers should supply
@@ -623,6 +651,7 @@ def build_published_math_cases(manifest: dict[str, Any]) -> dict[str, list[dict[
                             "difficulty": 5,
                             "estimated_minutes": 12 if kind != "solution" else 30,
                             "capability": "高等数学、线性代数与概率统计综合推理",
+                            "capability_dimension": "mathematical_reasoning",
                             "exam": MATH_EXAM_ID,
                             "year": year,
                             "question_no": number,

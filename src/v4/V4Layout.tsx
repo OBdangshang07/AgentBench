@@ -42,31 +42,25 @@ interface NavigationItem {
   aliases?: string[];
 }
 
-const operationNavigation: NavigationItem[] = [
+const workspaceNavigation: NavigationItem[] = [
   { to: "/", label: "首页", icon: CircleGauge, end: true },
+  { to: "/studio", label: "Agent", icon: Sparkles },
   { to: "/projects", label: "项目", icon: FolderKanban },
-  { to: "/studio", label: "会话", icon: Sparkles },
-  { to: "/tasks", label: "任务", icon: ListTodo, aliases: ["/flows"] },
-  { to: "/benchmarks", label: "能力评测", icon: FlaskConical, aliases: ["/library", "/experiments", "/leaderboard", "/profiles", "/runs"] },
-  { to: "/settings", label: "资源与设置", icon: Settings, aliases: ["/models", "/tools"] },
+  { to: "/tasks", label: "任务", icon: ListTodo },
+  { to: "/flows", label: "工作流", icon: GitFork },
 ];
 
-const workspaceSubNavigation: NavigationItem[] = [
-  { to: "/tasks", label: "任务中心", icon: ListTodo },
-  { to: "/flows", label: "自动化 Flow", icon: GitFork },
-];
-
-const benchmarkSubNavigation: NavigationItem[] = [
+const benchmarkNavigation: NavigationItem[] = [
   { to: "/benchmarks", label: "评测首页", icon: FlaskConical },
   { to: "/library", label: "测试与套件", icon: Boxes },
-  { to: "/experiments", label: "运行记录", icon: Activity },
-  { to: "/leaderboard", label: "排行与报告", icon: CircleGauge },
+  { to: "/experiments", label: "运行记录", icon: Activity, aliases: ["/runs"] },
+  { to: "/leaderboard", label: "排行与报告", icon: CircleGauge, aliases: ["/profiles"] },
 ];
 
-const resourceSubNavigation: NavigationItem[] = [
+const resourceNavigation: NavigationItem[] = [
   { to: "/models", label: "Agent 与模型", icon: Bot },
   { to: "/tools", label: "工具与 MCP", icon: PlugZap },
-  { to: "/settings", label: "本地设置", icon: Settings },
+  { to: "/settings", label: "设置", icon: Settings },
 ];
 
 const quickActions = [
@@ -79,13 +73,13 @@ const quickActions = [
 const pageNames: Array<[RegExp, string]> = [
   [/^\/$/, "首页"],
   [/^\/projects/, "项目"],
-  [/^\/studio/, "会话"],
+  [/^\/studio/, "Agent"],
   [/^\/flows/, "自动化 Flow"],
   [/^\/tasks/, "任务"],
   [/^\/tools/, "工具与 MCP"],
   [/^\/models/, "模型与 Agent"],
   [/^\/benchmarks|^\/library|^\/experiments|^\/leaderboard|^\/profiles|^\/runs/, "能力评测"],
-  [/^\/settings|^\/models|^\/tools/, "资源与设置"],
+  [/^\/settings/, "设置"],
 ];
 
 function Brand() {
@@ -93,7 +87,7 @@ function Brand() {
     <Link className="v4-brand" to="/" aria-label="AgentBench 控制中心">
       <span className="v4-brand-mark"><img src={agentbenchMark} alt="" /></span>
       <span><strong>AgentBench</strong><small>本地 Agent 工作台</small></span>
-      <em>5.3</em>
+      <em>5.4</em>
     </Link>
   );
 }
@@ -105,7 +99,7 @@ function NavigationGroup({ label, items, pathname }: { label: string; items: Nav
       <nav>
         {items.map((item) => {
           const { to, label: itemLabel, icon: Icon, end } = item;
-          return <NavLink key={to} to={to} end={end} className={({ isActive }) => isActive || item.aliases?.some((path) => pathname.startsWith(path)) ? "active" : ""}>
+          return <NavLink key={to} to={to} end={end} title={itemLabel} className={({ isActive }) => isActive || item.aliases?.some((path) => pathname.startsWith(path)) ? "active" : ""}>
             <Icon size={19} /><span>{itemLabel}</span>
           </NavLink>;
         })}
@@ -122,7 +116,7 @@ export default function V4Layout() {
   const { data: projects } = useApi<Project[]>("/projects", 10_000);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.localStorage.getItem("agentbench.workspace.sidebar.v1") === "collapsed");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.localStorage.getItem("agentbench.workspace.sidebar.v2") === "collapsed");
   const [onboardingOpen, setOnboardingOpen] = useState(() => window.localStorage.getItem("agentbench.v5.onboarding.done") !== "1");
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
@@ -146,14 +140,6 @@ export default function V4Layout() {
   const showOnboarding = onboardingOpen && Boolean(status && dashboard);
   const selectedProject = projects?.find((project) => project.id === ux.selectedProjectId) ?? projects?.[0];
   const setupStep = installed === 0 ? 0 : (dashboard?.project_count ?? 0) === 0 ? 1 : 2;
-  const contextualNavigation = location.pathname.startsWith("/tasks") || location.pathname.startsWith("/flows")
-    ? workspaceSubNavigation
-    : /^\/(benchmarks|library|experiments|leaderboard|profiles|runs)/.test(location.pathname)
-      ? benchmarkSubNavigation
-      : /^\/(models|tools|settings)/.test(location.pathname)
-        ? resourceSubNavigation
-        : [];
-
   function dismissOnboarding() {
     window.localStorage.setItem("agentbench.v5.onboarding.done", "1");
     setOnboardingOpen(false);
@@ -176,6 +162,7 @@ export default function V4Layout() {
 
   useEffect(() => {
     window.localStorage.setItem("agentbench.workspace.sidebar.v1", sidebarCollapsed ? "collapsed" : "expanded");
+    window.localStorage.setItem("agentbench.workspace.sidebar.v2", sidebarCollapsed ? "collapsed" : "expanded");
   }, [sidebarCollapsed]);
 
   useEffect(() => {
@@ -197,7 +184,7 @@ export default function V4Layout() {
 
   const commandItems = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return [...operationNavigation, ...workspaceSubNavigation, ...benchmarkSubNavigation, ...resourceSubNavigation].filter((item, index, items) => (
+    return [...workspaceNavigation, ...benchmarkNavigation, ...resourceNavigation].filter((item, index, items) => (
       items.findIndex((candidate) => candidate.to === item.to) === index &&
       (!needle || item.label.toLowerCase().includes(needle))
     ));
@@ -223,12 +210,15 @@ export default function V4Layout() {
   };
 
   return (
-    <div className={`v4-shell density-${ux.density} ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
-      <aside className="v4-sidebar">
+    <div className={`v4-shell ab-app-shell ab-language-agent-desktop density-${ux.density} ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${location.pathname.startsWith("/studio") ? "studio-route" : ""}`}>
+      <aside className="v4-sidebar ab-app-rail ab-agent-sidebar">
         <Brand />
+        <Link className="ab-new-agent-task" to="/studio?new=1" title="新建 Agent 任务" aria-label="新建 Agent 任务"><Sparkles size={17} /><span>新建 Agent 任务</span></Link>
         <button className="v5-shell-collapse" type="button" aria-label={sidebarCollapsed ? "展开主导航" : "收起主导航"} title={sidebarCollapsed ? "展开主导航" : "收起主导航"} onClick={() => setSidebarCollapsed((value) => !value)}>{sidebarCollapsed ? <ChevronsRight size={16} /> : <ChevronsLeft size={16} />}<span>{sidebarCollapsed ? "展开" : "收起导航"}</span></button>
         <div className="v4-nav-scroll">
-          <NavigationGroup label="工作区" items={operationNavigation} pathname={location.pathname} />
+          <NavigationGroup label="工作区" items={workspaceNavigation} pathname={location.pathname} />
+          <NavigationGroup label="能力评测" items={benchmarkNavigation} pathname={location.pathname} />
+          <NavigationGroup label="资源与设置" items={resourceNavigation} pathname={location.pathname} />
         </div>
         <section className={`v4-runtime-card ${runtime.tone}`}>
           <header><strong>本地运行环境</strong><span><i />{runtime.label}</span></header>
@@ -239,7 +229,7 @@ export default function V4Layout() {
         </section>
       </aside>
 
-      <header className="v4-topbar">
+      <header className="v4-topbar ab-app-header ab-agent-toolbar">
         <div className="v4-breadcrumb"><span>工作台</span><ChevronRight size={13} /><strong>{title}</strong>{projects?.length ? <label className="v5-project-switcher" title={selectedProject?.root_path}><FolderKanban size={14} /><select aria-label="当前工作项目" value={selectedProject?.id ?? ""} onChange={(event) => ux.setSelectedProjectId(event.target.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label> : null}</div>
         <div className="v4-top-actions">
           <button className="v4-command-trigger" type="button" onClick={() => setPaletteOpen(true)}><Search size={15} /><span>搜索或新建</span><kbd>Ctrl K</kbd></button>
@@ -251,11 +241,7 @@ export default function V4Layout() {
         </div>
       </header>
 
-      {!!contextualNavigation.length && <nav className="v5-context-nav" aria-label={`${title}子导航`}>
-        {contextualNavigation.map(({ to, label, icon: Icon }) => <NavLink key={to} to={to} end={to === "/benchmarks" || to === "/tasks" || to === "/settings"}><Icon size={14} /><span>{label}</span></NavLink>)}
-      </nav>}
-
-      <main className="v4-viewport"><Outlet /></main>
+      <main className="v4-viewport ab-app-main"><Outlet /></main>
 
       {paletteOpen && (
         <div className="v4-palette-backdrop" onMouseDown={() => setPaletteOpen(false)}>
@@ -287,7 +273,7 @@ export default function V4Layout() {
                 {searchError && <div className="v5-palette-state error">搜索失败：{searchError}</div>}
               </div>
             )}
-            <footer><Command size={13} /> 数据仅保存在本机 · Desktop {status?.version ?? "5.3.0"}</footer>
+            <footer><Command size={13} /> 数据仅保存在本机 · Desktop {status?.version ?? "5.4.1"}</footer>
           </section>
         </div>
       )}

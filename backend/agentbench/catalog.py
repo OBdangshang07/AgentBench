@@ -21,6 +21,7 @@ from .ncre_assets.exam_data import (
     PPT_SLIDE_TITLES,
     SOURCE_SUMMARY,
 )
+from .six_dimension_suite import SUITE_CASE_SLUGS, SUITE_VERSION, build_six_dimension_cases
 
 NAMESPACE = uuid.UUID("3a2259d0-189b-45fa-9caf-b729abdf2df1")
 
@@ -66,6 +67,8 @@ FRONTEND_UI_SUITE_ID = stable_id("suite", "xnmk-frontend-ui-2026-08-r1")
 FRONTEND_GAMES_SUITE_ID = stable_id("suite", "xnmk-frontend-games-2026-08-r1")
 FRONTEND_GRAPHICS_SUITE_ID = stable_id("suite", "xnmk-frontend-graphics-2026-08-r1")
 FRONTEND_EXPERT_SUITE_ID = stable_id("suite", "xnmk-frontend-expert-2026-08-r1")
+SIX_DIMENSION_SUITE_ID = stable_id("suite", "model-capability-six-dimension-v1")
+MATH_FRONTIER_SUITE_ID = stable_id("suite", "math-frontier-seeded-three-layer-v5")
 
 _NCRE_ASSET_DIR = Path(__file__).resolve().parent / "ncre_assets"
 
@@ -2858,8 +2861,8 @@ def build_ultra_catalog() -> list[dict[str, Any]]:
 
 
 BACKEND_ULTRA_BUNDLE_ID = "backend-ultra-extreme"
-BACKEND_ULTRA_BUNDLE_VERSION = "1.0.2"
-BACKEND_ULTRA_MANIFEST_SHA256 = "249fe79111a100f1b1d68b06078afe6a4cb0aaabdafc66c8ae5263c9442303a7"
+BACKEND_ULTRA_BUNDLE_VERSION = "1.3.0"
+BACKEND_ULTRA_MANIFEST_SHA256 = "1293591e737a73630917741b5deb5cd37036f5e01391580359b17e122ce092da"
 
 
 def build_backend_ultra_catalog() -> list[dict[str, Any]]:
@@ -3183,6 +3186,7 @@ def seed_builtin_data(database: Database) -> None:
     math_closed_cases = [item["definition"] for item in math_cases_by_lane["closed-book"]]
     math_tool_cases = [item["definition"] for item in math_cases_by_lane["tool-augmented"]]
     frontend_cases = build_frontend_cases()
+    six_dimension_cases = build_six_dimension_cases()
     cases = (
         base_cases
         + ultra_cases
@@ -3190,6 +3194,7 @@ def seed_builtin_data(database: Database) -> None:
         + math_closed_cases
         + math_tool_cases
         + frontend_cases
+        + six_dimension_cases
     )
     for definition in cases:
         case_id = stable_id("case", f"{definition['slug']}@{definition['version']}")
@@ -3234,11 +3239,12 @@ def seed_builtin_data(database: Database) -> None:
     math_closed_start = backend_ultra_start + len(backend_ultra_cases)
     math_tool_start = math_closed_start + len(math_closed_cases)
     frontend_start = math_tool_start + len(math_tool_cases)
+    six_dimension_start = frontend_start + len(frontend_cases)
     ultra_case_ids = case_ids[ultra_start:backend_ultra_start]
     backend_ultra_case_ids = case_ids[backend_ultra_start:math_closed_start]
     math_closed_ids = case_ids[math_closed_start:math_tool_start]
     math_tool_ids = case_ids[math_tool_start:frontend_start]
-    frontend_ids = case_ids[frontend_start:]
+    frontend_ids = case_ids[frontend_start:six_dimension_start]
     frontend_by_key = {
         definition["slug"].removeprefix("frontend.xnmk-"): case_id
         for definition, case_id in zip(frontend_cases, frontend_ids, strict=True)
@@ -3269,6 +3275,10 @@ def seed_builtin_data(database: Database) -> None:
     slug_to_case_id = {
         definition["slug"]: case_id for definition, case_id in zip(cases, case_ids, strict=True)
     }
+    six_dimension_members = [slug_to_case_id[slug] for slug in SUITE_CASE_SLUGS]
+    math_frontier_members = [
+        slug_to_case_id[f"sixdim.math.frontier.q{number}"] for number in range(17, 23)
+    ]
 
     def _ncre_paper_members(paper_no: str) -> list[str]:
         return [
@@ -3351,7 +3361,7 @@ def seed_builtin_data(database: Database) -> None:
             SMOKE_SUITE_ID,
             "AgentBench V1 快速体验",
             "无需 Docker 的 12 个快速测试",
-            "1.1.0",
+            "1.1.1",
             base_case_ids[:4] + base_case_ids[25:29] + base_case_ids[50:54],
         ),
         (
@@ -3392,9 +3402,23 @@ def seed_builtin_data(database: Database) -> None:
         (
             BACKEND_ULTRA_SUITE_ID,
             "后端 Ultra 极限测试",
-            "两道真实后端系统极限题：强一致金融账本与分布式任务队列；固定 PostgreSQL 16、Redis 7、私有强杀验证和严重错误硬门槛。",
-            "1.0.0",
+            "两道真实后端系统极限题：强一致金融账本与分布式任务队列；加入 PostgreSQL 强制重启、并发崩溃恢复、关键指标封顶和 5% 软时间分。",
+            "1.3.0",
             backend_ultra_case_ids,
+        ),
+        (
+            SIX_DIMENSION_SUITE_ID,
+            "大模型六维极限测试套件",
+            "六维 Frontier v4.1：前端三题保持不变；数学升级为隐藏种子三层压力题和 40% 确定性锚点，其余维度继续采用隐藏实例、关键义务封顶、三裁判或前沿掌握度曲线。",
+            SUITE_VERSION,
+            six_dimension_members,
+        ),
+        (
+            MATH_FRONTIER_SUITE_ID,
+            "数学推理 Frontier v5 · 三层压力专项",
+            "六道闭卷三层压力题：原题、证明推广与隐藏变参极限层；40% 确定性锚点、60% 三裁判证明评分。",
+            SUITE_VERSION,
+            math_frontier_members,
         ),
         (
             REASONING_SUITE_ID,

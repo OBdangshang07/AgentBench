@@ -153,7 +153,7 @@ function installApiMock(
   });
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = String(input);
-    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.3.0" });
+    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.4.1" });
     if (url.endsWith("/sessions")) return json([currentSession]);
     if (url.endsWith("/sessions/session-1") && init?.method === "PATCH") return json({ ...currentDetail, ...JSON.parse(String(init.body)) });
     if (url.includes("/sessions/session-1?message_limit=")) return json(currentDetail);
@@ -376,17 +376,18 @@ describe("Agent Studio visual workspace controls", () => {
     installApiMock(processDetail, session);
     const { container } = renderStudio();
 
-    expect(await screen.findByText("Agent 执行过程")).toBeInTheDocument();
-    const processList = container.querySelector(".v4-process-list");
+    const timeline = await screen.findByRole("button", { name: /执行轨迹/ });
+    fireEvent.click(timeline);
+    const processList = container.querySelector(".ab-execution-list");
     expect(processList).not.toBeNull();
     expect(processList?.querySelectorAll("article")).toHaveLength(3);
-    const operations = container.querySelector(".v4-process-operations");
-    expect(operations).not.toHaveAttribute("open");
-    expect(operations).toHaveTextContent("1 个工具");
+    expect(screen.getByText("3 步")).toBeInTheDocument();
+    expect(screen.getByText("1 次操作")).toBeInTheDocument();
+    expect(screen.getByText(/不包含模型私有思维链/)).toBeInTheDocument();
     expect(processList).toHaveTextContent("正在读取 package.json 以确认版本。");
-    expect(processList).toHaveTextContent("工具完成 · read_file");
+    expect(processList).toHaveTextContent("工具已完成 · read_file");
     expect(processList).not.toHaveTextContent("Agent 产生新的可验证进度");
-    expect(container.querySelector(".v4-inline-activity > footer")).toHaveTextContent("5 条");
+    expect(container.querySelector(".ab-execution > footer")).toBeNull();
   });
 
   it("stops following new events as soon as the user scrolls upward", async () => {
@@ -398,7 +399,7 @@ describe("Agent Studio visual workspace controls", () => {
     }, session);
     const { container } = renderStudio();
 
-    expect(await screen.findByText("Agent 执行过程")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /执行轨迹/ })).toBeInTheDocument();
     const scroller = container.querySelector<HTMLElement>(".v4-conversation-scroll");
     expect(scroller).not.toBeNull();
     Object.defineProperties(scroller!, {
@@ -426,6 +427,7 @@ describe("Agent Studio visual workspace controls", () => {
       }));
     });
 
+    fireEvent.click(screen.getByRole("button", { name: /执行轨迹/ }));
     expect(await screen.findByText("新的公开进度")).toBeInTheDocument();
     expect(scroller!.scrollTop).toBe(599);
     fireEvent.click(screen.getByRole("button", { name: "返回最新内容" }));

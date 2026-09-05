@@ -1,7 +1,7 @@
 import asyncio
 import json
 import urllib.parse
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -56,7 +56,7 @@ from .schemas import (
     TerminalResize,
     TestCaseImport,
 )
-from .service import EvaluationService
+from .service import FRONTEND_IMPORT_MAX_UPLOAD_BYTES, EvaluationService
 
 _MATERIAL_MEDIA_TYPES = {
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -820,6 +820,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def experiment(experiment_id: str, svc: Service) -> dict[str, Any]:
         return svc.get_experiment(experiment_id)
 
+    @app.get("/api/v1/experiments/{experiment_id}/capability-report")
+    def capability_report(experiment_id: str, svc: Service) -> dict[str, Any]:
+        return svc.capability_report(experiment_id)
+
+    @app.get("/api/v1/experiments/{experiment_id}/capability-panel.svg")
+    def capability_panel(
+        experiment_id: str,
+        svc: Service,
+        profile_id: str | None = Query(default=None, max_length=200),
+        download: bool = Query(default=False),
+    ) -> Response:
+        disposition = "attachment" if download else "inline"
+        return Response(
+            content=svc.capability_panel_svg(experiment_id, profile_id=profile_id),
+            media_type="image/svg+xml",
+            headers={
+                "Content-Disposition": (
+                    f'{disposition}; filename="capability-panel-{experiment_id}.svg"'
+                )
+            },
+        )
+
     @app.post("/api/v1/experiments/{experiment_id}/start")
     def start_experiment(experiment_id: str, svc: Service) -> dict[str, Any]:
         return svc.start_experiment(experiment_id)
@@ -892,14 +914,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return svc.retry_run(run_id)
 
     @app.post("/api/v1/runs/{run_id}/rejudge")
-    def rejudge_run(run_id: str, svc: Service) -> dict[str, Any]:
+    def rejudge_run(
+        run_id: str,
+        svc: Service,
+        reuse_judge: bool = Query(default=False),
+        use_current_evaluator: bool = Query(default=False),
+        waive_retry_penalty: bool = Query(default=False),
+    ) -> dict[str, Any]:
         row = svc.database.fetch_one("SELECT id FROM runs WHERE id=?", (run_id,))
         if not row:
             raise HTTPException(status_code=404, detail="run_not_found")
         try:
-            return svc.rejudge_run(run_id)
+            return svc.rejudge_run(
+                run_id,
+                reuse_judge=reuse_judge,
+                use_current_evaluator=use_current_evaluator,
+                waive_retry_penalty=waive_retry_penalty,
+            )
         except ValueError as exc:
-            if str(exc) in {"run_not_rejudgeable", "run_has_no_final_answer"}:
+            if str(exc) in {
+                "run_not_rejudgeable",
+                "run_has_no_final_answer",
+                "current_evaluator_revision_missing",
+                "current_evaluator_public_contract_changed",
+                "retry_penalty_waiver_requires_current_evaluator",
+            }:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
             raise
 
@@ -938,6 +977,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/v1/runs/{run_id}/frontend-preview")
     def frontend_preview_status(run_id: str, svc: Service) -> dict[str, Any]:
         return svc.frontend_preview_status(run_id)
+
+    @app.post("/api/v1/runs/{run_id}/frontend-import")
+    async def import_frontend_artifact(
+        run_id: str,
+        request: Request,
+        svc: Service,
+        filename: str = Query(min_length=1, max_length=255),
+    ) -> dict[str, Any]:
+        content_length = request.headers.get("content-length")
+        if content_length:
+            with suppress(ValueError):
+                if int(content_length) > FRONTEND_IMPORT_MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="frontend_import_upload_too_large")
+        return svc.import_frontend_artifact(run_id, filename, await request.body())
 
     @app.post("/api/v1/runs/{run_id}/frontend-preview")
     def start_frontend_preview(

@@ -223,6 +223,17 @@ def test_zcode_permissions_attachments_and_capabilities_are_honest() -> None:
     assert capability["visible_browser"] is False
 
 
+def test_zcode_windows_iocp_crash_is_classified_as_runtime_failure() -> None:
+    assert EvaluationService._failure_class(
+        "cli_failed",
+        "PostQueuedCompletionStatus: (6) The handle is invalid.",
+        phase="execution",
+    ) == "runtime_environment_failure"
+    assert EvaluationService._failure_class(
+        "cli_failed", "candidate reported a syntax error", phase="execution"
+    ) == "agent_solution_failure"
+
+
 @pytest.mark.parametrize(
     ("declared_tools", "expected_mode"),
     [(["filesystem", "shell"], "yolo"), (["filesystem"], "edit")],
@@ -285,6 +296,14 @@ def test_zcode_native_run_uses_task_scoped_permissions_and_cleans_ephemeral_home
         assert result.ok is True
         assert result.final_answer == "OK"
         assert captured["extra_env"]["ELECTRON_RUN_AS_NODE"] == "1"
+        assert captured["extra_env"]["CI"] == "1"
+        assert captured["extra_env"]["GIT_TERMINAL_PROMPT"] == "0"
+        assert captured["extra_env"]["GCM_INTERACTIVE"] == "Never"
+        assert captured["extra_env"]["PIP_NO_INPUT"] == "1"
+        assert captured["extra_env"]["PGCONNECT_TIMEOUT"] == "5"
+        assert captured["extra_env"]["PGPASSWORD"] == (
+            "__agentbench_no_interactive_password__"
+        )
         assert captured["args"][captured["args"].index("--mode") + 1] == expected_mode
         runtime_home = Path(captured["extra_env"]["USERPROFILE"])
         assert captured["placeholders"]["zcode_cli"] == "zcode.cjs"

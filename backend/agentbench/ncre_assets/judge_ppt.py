@@ -4,6 +4,7 @@ import contextlib
 import json
 import re
 import sys
+import xml.etree.ElementTree as ET
 import zipfile
 
 with contextlib.suppress(Exception):
@@ -60,21 +61,74 @@ def slide_title(slide):
     return ""
 
 
+def slide_has_title(slide, expected):
+    """标题占位符是最强证据，但题干未限定必须使用占位符。
+
+    许多合法的自定义版式会将页标题放在普通文本框中；此时仍应
+    按“各页标题映射”得分，而不应把未公开的 OOXML 实现细节
+    当成硬约束。
+    """
+    if slide_title(slide) == expected:
+        return True
+    return any(
+        shape.has_text_frame and shape.text_frame.text.strip() == expected
+        for shape in slide.shapes
+    )
+
+
 matched = sum(
     1 for index, expected in enumerate(TITLES)
-    if index < len(slides) and slide_title(slides[index]) == expected
+    if index < len(slides) and slide_has_title(slides[index], expected)
 )
 metrics["p2"] = round(100.0 * matched / len(TITLES), 2)
 
 # ------------------------------------------------ p3 层级内容抽查（第2页与第4页）
 def body_paragraphs(slide):
-    for shape in slide.placeholders:
-        if shape.placeholder_format.idx != 0 and shape.has_text_frame:
-            return [(p.text.strip(), p.level) for p in shape.text_frame.paragraphs if p.text.strip()]
+    paragraphs = []
     for shape in slide.shapes:
-        if shape.has_text_frame and shape is not slide.shapes.title:
-            return [(p.text.strip(), p.level) for p in shape.text_frame.paragraphs if p.text.strip()]
-    return []
+        if not shape.has_text_frame:
+            continue
+        paragraphs.extend(
+            (p.text.strip(), p.level)
+            for p in shape.text_frame.paragraphs
+            if p.text.strip()
+        )
+    return paragraphs
+
+
+def _shape_font_size(shape):
+    sizes = [
+        run.font.size.pt
+        for paragraph in shape.text_frame.paragraphs
+        for run in paragraph.runs
+        if run.font.size is not None
+    ]
+    return max(sizes, default=0.0)
+
+
+def has_visual_parent_child(slide, parent_text, child_text):
+    """允许自定义布局用独立文本框表达一、二级内容。
+
+    子内容需在父标题之下，且字号更小；这保留了层级要求，
+    同时不将“必须放在同一占位符并设为 level=1”变成隐藏条件。
+    """
+    parents = [
+        shape for shape in slide.shapes
+        if shape.has_text_frame and parent_text in shape.text_frame.text
+    ]
+    children = [
+        shape for shape in slide.shapes
+        if shape.has_text_frame and child_text in shape.text_frame.text
+    ]
+    for parent in parents:
+        for child in children:
+            if child.top < parent.top:
+                continue
+            parent_size = _shape_font_size(parent)
+            child_size = _shape_font_size(child)
+            if parent_size > 0 and child_size > 0 and child_size < parent_size:
+                return True
+    return False
 
 
 score = 0.0
@@ -83,8 +137,20 @@ if len(slides) >= 4:
     level0_page2 = {text for text, level in page2 if level == 0}
     if "刘雅汶" in level0_page2 and "主要代表作品" in level0_page2:
         score += 40.0
-    if any(level == 1 and "Contoso" in text for text, level in page2) \
-            and any(level == 1 and "Microsoft Office整合应用精要" in text for text, level in page2):
+    semantic_children = (
+        any(level == 1 and "Contoso" in text for text, level in page2)
+        and any(
+            level == 1 and "Microsoft Office整合应用精要" in text
+            for text, level in page2
+        )
+    )
+    visual_children = (
+        has_visual_parent_child(slides[1], "刘雅汶", "Contoso")
+        and has_visual_parent_child(
+            slides[1], "主要代表作品", "Microsoft Office整合应用精要"
+        )
+    )
+    if semantic_children or visual_children:
         score += 20.0
     page4 = body_paragraphs(slides[3])
     level0_page4 = {text for text, level in page4 if level == 0}
@@ -167,17 +233,26 @@ try:
     presentation_xml = archive.read("ppt/presentation.xml").decode("utf-8", errors="replace")
     rels_xml = archive.read("ppt/_rels/presentation.xml.rels").decode("utf-8", errors="replace")
     rel_to_slide = {}
-    for rel_id, target in re.findall(r'Id="([^"]+)"[^>]*Target="([^"]+)"', rels_xml):
+    rels_root = ET.fromstring(rels_xml)
+    for relationship in rels_root:
+        rel_id = relationship.attrib.get("Id", "")
+        target = relationship.attrib.get("Target", "")
         slide_match = re.search(r"slides/slide(\d+)\.xml", target)
         if slide_match:
             rel_to_slide[rel_id] = int(slide_match.group(1))
     shows = {}
-    for block in re.findall(r"<p14:custShow\b[^>]*>.*?</p14:custShow>", presentation_xml, re.DOTALL):
-        name = re.search(r'name="([^"]*)"', block)
-        if not name:
+    presentation_root = ET.fromstring(presentation_xml)
+    relationship_id = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+    for custom_show in presentation_root.iter():
+        if custom_show.tag.rsplit("}", 1)[-1] != "custShow":
             continue
-        refs = re.findall(r'r:id="([^"]+)"', block)
-        shows[name.group(1)] = sorted(rel_to_slide[r] for r in refs if r in rel_to_slide)
+        name = custom_show.attrib.get("name", "")
+        refs = [
+            node.attrib.get(relationship_id, "")
+            for node in custom_show.iter()
+            if node.tag.rsplit("}", 1)[-1] in {"sld", "sldId"}
+        ]
+        shows[name] = sorted(rel_to_slide[r] for r in refs if r in rel_to_slide)
     expected_shows = {"放映方案1": [1, 2, 4, 7], "放映方案2": [1, 2, 3, 5, 6]}
     hits = sum(1 for name, pages in expected_shows.items() if shows.get(name) == pages)
     metrics["p8"] = round(100.0 * hits / len(expected_shows), 2)

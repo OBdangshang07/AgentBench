@@ -71,14 +71,10 @@ export default function ProjectDetail() {
     completed: tasks?.filter((item) => item.status === "completed").length ?? 0,
   }), [sessions, tasks]);
 
-  async function startSession() {
+  function startSession() {
     if (!project) return;
-    try {
-      const session = await api<{ id: string }>("/sessions", { method: "POST", body: JSON.stringify({ project_id: project.id, title: `${project.name} Agent 会话` }) });
-      navigate(`/studio/${session.id}`);
-    } catch (value) {
-      ux.notify({ kind: "error", title: "无法创建会话", message: value instanceof Error ? value.message : "未知错误" });
-    }
+    ux.setSelectedProjectId(project.id);
+    navigate(`/studio?new=1&project=${encodeURIComponent(project.id)}`);
   }
 
   async function save(event: FormEvent) {
@@ -124,11 +120,11 @@ export default function ProjectDetail() {
   ];
 
   return (
-    <div className="v4-page v5-project-detail">
+    <div className="v4-page ab-agent-document v5-project-detail">
       <header className="v5-project-hero">
         <Link to="/projects" className="v5-back-link"><ArrowLeft size={15} />项目中心</Link>
-        <div className="v5-project-identity"><span className="v4-project-logo">{project.name.slice(0, 2).toUpperCase()}</span><div><small>AUTHORIZED WORKSPACE</small><h1>{project.name}</h1><p>{project.description || "本地 Agent 工作区"}</p><code>{project.root_path}</code></div></div>
-        <div className="v5-project-hero-actions"><button className="v4-button secondary" type="button" onClick={() => void openWorkspace(project.root_path, "项目目录")}><FolderOpen size={15} />打开目录</button><button className="v4-button primary" type="button" onClick={() => void startSession()}><MessageSquarePlus size={15} />新建会话</button></div>
+        <div className="v5-project-identity"><span className="v4-project-logo">{project.name.slice(0, 2).toUpperCase()}</span><div><small>已授权的本地工作区</small><h1>{project.name}</h1><p>{project.description || "本地 Agent 工作区"}</p><code>{project.root_path}</code></div></div>
+        <div className="v5-project-hero-actions"><button className="v4-button secondary" type="button" onClick={() => void openWorkspace(project.root_path, "项目目录")}><FolderOpen size={15} />打开目录</button><button className="v4-button primary" type="button" onClick={startSession}><MessageSquarePlus size={15} />新建会话</button></div>
         <div className="v5-project-badges"><span><ShieldCheck size={12} />{project.permission_profile}</span><span><GitBranch size={12} />{project.branch || "local workspace"}</span><span className={health?.ready ? "ready" : "warning"}><i />{health?.ready ? "环境就绪" : "需要检查"}</span></div>
       </header>
 
@@ -140,9 +136,9 @@ export default function ProjectDetail() {
         <section className="v4-panel v5-project-activity"><header className="v4-panel-head"><div><strong>最近会话</strong><small>项目内的 Agent 工作记录</small></div><button type="button" onClick={() => setTab("sessions")}>查看全部</button></header><div>{sessions?.slice(0, 5).map((session) => <button type="button" key={session.id} onClick={() => navigate(`/studio/${session.id}`)}><span className="v4-agent-avatar">{session.runner_name.slice(0, 2).toUpperCase()}</span><div><strong>{session.title}</strong><small>{session.runner_name} · {session.model_name}</small></div><em>{session.status}</em><time>{relative(session.updated_at)}</time></button>)}{!sessions?.length && <div className="v4-empty compact"><Bot size={21} /><strong>还没有项目会话</strong></div>}</div></section>
       </div>}
 
-      {tab === "sessions" && <section className="v4-panel v5-detail-list"><header className="v4-panel-head"><div><strong>项目会话</strong><small>打开、继续或检查每个 Agent 会话</small></div><button className="v4-button primary" type="button" onClick={() => void startSession()}><MessageSquarePlus size={14} />新建会话</button></header>{sessions?.map((session) => <button key={session.id} type="button" onClick={() => navigate(`/studio/${session.id}`)}><span className="v4-agent-avatar">{session.runner_name.slice(0, 2).toUpperCase()}</span><div><strong>{session.title}</strong><small>{session.runner_name} · {session.model_name} · {session.turn_count} 轮</small></div><em>{session.status}</em><time>{relative(session.updated_at)}</time><ExternalLink size={14} /></button>)}{!sessions?.length && <div className="v4-empty"><Bot size={24} /><strong>还没有会话</strong></div>}</section>}
+      {tab === "sessions" && <section className="v4-panel v5-detail-list"><header className="v4-panel-head"><div><strong>项目会话</strong><small>打开、继续或检查每个 Agent 会话</small></div><button className="v4-button primary" type="button" onClick={startSession}><MessageSquarePlus size={14} />新建会话</button></header>{sessions?.map((session) => <button key={session.id} type="button" onClick={() => navigate(`/studio/${session.id}`)}><span className="v4-agent-avatar">{session.runner_name.slice(0, 2).toUpperCase()}</span><div><strong>{session.title}</strong><small>{session.runner_name} · {session.model_name} · {session.turn_count} 轮</small></div><em>{session.status}</em><time>{relative(session.updated_at)}</time><ExternalLink size={14} /></button>)}{!sessions?.length && <div className="v4-empty"><Bot size={24} /><strong>还没有会话</strong></div>}</section>}
 
-      {tab === "tasks" && <section className="v4-panel v5-detail-list"><header className="v4-panel-head"><div><strong>项目任务</strong><small>任务状态与最近结果</small></div><Link className="v4-button secondary" to={`/tasks?project=${project.id}`}><ListTodo size={14} />进入任务中心</Link></header>{tasks?.map((task) => <button key={task.id} type="button" onClick={() => navigate(`/tasks?task=${task.id}`)}><span className={`v5-task-state ${task.status}`}><ListTodo size={14} /></span><div><strong>{task.title}</strong><small>{task.result_summary || task.description || "尚无结果摘要"}</small></div><em>{task.status}</em><time>{relative(task.updated_at)}</time><ExternalLink size={14} /></button>)}{!tasks?.length && <div className="v4-empty"><ListTodo size={24} /><strong>还没有任务</strong></div>}</section>}
+      {tab === "tasks" && <section className="v4-panel v5-detail-list"><header className="v4-panel-head"><div><strong>项目任务</strong><small>任务状态与最近结果</small></div><Link className="v4-button secondary" to={`/tasks?project=${project.id}`}><ListTodo size={14} />进入任务中心</Link></header>{tasks?.map((task) => <button key={task.id} type="button" onClick={() => navigate(`/tasks/${task.id}`, { state: { returnTo: `/projects/${project.id}` } })}><span className={`v5-task-state ${task.status}`}><ListTodo size={14} /></span><div><strong>{task.title}</strong><small>{task.result_summary || task.description || "尚无结果摘要"}</small></div><em>{task.status}</em><time>{relative(task.updated_at)}</time><ExternalLink size={14} /></button>)}{!tasks?.length && <div className="v4-empty"><ListTodo size={24} /><strong>还没有任务</strong></div>}</section>}
 
       {tab === "flows" && <section className="v4-panel v5-detail-list"><header className="v4-panel-head"><div><strong>项目 Flow</strong><small>多 Agent 自动化编排</small></div><Link className="v4-button secondary" to={`/flows?project=${project.id}`}><GitFork size={14} />进入 Flow</Link></header>{flows?.map((flow) => <button key={flow.id} type="button" onClick={() => navigate(`/flows?flow=${flow.id}`)}><span className="v5-task-state"><GitFork size={14} /></span><div><strong>{flow.name}</strong><small>{flow.description || `${flow.node_count} 个节点`}</small></div><em>{flow.status}</em><time>{relative(flow.updated_at)}</time><ExternalLink size={14} /></button>)}{!flows?.length && <div className="v4-empty"><GitFork size={24} /><strong>还没有 Flow</strong></div>}</section>}
 

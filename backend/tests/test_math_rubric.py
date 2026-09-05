@@ -301,3 +301,135 @@ def test_rubric_rejects_unknown_dependency_and_version_mismatch():
     answer["rubric_version"] = "old"
     with pytest.raises(ValueError, match="version_mismatch"):
         score_rubric(answer, config)
+
+
+def test_critical_scoring_point_failure_caps_an_otherwise_generous_award():
+    config = structured_rubric_config(
+        version="critical-v1",
+        source={"source_id": "critical", "source_tier": "expert_reconstructed"},
+        scoring_points=[
+            {"point_id": "method", "description": "方法", "max_points": 8},
+            {
+                "point_id": "conclusion",
+                "description": "最终结论",
+                "max_points": 2,
+                "critical": True,
+            },
+        ],
+        marking_mode="strict_exam",
+        critical_failure_score_cap=60,
+    )
+    answer = _answer(config, awards=[8, 0], confidence=0.95)
+
+    result = score_rubric(answer, config)
+
+    assert result.awarded_points == 8
+    assert result.evidence["percentage_before_cap"] == 80
+    assert result.percentage == 60
+    assert result.evidence["critical_failures"] == ["conclusion"]
+
+
+def test_mandatory_point_partial_credit_activates_question_cap():
+    config = structured_rubric_config(
+        version="mandatory-v3",
+        source={"source_id": "mandatory", "source_tier": "expert_reconstructed"},
+        scoring_points=[
+            {"point_id": "work", "description": "其余推导", "max_points": 8},
+            {
+                "point_id": "required-route",
+                "description": "题目明确要求的证明路线",
+                "max_points": 2,
+                "mandatory": True,
+            },
+        ],
+        marking_mode="strict_exam",
+        mandatory_failure_score_cap=90,
+    )
+    answer = _answer(config, awards=[8, 1.5], confidence=0.99)
+    answer["points"][1]["status"] = "partial"
+
+    result = score_rubric(answer, config)
+
+    assert result.awarded_points == 9.5
+    assert result.evidence["percentage_before_cap"] == 95
+    assert result.percentage == 90
+    assert result.evidence["mandatory_failures"] == ["required-route"]
+
+
+def test_point_minimum_defect_deduction_overrides_global_minimum():
+    config = structured_rubric_config(
+        version="point-deduction-v3",
+        source={"source_id": "point-deduction", "source_tier": "expert_reconstructed"},
+        scoring_points=[
+            {
+                "point_id": "proof",
+                "description": "关键证明",
+                "max_points": 4,
+                "minimum_defect_deduction": 2,
+            }
+        ],
+        marking_mode="strict_exam",
+        minor_defect_deduction=0.5,
+    )
+    answer = _answer(config, awards=[4], confidence=0.99)
+    answer["points"][0].update({"status": "partial", "defect_severity": "minor"})
+
+    result = score_rubric(answer, config)
+
+    assert result.awarded_points == 2
+    assert result.point_results[0]["minimum_defect_deduction"] == 2
+    assert "minor_defect_minimum_deduction" in result.point_results[0][
+        "strict_adjustments"
+    ]
+
+
+def test_critical_mathematical_defect_activates_score_cap_before_total_reaches_it():
+    config = structured_rubric_config(
+        version="critical-defect-v3",
+        source={"source_id": "critical-defect", "source_tier": "expert_reconstructed"},
+        scoring_points=[
+            {"point_id": "work", "description": "其余推导", "max_points": 50},
+            {
+                "point_id": "lemma",
+                "description": "关键引理",
+                "max_points": 50,
+                "critical": True,
+            },
+        ],
+        marking_mode="strict_exam",
+        critical_defect_score_cap=95,
+    )
+    answer = _answer(config, awards=[50, 50], confidence=0.99)
+    answer["points"][1].update({"status": "partial", "defect_severity": "minor"})
+
+    result = score_rubric(answer, config)
+
+    assert result.awarded_points == 99.5
+    assert result.evidence["percentage_before_cap"] == 99.5
+    assert result.percentage == 95
+    assert result.evidence["critical_defects"] == ["lemma"]
+
+
+def test_keyword_evidence_cannot_override_not_met_or_fatal_status():
+    config = structured_rubric_config(
+        version="adversarial-v1",
+        source={"source_id": "adversarial", "source_tier": "expert_reconstructed"},
+        scoring_points=[
+            {"point_id": "proof", "description": "完整推导", "max_points": 10, "critical": True}
+        ],
+        marking_mode="strict_exam",
+    )
+    answer = _answer(config, awards=[10], confidence=0.99)
+    answer["points"][0].update(
+        {
+            "status": "not_met",
+            "defect_severity": "fatal",
+            "evidence": "高斯公式 拉格朗日中值定理 泊松稀疏化 最终答案",
+        }
+    )
+
+    result = score_rubric(answer, config)
+
+    assert result.awarded_points == 0
+    assert result.percentage == 0
+    assert "zeroed_unmet_or_fatal_point" in result.point_results[0]["strict_adjustments"]

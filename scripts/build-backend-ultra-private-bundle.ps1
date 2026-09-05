@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $sourceRoot = Join-Path $projectRoot "backend\agentbench\private_validator_sources\backend-ultra-extreme"
 $bundleRoot = Join-Path $projectRoot "backend\agentbench\private_validator_bundles"
-$bundlePath = Join-Path $bundleRoot "backend-ultra-extreme-1.0.2.abpv"
+$bundlePath = Join-Path $bundleRoot "backend-ultra-extreme-1.3.0.abpv"
 
 $requiredFiles = [ordered]@{
     ledger = @("reference_ledger.py", "reference_app.py", "validate_ledger.py")
@@ -32,7 +32,7 @@ function Get-ValidatorFiles([string] $validatorId) {
 $manifest = [ordered]@{
     schema_version = 1
     bundle_id = "backend-ultra-extreme"
-    version = "1.0.2"
+    version = "1.3.0"
     validators = [ordered]@{
         "financial-ledger" = [ordered]@{
             command = "python {private_root}/ledger/validate_ledger.py --seed {validation_seed}"

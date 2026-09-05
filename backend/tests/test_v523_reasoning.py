@@ -11,7 +11,13 @@ from agentbench.service import EvaluationService, benchmark_reasoning_condition
 
 
 def test_agent_specific_reasoning_conditions_are_explicit() -> None:
-    assert benchmark_reasoning_condition("codex_cli", "maximum", "max")["effective"] == "xhigh"
+    assert benchmark_reasoning_condition("codex_cli", "maximum", "max") == {
+        "requested": "max",
+        "effective": "max",
+        "source": "direct",
+        "verified": True,
+        "note": "请求档位可直接传递给 Agent",
+    }
     assert benchmark_reasoning_condition("deepseek_harness", "maximum", "max") == {
         "requested": "max",
         "effective": "max",
@@ -40,7 +46,7 @@ def test_v15_schema_and_new_experiment_runtime_snapshot(settings) -> None:
         assert experiment["reasoning_effort"] == "max"
         assert experiment["strict_fairness"] is True
         assert experiment["judge_reasoning_effort"] == "xhigh"
-        assert experiment["runtime_config_version"] == "5.3.0"
+        assert experiment["runtime_config_version"] == "5.4.1"
 
         run = service.list_runs(experiment["id"])[0]
         assert run["requested_reasoning_effort"] == "max"

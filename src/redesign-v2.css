@@ -425,9 +425,10 @@ body { overflow: hidden; color: var(--ab-paper); background: var(--ab-ink); font
 .frontend-work-copy p { margin: 0 0 14px; color: var(--ab-muted); font-size: 12px; }
 .frontend-work-copy > div { display: flex; flex-wrap: wrap; gap: 6px; }
 .frontend-work-copy > div span { padding: 4px 6px; border: 1px solid var(--ab-line); color: #aab6bd; font: 10px/1 var(--font-mono); }
-.frontend-work-card > footer { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--ab-line); }
-.frontend-work-card > footer button, .frontend-work-card > footer a { height: 36px; display: flex; align-items: center; justify-content: center; gap: 5px; border: 0; border-right: 1px solid var(--ab-line); background: transparent; color: #b9c6cb; font-size: 11px; text-decoration: none; cursor: pointer; }
-.frontend-work-card > footer button:hover, .frontend-work-card > footer a:hover { color: #71e6c7; background: rgba(75, 204, 169, .07); }
+.frontend-work-card > footer { display: grid; grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); border-top: 1px solid var(--ab-line); }
+.frontend-work-card > footer button, .frontend-work-card > footer a, .frontend-work-card > footer .frontend-import-button { height: 36px; display: flex; align-items: center; justify-content: center; gap: 5px; border: 0; border-right: 1px solid var(--ab-line); background: transparent; color: #b9c6cb; font-size: 11px; text-decoration: none; cursor: pointer; }
+.frontend-work-card > footer button:hover, .frontend-work-card > footer a:hover, .frontend-work-card > footer .frontend-import-button:hover { color: #71e6c7; background: rgba(75, 204, 169, .07); }
+.frontend-import-button input { display: none; }
 .frontend-source-ledger { margin: 0 0 16px; min-height: 70px; padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; border: 1px solid rgba(93, 212, 181, .22); background: rgba(25, 70, 59, .11); }
 .frontend-source-ledger > div { display: grid; gap: 5px; min-width: 0; }
 .frontend-source-ledger span { color: #67d9bb; font: 700 9px/1 var(--font-mono); letter-spacing: .12em; }

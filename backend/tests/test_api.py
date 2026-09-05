@@ -42,12 +42,12 @@ def test_health_and_catalog_api(settings):
     with TestClient(create_app(settings)) as client:
         health = client.get("/api/v1/health")
         assert health.status_code == 200
-        assert health.json()["version"] == "5.3.0"
+        assert health.json()["version"] == "5.4.1"
         cases = client.get("/api/v1/test-cases").json()
-        # 214 existing cases plus the two built-in 2025 Math I tracks
-        # (22 questions each). The API must expose the bundled paper without
-        # requiring a user-side PDF import.
-        assert len(cases) == 284
+        # Existing catalog plus both built-in 2025 Math I tracks and the five
+        # new six-dimension-only frontend/research cases. The API must expose
+        # the complete bundled benchmark without a user-side import.
+        assert len(cases) == 298
         assert {item["difficulty"] for item in cases} == {1, 2, 3, 4, 5, 6}
         assert any(item["requires_docker"] for item in cases)
         assert any(item["requires_judge"] for item in cases)
@@ -239,6 +239,11 @@ def test_retry_completed_run_reopens_experiment_before_dispatch(settings, monkey
                 "UPDATE runs SET status='completed',score=0,completed_at='done' WHERE id=?",
                 (run_id,),
             )
+            connection.execute(
+                "INSERT INTO run_validation_seeds(run_id,seed_hex,commitment_sha256,created_at) "
+                "VALUES (?,?,?,'seeded')",
+                (run_id, "ab" * 32, "cd" * 32),
+            )
 
         response = client.post(f"/api/v1/runs/{run_id}/retry")
         assert response.status_code == 200
@@ -248,7 +253,12 @@ def test_retry_completed_run_reopens_experiment_before_dispatch(settings, monkey
             status = connection.execute(
                 "SELECT status,completed_at FROM experiments WHERE id=?", (created["id"],)
             ).fetchone()
+            retry_seed = connection.execute(
+                "SELECT seed_hex,commitment_sha256 FROM run_validation_seeds WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
         assert status == ("running", None)
+        assert retry_seed == ("ab" * 32, "cd" * 32)
 
 
 def test_suite_cases_endpoint_returns_whitelisted_preview_only(settings):

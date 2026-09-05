@@ -16,13 +16,15 @@ import {
   Play,
   RefreshCw,
   RotateCcw,
+  Save,
   ShieldCheck,
   Sparkles,
   Tag,
   TriangleAlert,
+  X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { FormEvent, useMemo, useState } from "react";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { useWorkspaceUx } from "../components/WorkspaceUx";
 import { api } from "../lib/api";
 import { useApi } from "../lib/useApi";
@@ -79,12 +81,57 @@ function eventPresentation(event: TaskEvent) {
 export default function TaskDetail() {
   const { taskId = "" } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const ux = useWorkspaceUx();
   const { data: task, loading, error, refresh } = useApi<StudioTaskDetail>(taskId ? `/tasks/${taskId}` : null, 2_500);
   const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState({ title: "", description: "", priority: "normal" as StudioTaskDetail["priority"], tags: "", acceptance_criteria: "" });
   const completedCriteria = task?.acceptance_criteria.filter((item) => item.completed).length ?? 0;
   const progress = task?.acceptance_criteria.length ? Math.round(completedCriteria / task.acceptance_criteria.length * 100) : 0;
   const pendingDependencies = useMemo(() => task?.dependencies.filter((item) => item.status !== "completed") ?? [], [task]);
+  const returnTo = typeof location.state === "object" && location.state && "returnTo" in location.state && typeof location.state.returnTo === "string"
+    ? location.state.returnTo
+    : "/tasks";
+
+  function openEditor() {
+    if (!task) return;
+    setEditForm({
+      title: task.title,
+      description: task.description,
+      priority: task.priority,
+      tags: task.tags.join(", "),
+      acceptance_criteria: task.acceptance_criteria.map((item) => item.text).join("\n"),
+    });
+    setEditError(null);
+    setEditing(true);
+  }
+
+  async function saveTask(event: FormEvent) {
+    event.preventDefault();
+    if (!task) return;
+    setBusy(true);
+    setEditError(null);
+    const completedByText = new Map(task.acceptance_criteria.map((item) => [item.text, item.completed]));
+    const payload = {
+      title: editForm.title.trim(),
+      description: editForm.description.trim(),
+      priority: editForm.priority,
+      tags: editForm.tags.split(/[,，]/).map((item) => item.trim()).filter(Boolean),
+      acceptance_criteria: editForm.acceptance_criteria.split(/\r?\n/).map((text) => text.trim()).filter(Boolean).map((text) => ({ text, completed: completedByText.get(text) ?? false })),
+    };
+    try {
+      await api(`/tasks/${task.id}`, { method: "PATCH", body: JSON.stringify(payload) });
+      await refresh();
+      setEditing(false);
+      ux.notify({ kind: "success", title: "任务已更新", message: payload.title });
+    } catch (value) {
+      setEditError(value instanceof Error ? value.message : "无法保存任务");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function perform(action: "start" | "cancel" | "duplicate" | "archive") {
     if (!task) return;
@@ -139,8 +186,8 @@ export default function TaskDetail() {
   if (error || !task) return <div className="v5-task-detail-state error"><TriangleAlert size={25} /><strong>无法打开任务</strong><p>{error || "任务不存在或已不可用"}</p><Link className="v4-button secondary" to="/tasks"><ArrowLeft size={15} />返回任务中心</Link></div>;
 
   return (
-    <div className="v4-page v5-task-detail-page">
-      <nav className="v5-task-breadcrumb"><button type="button" onClick={() => navigate(-1)}><ArrowLeft size={15} />返回</button><span>/</span><Link to="/tasks">任务中心</Link><span>/</span><strong>{task.id.slice(0, 8).toUpperCase()}</strong></nav>
+    <div className="v4-page ab-agent-document v5-task-detail-page">
+      <nav className="v5-task-breadcrumb"><button type="button" onClick={() => navigate(returnTo)}><ArrowLeft size={15} />返回</button><span>/</span><Link to="/tasks">任务中心</Link><span>/</span><strong>{task.id.slice(0, 8).toUpperCase()}</strong></nav>
 
       <header className="v5-task-detail-hero">
         <div>
@@ -154,7 +201,7 @@ export default function TaskDetail() {
           {(task.status === "backlog" || task.status === "failed" || task.status === "cancelled") && <button className="v4-button primary" type="button" disabled={busy || pendingDependencies.length > 0} onClick={() => void perform("start")}>{task.status === "backlog" ? <Play size={15} /> : <RotateCcw size={15} />}{task.status === "backlog" ? "启动任务" : "重新运行"}</button>}
           {activeStatuses.includes(task.status) && <button className="v4-button danger" type="button" disabled={busy} onClick={() => void perform("cancel")}><CircleStop size={15} />停止任务</button>}
           {task.session_id && <button className="v4-button secondary" type="button" onClick={() => navigate(`/studio/${task.session_id}`)}><ExternalLink size={15} />打开会话</button>}
-          <button className="v4-button secondary" type="button" onClick={() => navigate(`/tasks?task=${task.id}`)}><Pencil size={14} />编辑</button>
+          <button className="v4-button secondary" type="button" onClick={openEditor}><Pencil size={14} />编辑</button>
           <button className="v4-button secondary" type="button" disabled={busy} onClick={() => void perform("duplicate")}><Copy size={14} />复制</button>
           <button className="v4-button ghost" type="button" disabled={busy || activeStatuses.includes(task.status)} onClick={() => void perform("archive")}><Archive size={14} />归档</button>
         </section>
@@ -167,7 +214,7 @@ export default function TaskDetail() {
             <div className="v5-task-progress"><i style={{ width: `${progress}%` }} /></div>
             <div className="v5-task-criteria">
               {task.acceptance_criteria.map((item, index) => <button type="button" className={item.completed ? "completed" : ""} disabled={busy || activeStatuses.includes(task.status)} onClick={() => void toggleCriterion(index)} key={`${item.text}-${index}`}><span>{item.completed ? <Check size={14} /> : index + 1}</span><strong>{item.text}</strong>{item.completed && <small>已验证</small>}</button>)}
-              {!task.acceptance_criteria.length && <div className="v5-task-empty"><ShieldCheck size={21} /><strong>尚未定义验收标准</strong><p>编辑任务并按行添加可检查的完成条件。</p><button type="button" onClick={() => navigate(`/tasks?task=${task.id}`)}>添加验收标准</button></div>}
+              {!task.acceptance_criteria.length && <div className="v5-task-empty"><ShieldCheck size={21} /><strong>尚未定义验收标准</strong><p>编辑任务并按行添加可检查的完成条件。</p><button type="button" onClick={openEditor}>添加验收标准</button></div>}
             </div>
           </section>
 
@@ -200,6 +247,21 @@ export default function TaskDetail() {
           <section className="v5-task-local-note"><ShieldCheck size={16} /><div><strong>本地任务记录</strong><p>时间线、结果和关联会话保存在当前设备，不依赖 AgentBench 云端。</p></div></section>
         </aside>
       </main>
+
+      {editing && <div className="v4-modal-backdrop" onMouseDown={() => !busy && setEditing(false)}>
+        <form className="v4-modal v5-task-modal" onSubmit={(event) => void saveTask(event)} onMouseDown={(event) => event.stopPropagation()}>
+          <header><div><strong>编辑任务</strong><small>修改会立即保存到当前任务，不会离开详情页</small></div><button type="button" aria-label="关闭编辑" disabled={busy} onClick={() => setEditing(false)}><X size={18} /></button></header>
+          <div className="v4-form-grid">
+            <label className="full"><span>任务标题</span><input required value={editForm.title} onChange={(event) => setEditForm({ ...editForm, title: event.target.value })} /></label>
+            <label className="full"><span>任务说明</span><textarea value={editForm.description} onChange={(event) => setEditForm({ ...editForm, description: event.target.value })} placeholder="说明目标、范围与关键约束" /></label>
+            <label className="full v5-acceptance-input"><span>验收标准 <small>每行一项</small></span><textarea value={editForm.acceptance_criteria} onChange={(event) => setEditForm({ ...editForm, acceptance_criteria: event.target.value })} placeholder={"核心路径通过自动化测试\n关键操作具有明确反馈"} /></label>
+            <label><span>优先级</span><select value={editForm.priority} onChange={(event) => setEditForm({ ...editForm, priority: event.target.value as StudioTaskDetail["priority"] })}><option value="low">低</option><option value="normal">普通</option><option value="high">高</option><option value="urgent">紧急</option></select></label>
+            <label><span>标签</span><input value={editForm.tags} onChange={(event) => setEditForm({ ...editForm, tags: event.target.value })} placeholder="前端, 高优先级" /></label>
+          </div>
+          {editError && <div className="v4-error">{editError}</div>}
+          <footer><button className="v4-button secondary" type="button" disabled={busy} onClick={() => setEditing(false)}>取消</button><button className="v4-button primary" type="submit" disabled={busy || !editForm.title.trim()}><Save size={15} />{busy ? "保存中…" : "保存任务"}</button></footer>
+        </form>
+      </div>}
     </div>
   );
 }

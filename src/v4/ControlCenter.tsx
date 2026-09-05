@@ -86,7 +86,7 @@ export default function ControlCenter() {
   const NextIcon = nextAction.icon;
 
   return (
-    <div className="v4-page v4-control-page v53-home">
+    <div className="v4-page ab-agent-document v4-control-page v53-home">
       <header className="v4-page-head v53-page-head">
         <div><span>本地 Agent 工作台</span><h1>今天要做什么？</h1><p>继续正在进行的工作，处理阻塞，或从一个项目开始新任务。</p></div>
         <div><Link className="v4-button secondary" to="/projects?new=1"><Plus size={16} />添加项目</Link><Link className="v4-button primary" to="/studio?new=1"><MessageSquarePlus size={16} />开始新会话</Link></div>

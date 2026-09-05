@@ -110,7 +110,7 @@ export default function Profiles() {
   const navigate = useNavigate();
   const state = useApi<ModelProfile[]>(`/model-profiles?lane=${lane}`, 10_000);
   return (
-    <div className="ab-view ab-secondary-view ab-profiles-view">
+    <div className="ab-view ab-agent-document ab-secondary-view ab-profiles-view">
       <header className="ab-view-header">
         <div className="ab-view-title"><span className="ab-view-index">06 / PROFILES</span><div><h1>能力画像</h1><p>按赛道聚合真实运行证据，基础维度与 Ultra 压力测试分层呈现。</p></div></div>
         <div className="ab-header-meta"><span className="ab-meta-pill"><i />{state.data?.length ?? 0} PROFILES</span><button className="ab-run-button" type="button" onClick={() => navigate("/experiments?create=1")}><Play size={14} />新建评测</button></div>

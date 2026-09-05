@@ -48,7 +48,7 @@ function renderRunPage(run: RunDetail) {
     const url = String(input);
     let value: unknown = {};
     if (url.endsWith("/health")) {
-        value = { name: "AgentBench Desktop", version: "5.3.0" };
+        value = { name: "AgentBench Desktop", version: "5.4.1" };
     } else if (url.includes("/runs?experiment_id=")) {
       value = [run];
     } else if (url.includes("/runs/run-1")) {
@@ -70,7 +70,7 @@ function renderRunPage(run: RunDetail) {
 function renderRunPageWithNotifications(run: RunDetail) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
-    const value = url.includes("/runs?experiment_id=") ? [run] : url.includes("/runs/run-1") ? run : { name: "AgentBench Desktop", version: "5.3.0" };
+    const value = url.includes("/runs?experiment_id=") ? [run] : url.includes("/runs/run-1") ? run : { name: "AgentBench Desktop", version: "5.4.1" };
     return { ok: true, status: 200, json: async () => value } as Response;
   });
   vi.stubGlobal("fetch", fetchMock);

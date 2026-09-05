@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ExperimentDetail from "../pages/ExperimentDetail";
@@ -73,7 +73,7 @@ describe("experiment live queue", () => {
   it("can reveal every run while keeping the current run on the live stage", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
-      if (url.endsWith("/health")) return response({ name: "AgentBench Desktop", version: "5.3.0" });
+      if (url.endsWith("/health")) return response({ name: "AgentBench Desktop", version: "5.4.1" });
       if (url.includes("/experiments/exp-live")) return response(experiment);
       if (url.includes("/runs?experiment_id=exp-live")) return response(runs);
       if (url.includes("/runs/run-1")) return response(runDetail(runs[0]));
@@ -90,5 +90,52 @@ describe("experiment live queue", () => {
     expect(await screen.findByText("2025 数学一 · 第 2 题 · 工具增强")).toBeInTheDocument();
     expect(screen.getByText("2025 数学一 · 第 10 题 · 工具增强")).toBeInTheDocument();
     expect(screen.getAllByRole("link", { name: "详情" })).toHaveLength(10);
+  });
+
+  it("can pause every suite, not only the frontend suite", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/health")) return response({ name: "AgentBench Desktop", version: "5.4.1" });
+      if (url.endsWith("/experiments/exp-live/pause")) return response({ ...experiment, status: "pausing" });
+      if (url.includes("/experiments/exp-live")) return response(experiment);
+      if (url.includes("/runs?experiment_id=exp-live")) return response(runs);
+      if (url.includes("/runs/run-1")) return response(runDetail(runs[0]));
+      return response({});
+    });
+    render(<MemoryRouter initialEntries={["/experiments/exp-live"]}><Routes><Route path="/experiments/:experimentId" element={<ExperimentDetail />} /></Routes></MemoryRouter>);
+
+    fireEvent.click(await screen.findByRole("button", { name: "暂停套件" }));
+
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledWith(
+      expect.stringContaining("/experiments/exp-live/pause"),
+      expect.objectContaining({ method: "POST" }),
+    ));
+  });
+
+  it("shows preserved progress and resumes only the remaining items", async () => {
+    const pausedExperiment = { ...experiment, status: "paused", summary: { ...experiment.summary, completed: 6 } };
+    const pausedRuns = runs.map((item, index) => ({
+      ...item,
+      status: index < 6 ? "completed" : "queued",
+      score: index < 6 ? 90 : null,
+    }));
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/health")) return response({ name: "AgentBench Desktop", version: "5.4.1" });
+      if (url.endsWith("/experiments/exp-live/start")) return response({ ...pausedExperiment, status: "running" });
+      if (url.includes("/experiments/exp-live")) return response(pausedExperiment);
+      if (url.includes("/runs?experiment_id=exp-live")) return response(pausedRuns);
+      return response({});
+    });
+    render(<MemoryRouter initialEntries={["/experiments/exp-live"]}><Routes><Route path="/experiments/:experimentId" element={<ExperimentDetail />} /></Routes></MemoryRouter>);
+
+    expect(await screen.findByText("套件已暂停，进度已安全保存")).toBeInTheDocument();
+    expect(screen.getByText(/已保留 6 \/ 10 项结果/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "继续剩余 4 项" }));
+
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledWith(
+      expect.stringContaining("/experiments/exp-live/start"),
+      expect.objectContaining({ method: "POST" }),
+    ));
   });
 });

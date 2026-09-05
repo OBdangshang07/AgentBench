@@ -1,6 +1,6 @@
 param(
   [int]$Port = 43853,
-  [string]$ExpectedManifestSha256 = ""
+  [string]$ExpectedManifestSha256 = "1293591e737a73630917741b5deb5cd37036f5e01391580359b17e122ce092da"
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,14 +52,14 @@ try {
 
   $cases = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/v1/test-cases" -TimeoutSec 10
   $suites = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/v1/suites" -TimeoutSec 10
-  $backendSuite = $suites | Where-Object { $_.id -eq "2fe1d745-83c7-5bd2-b197-f22452956aa6" }
+  $backendSuite = $suites | Where-Object { $_.id -eq "63ae3873-1b1f-5ace-9742-8f85958356ff" }
   if (-not $backendSuite) {
     throw "Packaged sidecar does not expose the BACKEND ULTRA suite"
   }
 
   $manifest = Join-Path `
     $smokeRoot `
-    "private-validators\backend-ultra-extreme\1.0.0\manifest.json"
+    "private-validators\backend-ultra-extreme\1.3.0\manifest.json"
   if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
     throw "Packaged private validator manifest was not installed"
   }
@@ -70,8 +70,8 @@ try {
   if ($health.version -ne $version) {
     throw "Health version $($health.version) does not match package version $version"
   }
-  if (@($cases).Count -ne 284) {
-    throw "Expected 284 packaged cases, got $(@($cases).Count)"
+  if (@($cases).Count -ne 298) {
+    throw "Expected 298 packaged cases, got $(@($cases).Count)"
   }
   if ($backendSuite.case_count -ne 2 -or $backendSuite.docker_case_count -ne 2) {
     throw "Packaged BACKEND ULTRA suite metadata is invalid"

@@ -58,25 +58,16 @@ export default function ModelsAndAgents() {
   const runners = useApi<Runner[]>("/runners", 10_000);
 
   return (
-    <div className="ab-view ab-secondary-view ab-participants-view">
-      <header className="ab-view-header">
-        <div className="ab-view-title"><span className="ab-view-index">资源与设置</span><div><h1>Agent 与模型</h1><p>模型提供推理能力，Agent 提供实际执行方式；一次配置即可用于会话、Flow 和评测。</p></div></div>
-        <div className="ab-header-meta"><span className="ab-meta-pill"><i />{models.data?.filter((model) => model.enabled).length ?? 0} 个模型 · {runners.data?.filter((runner) => runner.capability.installed).length ?? 0} 个 Agent 已就绪</span><button className="ab-run-button" type="button" onClick={() => (tab === "models" ? setModelModal(true) : setRunnerModal(true))}><Plus size={14} />{tab === "models" ? "添加模型" : "添加 Agent"}</button></div>
+    <div className="ab-resource-screen">
+      <header className="ab-resource-header">
+        <div><p>Agent 资源</p><h1>{tab === "models" ? "模型" : "本机 Agent"}</h1><span>{tab === "models" ? "管理 Agent 可以调用的推理模型、登录路由与计费信息。" : "检查本机 CLI、登录状态与执行能力。"}</span></div>
+        <button className="ab-primary-action" type="button" onClick={() => (tab === "models" ? setModelModal(true) : setRunnerModal(true))}><Plus size={16} />{tab === "models" ? "添加模型" : "添加 Agent"}</button>
       </header>
-      <div className="ab-secondary-layout">
-        <aside className="ab-section-pane">
-          <div className="ab-pane-label">资源类型</div>
-          <button className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}><span><Cpu size={15} /></span><div><strong>模型目录</strong><small>推理身份、接口与计费</small></div><b>{models.data?.filter((model) => model.enabled).length ?? "—"}</b></button>
-          <button className={tab === "runners" ? "active" : ""} onClick={() => setTab("runners")}><span><TerminalSquare size={15} /></span><div><strong>Agent 运行时</strong><small>工具链、登录与本机能力</small></div><b>{runners.data?.length ?? "—"}</b></button>
-          <section className="ab-side-contract"><label>USED BY</label><strong>STUDIO · FLOW · BENCH</strong><p>日常任务使用项目默认组合；测评时再显式选择模型与 Agent，配置无需重复维护。</p></section>
-        </aside>
-        <main className="ab-secondary-canvas">
-          <div className="ab-canvas-intro"><span>{tab === "models" ? "MODEL REGISTRY" : "AGENT RUNTIMES"}</span><div><h2>{tab === "models" ? "可用模型目录" : "本机 Agent 矩阵"}</h2><p>{tab === "models" ? "管理日常任务与测评共用的模型来源、路由和计费映射。" : "检测 CLI、版本、工具能力与快捷安装状态；项目可选择其中一个作为默认 Agent。"}</p></div><b>{tab === "models" ? `${models.data?.filter((model) => model.enabled).length ?? 0} ACTIVE` : `${runners.data?.filter((runner) => runner.capability.installed).length ?? 0} READY`}</b></div>
-          <div className="ab-secondary-scroll">
-            {tab === "models" ? <ModelsPanel state={models} /> : <RunnersPanel state={runners} />}
-          </div>
-        </main>
-      </div>
+      <nav className="ab-resource-tabs" aria-label="Agent 资源类型">
+        <button className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}><Cpu size={16} /><span>模型</span><b>{models.data?.filter((model) => model.enabled).length ?? "—"}</b></button>
+        <button className={tab === "runners" ? "active" : ""} onClick={() => setTab("runners")}><TerminalSquare size={16} /><span>本机 Agent</span><b>{runners.data?.filter((runner) => runner.capability.installed).length ?? "—"}</b></button>
+      </nav>
+      <main className="ab-resource-content">{tab === "models" ? <ModelsPanel state={models} /> : <RunnersPanel state={runners} />}</main>
 
       {modelModal && <ModelModal runners={runners.data ?? []} onClose={() => setModelModal(false)} onSaved={() => { setModelModal(false); void models.refresh(); }} />}
       {runnerModal && <RunnerModal onClose={() => setRunnerModal(false)} onSaved={() => { setRunnerModal(false); void runners.refresh(); }} />}
@@ -142,30 +133,25 @@ function ModelsPanel({ state }: { state: ReturnType<typeof useApi<ModelConfig[]>
   }
 
   return (
-    <><div className="configuration-explainer"><div><Cpu size={17} /><span><strong>日常工作台</strong>从项目默认值读取模型和 Agent，也可在新建会话时临时切换。</span></div><div><Zap size={17} /><span><strong>模型测评</strong>显式组合模型与 Agent，二者身份、权限和结果分别留证。</span></div></div>
-      <div className="model-management-bar"><div><strong>{activeModels.length}</strong><span>个启用模型</span><small>{archivedModels.length} 个已归档</small></div><Button variant="secondary" onClick={() => setShowArchived((value) => !value)}>{showArchived ? <Cpu size={15} /> : <Archive size={15} />}{showArchived ? "返回启用模型" : `管理归档 (${archivedModels.length})`}</Button></div>
+    <><div className="ab-resource-toolbar"><div><strong>{activeModels.length}</strong><span>个可用模型</span><small>{archivedModels.length ? `${archivedModels.length} 个已归档` : "所有配置都只保存在本机"}</small></div><Button variant="secondary" onClick={() => setShowArchived((value) => !value)}>{showArchived ? <Cpu size={15} /> : <Archive size={15} />}{showArchived ? "返回可用模型" : `查看归档 (${archivedModels.length})`}</Button></div>
       {notice && <div className="inline-notice">{notice}</div>}
-      <div className="model-grid">
+      <div className="ab-model-list">
       {visibleModels.map((model) => (
-        <Card key={model.id} className={`model-card ${model.enabled ? "" : "model-card-archived"}`}>
-          <div className="model-card-top">
-            <div className={`model-logo provider-${model.api_style}`}><Bot size={22} /></div>
-            <div className="model-state"><span className={`dot ${model.enabled ? "dot-green" : "dot-amber"}`}>{model.enabled ? "启用" : "已归档"}</span></div>
-          </div>
-          <h3>{model.name}</h3>
-          <p>{model.provider} · <code>{model.model_name}</code></p>
-          <div className="model-meta">
+        <article key={model.id} className={`ab-model-row ${model.enabled ? "" : "archived"}`}>
+          <div className="ab-model-identity"><div className={`model-logo provider-${model.api_style}`}><Bot size={19} /></div><div><h3>{model.name}</h3><p>{model.provider} · <code>{model.model_name}</code></p></div></div>
+          <div className="ab-model-facts">
             <span><KeyRound size={14} /> {model.api_style === "mock" ? "无需密钥" : isAgentProvider(model.provider) ? "使用 Agent 登录" : model.has_secret ? "凭据已保存" : "未设置密钥"}</span>
             <span><Radio size={14} /> {model.settings.max_tokens?.toLocaleString() ?? "—"} max tokens</span>
             <span><CircleDollarSign size={14} /> {model.input_price || model.output_price ? `$${model.input_price} / $${model.output_price} 每 1M` : "未配置价格 · 费用无法估算"}</span>
           </div>
-          {message[model.id] && <div className="inline-message">{message[model.id]}</div>}
-          <div className="card-actions">
+          <span className={`ab-resource-state ${model.enabled ? "ready" : "archived"}`}><i />{model.enabled ? "可用" : "已归档"}</span>
+          <div className="ab-row-actions">
             {model.enabled ? <Button variant="secondary" busy={testing === model.id} onClick={() => void test(model.id)}>执行真实测试</Button> : <Button variant="secondary" onClick={() => void restore(model)}><ArchiveRestore size={15} /> 恢复模型</Button>}
             {model.enabled && model.api_style !== "mock" && <button className="icon-button" title="配置 Token 单价并回算历史费用" onClick={() => setPricingModel(model)}><CircleDollarSign size={16} /></button>}
             {!model.builtin && model.enabled && <button className="icon-button danger" title="删除或归档" onClick={() => void remove(model)}><Trash2 size={16} /></button>}
           </div>
-        </Card>
+          {message[model.id] && <div className="inline-message">{message[model.id]}</div>}
+        </article>
       ))}
       {!visibleModels.length && <Card className="model-empty-state"><Archive size={24} /><strong>{showArchived ? "暂无归档模型" : "暂无启用模型"}</strong><span>{showArchived ? "移除有历史记录的模型后会显示在这里。" : "点击右上角添加模型开始配置。"}</span></Card>}
     </div>{pricingModel && <PricingModal model={pricingModel} onClose={() => setPricingModel(null)} onSaved={async () => { setPricingModel(null); await state.refresh(); setNotice("价格已保存，能够取得 Token 的历史运行费用已自动回算。"); }} />}</>
