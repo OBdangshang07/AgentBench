@@ -160,11 +160,17 @@ def build_capability_report(database: Database, experiment_id: str) -> dict[str,
         components = component_map.get(run_id, [])
         score_source, confidence = _run_source(row, components, judge_counts.get(run_id, 0))
         hard_gates: list[dict[str, Any]] = []
+        raw_quality = None
         for component in components:
             evidence = component.get("evidence") or {}
             if component.get("dimension") == "hard_gate":
                 hard_gates.extend(evidence.get("failures") or [])
             hard_gates.extend(evidence.get("score_caps") or [])
+            hard_gates.extend(evidence.get('hard_failures') or [])
+            if isinstance(evidence.get('raw_quality_score'), (int, float)):
+                raw_quality = round(float(evidence['raw_quality_score']), 2)
+        hard_gates = list({json.dumps(item, sort_keys=True, ensure_ascii=False): item
+                           for item in hard_gates}.values())
         profile["runs"].append(
             {
                 "run_id": run_id,
@@ -178,6 +184,12 @@ def build_capability_report(database: Database, experiment_id: str) -> dict[str,
                 "passed": None if row["passed"] is None else bool(row["passed"]),
                 "score": None if row["score"] is None else round(float(row["score"]), 2),
                 "score_source": score_source,
+                "raw_quality_score": raw_quality,
+                "attempt_count": int(row.get('attempt_count') or 0),
+                "effective_reasoning_effort": row.get('effective_reasoning_effort'),
+                "effort_verified": bool(row.get('effort_verified')),
+                "measurement_version": metadata.get('measurement_version'),
+                "cost_source": row.get('cost_source'),
                 "confidence": confidence,
                 "confidence_label": _confidence_label(confidence),
                 "duration_ms": int(row["duration_ms"] or 0),
@@ -227,6 +239,8 @@ def build_capability_report(database: Database, experiment_id: str) -> dict[str,
                     "completed": sum(item["status"] in {"completed", "failed", "environment_unavailable"} for item in dimension_runs),
                     "scored": len(scored),
                     "total": len(dimension_runs),
+                    "excluded": not dimension_runs,
+                    "exclusion_reason": 'not_selected_in_experiment' if not dimension_runs else None,
                     "confidence": round(confidence, 3),
                     "confidence_label": _confidence_label(confidence),
                     "duration_ms": sum(int(item["duration_ms"]) for item in dimension_runs),
@@ -246,8 +260,10 @@ def build_capability_report(database: Database, experiment_id: str) -> dict[str,
             {
                 **profile,
                 "overall_score": overall,
-                "overall_complete": len(available) == len(DIMENSIONS)
-                and all(not item["provisional"] for item in dimensions),
+                "overall_complete": bool(available)
+                and all(not item["provisional"] for item in dimensions if item['total']),
+                "measured_dimension_count": len(available),
+                "requested_dimension_count": sum(bool(item['total']) for item in dimensions),
                 "dimensions": dimensions,
                 "strengths": [item["label"] for item in ranked[:2]],
                 "weaknesses": [item["label"] for item in ranked[-2:]] if len(ranked) >= 2 else [],
@@ -355,7 +371,7 @@ def render_capability_panel_svg(report: dict[str, Any], profile_id: str | None =
         x = cx + math.cos(angle) * (radius + 52)
         y = cy + math.sin(angle) * (radius + 42)
         anchor = "middle" if abs(math.cos(angle)) < 0.2 else "start" if math.cos(angle) > 0 else "end"
-        score_text = "待评分" if item.get("score") is None else f'{float(item["score"]):.1f}'
+        score_text = ("未测" if item.get('excluded') else "待评分") if item.get("score") is None else f'{float(item["score"]):.1f}'
         value = values[index]
         if value is not None:
             svg.append(

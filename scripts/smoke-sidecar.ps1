@@ -1,6 +1,6 @@
 param(
   [int]$Port = 43853,
-  [string]$ExpectedManifestSha256 = "1293591e737a73630917741b5deb5cd37036f5e01391580359b17e122ce092da"
+  [string]$ExpectedManifestSha256 = "7ac7bade14f7307d24f083a3e308ec6e0459254f2e720b59335ac64677fb4f06"
 )
 
 $ErrorActionPreference = "Stop"
@@ -59,7 +59,7 @@ try {
 
   $manifest = Join-Path `
     $smokeRoot `
-    "private-validators\backend-ultra-extreme\1.3.0\manifest.json"
+    "private-validators\backend-ultra-extreme\1.4.0\manifest.json"
   if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
     throw "Packaged private validator manifest was not installed"
   }
@@ -70,16 +70,31 @@ try {
   if ($health.version -ne $version) {
     throw "Health version $($health.version) does not match package version $version"
   }
-  if (@($cases).Count -ne 298) {
-    throw "Expected 298 packaged cases, got $(@($cases).Count)"
+  if (@($cases).Count -ne 299) {
+    throw "Expected 299 packaged cases, got $(@($cases).Count)"
   }
   if ($backendSuite.case_count -ne 2 -or $backendSuite.docker_case_count -ne 2) {
     throw "Packaged BACKEND ULTRA suite metadata is invalid"
   }
 
+  # Create only a draft in the isolated smoke database; do not start a model run.
+  $draftBody = @{
+    name = "Packaged version verification"
+    suite_id = "4e5b33cb-bc26-5fda-a296-538caf7d0e8e"
+    participants = @(@{
+      model_id = "b837abb8-7384-5c62-9754-ac3a0d954b7f"
+      runner_id = "2a2a9a4a-9333-5271-a48f-6f19509c9db1"
+    })
+  } | ConvertTo-Json -Depth 4
+  $draft = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/v1/experiments" -Method Post -ContentType "application/json" -Body $draftBody -TimeoutSec 20
+  if ($draft.runtime_config_version -ne $version) {
+    throw "Packaged experiment snapshot version $($draft.runtime_config_version) does not match $version"
+  }
+
   [ordered]@{
     smoke_root = $smokeRoot
     health_version = $health.version
+    experiment_snapshot_version = $draft.runtime_config_version
     case_count = @($cases).Count
     suite_case_count = $backendSuite.case_count
     suite_docker_count = $backendSuite.docker_case_count

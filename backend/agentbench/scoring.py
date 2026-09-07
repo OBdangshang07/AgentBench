@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import keyword
 import math
+import random
 import re
 import shutil
 import uuid
@@ -23,6 +24,7 @@ from .execution import (
     safe_workspace_path,
 )
 from .private_validators import PrivateValidatorError, PrivateValidatorStore
+from .research_audit import audit_claim_graph
 
 JudgeCallback = Callable[[dict[str, Any], float], "ValidationResult"]
 
@@ -820,8 +822,8 @@ class ScoringEngine:
                 )
 
         try:
-            report = workspace.read_file(report_path)
-            payload = json.loads(workspace.read_file(claims_path).lstrip("\ufeff"))
+            report = workspace.read_file(report_path, max_chars=None)
+            payload = json.loads(workspace.read_file(claims_path, max_chars=None).lstrip("\ufeff"))
             # The public task contract asks for a ``claims.json`` list of claim
             # records but does not require an object wrapper.  Accept both the
             # direct array form and the documented ``{"claims": [...]}`` form
@@ -985,6 +987,12 @@ class ScoringEngine:
             + 0.35 * numeric_score
         )
         caps: list[dict[str, Any]] = []
+        graph_audit = audit_claim_graph(claims) if config.get('require_claim_graph') else None
+        if graph_audit is not None:
+            score = 0.8 * score + 0.2 * graph_audit['score']
+            if graph_audit['errors']:
+                caps.append({'key': 'research_invalid_claim_graph', 'max_score': 80,
+                             'reason': '主张图存在重复 ID、缺失依赖或环'})
         if invalid_citations or invalid_report_citations:
             caps.append(
                 {
@@ -1028,6 +1036,7 @@ class ScoringEngine:
                 "invalid_report_citations": invalid_report_citations[:20],
                 "numeric_mismatches": numeric_mismatches[:20],
                 "derived_numeric_claims": derived_numeric_claims[:20],
+                "claim_graph": graph_audit,
                 "score_caps": caps,
             },
         )
@@ -1076,7 +1085,7 @@ class ScoringEngine:
             )
 
             path = config.get("path")
-            raw = workspace.read_file(str(path)).lstrip("\ufeff") if path else final_answer
+            raw = workspace.read_file(str(path), max_chars=None).lstrip("\ufeff") if path else final_answer
             fields = config.get("fields") or {}
             if not isinstance(fields, dict) or not fields:
                 raise ValueError("symbolic_json requires a JSON object and field specifications")
@@ -1276,11 +1285,19 @@ class ScoringEngine:
                                     declared_indexed[index]
                                     for index in sorted(declared_indexed)
                                 ]
+                            elif len(unknown_names) == 1:
+                                candidate_order = list(unknown_names)
                             else:
-                                candidate_order = sorted(
-                                    unknown_names,
-                                    key=text.find,
+                                # Expression order is not coordinate order:
+                                # 2z-x-y and -x-y+2z must map identically.
+                                groups = (('x', 'y', 'z'), ('u', 'v', 'w'))
+                                candidate_order = next(
+                                    (list(group) for group in groups
+                                     if set(group) == unknown_names),
+                                    None,
                                 )
+                                if candidate_order is None:
+                                    raise ValueError('ambiguous coordinate aliases; use declared variables')
                             for candidate_name, declared_name in zip(
                                 candidate_order, declared_variables, strict=True
                             ):
@@ -1321,9 +1338,10 @@ class ScoringEngine:
                     if not equivalent:
                         comparisons = 0
                         equivalent = True
-                        for sample_index, base in enumerate([0.17, 0.43, 0.91, 1.37, 2.11]):
+                        sampler = random.Random(81739021)
+                        for _sample_index in range(8):
                             substitutions = {
-                                symbol: base + position * 0.31 + sample_index * 0.07
+                                symbol: sampler.uniform(0.1, 3.0)
                                 for position, symbol in enumerate(symbol_values)
                             }
                             try:
@@ -1845,6 +1863,10 @@ class ScoringEngine:
                 )
             ]
 
+        if isinstance(payload, dict) and payload.get('platform_error'):
+            return [ValidationResult('validator_platform', weight, 0,
+                'environment_unavailable', {**evidence, 'error_code': 'validator_platform_error',
+                 'reason': '私有运行环境故障；不计入模型能力分', 'detail': payload.get('evidence')})]
         declared = config.get("metrics") or []
         metric_values = payload.get("metrics") if isinstance(payload, dict) else None
         if not isinstance(declared, list) or not declared or not isinstance(metric_values, dict):

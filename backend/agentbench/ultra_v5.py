@@ -378,7 +378,9 @@ REFERENCE_SOLVER = textwrap.dedent(
                 return True
             task_id = order[position]
             task = tasks[task_id]
-            mode_order = sorted(task["modes"], key=lambda mode: (mode["id"] != "balanced", mode["duration"], mode["nonrenewable"]))
+            durations = sorted(mode['duration'] for mode in task['modes'])
+            median_duration = durations[len(durations)//2]
+            mode_order = sorted(task["modes"], key=lambda mode: (abs(mode['duration']-median_duration), mode["duration"], mode["nonrenewable"]))
             for mode in mode_order:
                 next_budget = budget_used + int(mode.get("nonrenewable", 0))
                 if next_budget > int(instance["nonrenewable_budget"]):
@@ -450,6 +452,8 @@ def _scheduler_private_validator(hidden_payload: dict[str, Any]) -> str:
         + textwrap.dedent(
             f'''
             import hashlib
+            import argparse
+            import random
             import subprocess
             import sys
             import traceback
@@ -461,6 +465,22 @@ def _scheduler_private_validator(hidden_payload: dict[str, Any]) -> str:
             workspace = Path(__file__).resolve().parents[1]
             solver = workspace / "solver.py"
             hidden = json.loads({hidden_text!r})
+            parser=argparse.ArgumentParser(); parser.add_argument('--seed',default='0'*64); args=parser.parse_args()
+            rng=random.Random(int(hashlib.sha256(args.seed.encode()).hexdigest()[:16],16))
+            for instance in hidden['instances']:
+                identifiers=set()
+                identifiers.update(task['id'] for task in instance['tasks'])
+                identifiers.update(machine['id'] for machine in instance['machines'])
+                identifiers.update(mode['id'] for task in instance['tasks'] for mode in task['modes'])
+                renames={{key: 'opaque-'+format(rng.getrandbits(64),'016x') for key in sorted(identifiers)}}
+                def rename(value):
+                    if isinstance(value,str): return renames.get(value,value)
+                    if isinstance(value,list): return [rename(x) for x in value]
+                    if isinstance(value,dict): return {{renames.get(k,k):rename(v) for k,v in value.items()}}
+                    return value
+                instance.update(rename(instance))
+                rng.shuffle(instance['tasks']); rng.shuffle(instance['machines'])
+                for task in instance['tasks']: rng.shuffle(task['modes'])
             hidden_path = private_root / "hidden_instances.json"
             output_one = private_root / "hidden_output_1.json"
             output_two = private_root / "hidden_output_2.json"
@@ -801,20 +821,19 @@ def _event_private_validator() -> str:
                 time.sleep(0.01)
             checks = [ready_path.is_file()]
             time.sleep(0.04)
-            checks.append(doomed.poll() is None)
             if doomed.poll() is None:
                 doomed.kill()
             doomed.wait(timeout=20)
             connection = sqlite3.connect(path)
             count = connection.execute("SELECT COUNT(*) FROM events WHERE stream='crash'").fetchone()[0]
             connection.close()
-            checks.append(count == 0)
+            checks.append(count in (0, 30000))
             recovered = EventStore(path)
-            checks.append(recovered.append("crash", -1, [{"recovered":True}], "after-crash") == [0])
+            checks.append(recovered.append("crash", count - 1, [{"recovered":True}], "after-crash") == [count])
             recovered_rows = recovered.read("crash")
             checks.append(
-                len(recovered_rows) == 1
-                and event_matches(recovered_rows[0], 0, {"recovered":True})
+                len(recovered_rows) == count + 1
+                and event_matches(recovered_rows[-1], count, {"recovered":True})
             )
             return 100 * sum(checks) / len(checks), {"checks": checks, "surviving_rows": count}
 
@@ -883,7 +902,7 @@ def _event_private_validator() -> str:
                 if step % 11 == 0 and len(model[stream]) >= 2:
                     before = EventStore(path).read(stream)
                     try:
-                        EventStore(path).append(stream, expected_version - 1, [{"stale": step}], f"stale-{step}")
+                        EventStore(path).append(stream, len(model[stream]) - 2, [{"stale": step}], f"stale-{step}")
                         checks.append(False)
                     except ConcurrencyError:
                         checks.append(EventStore(path).read(stream) == before)
@@ -1115,7 +1134,7 @@ def build_ultra_catalog_v5(event_solution: str) -> list[dict[str, Any]]:
                 _validator(
                     "command_metrics",
                     95,
-                    command="python {private_root}/evaluate_solver.py",
+                    command="python {private_root}/evaluate_solver.py --seed {validation_seed}",
                     private_files={"evaluate_solver.py": scheduler_validator},
                     metrics=scheduler_metrics,
                     metric_caps=[

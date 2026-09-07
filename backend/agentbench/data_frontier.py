@@ -10,7 +10,7 @@ from __future__ import annotations
 import textwrap
 from typing import Any
 
-DATA_CASE_VERSION = "1.0.0"
+DATA_CASE_VERSION = "2.0.0"
 
 
 def _validator(kind: str, weight: float, **config: Any) -> dict[str, Any]:
@@ -68,16 +68,18 @@ PIPELINE_STARTER = textwrap.dedent(
 def _pipeline_validator() -> str:
     return textwrap.dedent(
         r'''
-        import argparse, copy, hashlib, importlib, json, sys, traceback
+        import argparse, copy, hashlib, importlib, json, random, sys, traceback
         from datetime import datetime, timezone
         from pathlib import Path
 
         METRICS = {key: 0.0 for key in (
             "contract", "event_time_scd", "exactly_once", "late_refund",
-            "atomic_replay", "audit_chain",
+            "atomic_replay", "audit_chain", "history_generalization",
         )}
         EVIDENCE = {}
         sys.path.insert(0, str(Path.cwd()))
+        parser=argparse.ArgumentParser(); parser.add_argument('--seed',default='0'*64); args=parser.parse_args()
+        rng=random.Random(int(hashlib.sha256(args.seed.encode()).hexdigest()[:16],16))
 
         def canon(value):
             return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -193,7 +195,33 @@ def _pipeline_validator() -> str:
             assert all(isinstance(row["hash"], str) and len(row["hash"]) == 64 for row in audit)
             return {"entries": len(audit), "linked": True}
 
-        for name, fn in (("contract",contract),("event_time_scd",event_time_scd),("exactly_once",exactly_once),("late_refund",late_refund),("atomic_replay",atomic_replay),("audit_chain",audit_chain)):
+        def history_generalization():
+            checks=0
+            for trial in range(4):
+                history=[]; sales={}; refunds={}; accepted={}; state={}
+                for i in range(32):
+                    oid=f'random-{trial}-{i}'; amount=rng.randrange(100,50000); refund=rng.randrange(1,amount+1)
+                    history.extend([event('sale-'+oid,'sale',oid,'2026-01-02T00:00:00Z','2026-02-02T00:00:00Z',amount,'c2'),
+                                    event('refund-'+oid,'refund',oid,'2026-02-03T00:00:00Z','2026-02-04T00:00:00Z',refund)])
+                rng.shuffle(history)
+                history.extend(copy.deepcopy(history[:9])); rng.shuffle(history)
+                for begin in range(0,len(history),7):
+                    batch=history[begin:begin+7]; customers=copy.deepcopy(CUSTOMERS)
+                    before=canon([state,batch,customers]); result=process(state,batch,customers)
+                    assert canon([state,batch,customers])==before, 'history inputs mutated'
+                    for row in batch:
+                        if row['event_id'] in accepted: continue
+                        accepted[row['event_id']]=row
+                        if row['kind']=='sale': sales[row['order_id']]=row['amount_cents']
+                        else: refunds[row['order_id']]=refunds.get(row['order_id'],0)+row['amount_cents']
+                    net=sum(amount-refunds.get(oid,0) for oid,amount in sales.items())
+                    assert rows(result)==({('2026-01-02','enterprise'):net} if net else {})
+                    assert len(result['audit'])==len(accepted)
+                    for left,right in zip(result['audit'],result['audit'][1:]): assert right['prev_hash']==left['hash']
+                    state=json.loads(canon(result['state'])); checks+=1
+            return {'checked_batches':checks,'seeded_histories':4}
+
+        for name, fn in (("contract",contract),("event_time_scd",event_time_scd),("exactly_once",exactly_once),("late_refund",late_refund),("atomic_replay",atomic_replay),("audit_chain",audit_chain),("history_generalization",history_generalization)):
             run_metric(name, fn)
         print("AGENTBENCH_METRICS=" + canon({"metrics":METRICS,"evidence":EVIDENCE}))
         '''
@@ -244,11 +272,13 @@ EXPERIMENT_STARTER = "def analyze(payload):\n    raise NotImplementedError\n"
 def _experiment_validator() -> str:
     return textwrap.dedent(
         r'''
-        import importlib, json, math, random, sys, traceback
+        import argparse, copy, hashlib, importlib, json, math, random, sys, traceback
         from pathlib import Path
         sys.path.insert(0, str(Path.cwd()))
         KEYS=("estimands","cluster_uncertainty","cuped","noncompliance","multiplicity_sequential","simpson_validation")
         metrics={key:0.0 for key in KEYS}; evidence={}
+        parser=argparse.ArgumentParser(); parser.add_argument('--seed',default='0'*64); args=parser.parse_args()
+        rng=random.Random(int(hashlib.sha256(args.seed.encode()).hexdigest()[:16],16))
 
         def close(a,b,tol=1e-8):
             return isinstance(a,(int,float)) and math.isfinite(a) and abs(a-b) <= tol*max(1,abs(b))
@@ -321,15 +351,34 @@ def _experiment_validator() -> str:
         try: analyze=importlib.import_module("experiment_audit").analyze
         except Exception as exc:
             evidence["import"]={"error":repr(exc)}; print("AGENTBENCH_METRICS="+json.dumps({"metrics":metrics,"evidence":evidence})); raise SystemExit(0)
-        try:
-            p=payload(False); expected=reference(p); actual=analyze(json.loads(json.dumps(p)))
-            mapping={"estimands":("itt",),"cluster_uncertainty":("cluster_se",),"cuped":("cuped_theta","cuped_itt"),"noncompliance":("first_stage","cace")}
-            for metric, fields in mapping.items():
+        mapping={"estimands":("itt",),"cluster_uncertainty":("cluster_se",),"cuped":("cuped_theta","cuped_itt"),"noncompliance":("first_stage","cace"),"multiplicity_sequential":('holm_rejections','sequential_crossed')}
+        passed={key:0 for key in mapping}; failures={key:[] for key in mapping}
+        for trial in range(12):
+            p=payload(False,trial==11)
+            if trial:
+                scale=rng.uniform(.3,4); offset=rng.uniform(-3,8)
+                for row in p['units']:
+                    if row['outcome'] is not None: row['outcome']=scale*row['outcome']+offset+rng.uniform(-.1,.1)
+                    row['pre']=0.0 if trial==10 else row['pre']*rng.uniform(.5,2)
+                    row['response_probability']=rng.uniform(.15,1)
+                    row['cluster_id']=f"seed-{trial}-"+row['cluster_id']
+                rng.shuffle(p['units'])
+                p['hypotheses']=[{'name':f'h{i}','p':rng.choice([.001,.008,.02,.05,.2,.9])} for i in range(1+trial%7)]
+                p['looks']=[{'z':rng.uniform(-4,4),'information_fraction':rng.uniform(.1,1)} for _ in range(4)]
+            try:
+                expected=reference(p); frozen=copy.deepcopy(p); actual=analyze(p)
+                assert p==frozen, 'input mutated'
                 assert isinstance(actual,dict)
-                assert all((actual.get(f) is None and expected[f] is None) or close(actual.get(f),expected[f]) for f in fields), (metric,actual,expected)
-                metrics[metric]=100; evidence[metric]={"ok":True,"fields":fields}
-            assert actual.get("holm_rejections")==expected["holm_rejections"] and actual.get("sequential_crossed") is expected["sequential_crossed"]
-            metrics["multiplicity_sequential"]=100; evidence["multiplicity_sequential"]={"ok":True}
+                for metric,fields in mapping.items():
+                    ok=all((actual.get(f)==expected[f] if isinstance(expected[f],(list,bool)) or expected[f] is None else close(actual.get(f),expected[f])) for f in fields)
+                    if ok: passed[metric]+=1
+                    else: failures[metric].append({'trial':trial,'expected':{f:expected[f] for f in fields},'actual':{f:actual.get(f) for f in fields}})
+            except Exception as exc:
+                for metric in mapping: failures[metric].append({'trial':trial,'error':repr(exc)})
+        for metric in mapping:
+            metrics[metric]=100*passed[metric]/12
+            evidence[metric]={'passed':passed[metric],'total':12,'failures':failures[metric][:3]}
+        try:
             p2=payload(True); e2=reference(p2); a2=analyze(json.loads(json.dumps(p2)))
             assert a2.get("simpson_flag") is e2["simpson_flag"] is True
             p3=payload(False,True); e3=reference(p3); a3=analyze(json.loads(json.dumps(p3)))
@@ -398,7 +447,7 @@ def _model_validator() -> str:
                 if labels: row["label"]=y
                 rows.append(row); ys.append(y)
             return rows,ys
-        train,_=make(0,480,True); future,y=make(480,120,False); shifted,y2=make(650,120,False)
+        train,_=make(0,480,True); future,y=make(480,360,False); shifted,y2=make(900,360,False)
         def validate(pred,n):
             assert isinstance(pred,(list,tuple)) and len(pred)==n
             values=[float(x) for x in pred]; assert all(math.isfinite(x) and 0<=x<=1 for x in values); return values
@@ -408,17 +457,23 @@ def _model_validator() -> str:
         except Exception as exc:
             evidence["import"]={"error":repr(exc)}; print("AGENTBENCH_METRICS="+json.dumps({"metrics":metrics,"evidence":evidence})); raise SystemExit(0)
         try:
-            p=validate(predict(copy.deepcopy(train),copy.deepcopy(future)),len(future)); metrics["interface"]=100; evidence["interface"]={"ok":True}
+            tc=copy.deepcopy(train); fc=copy.deepcopy(future)
+            p=validate(predict(tc,fc),len(future)); assert tc==train and fc==future, 'inputs mutated'
+            metrics["interface"]=100; evidence["interface"]={"ok":True}
             tampered=copy.deepcopy(future)
             for i,row in enumerate(tampered): row["post_outcome_leak"]=1-(i%2)
-            pt=validate(predict(copy.deepcopy(train),tampered),len(future))
+            changed_train=copy.deepcopy(train)
+            for i,row in enumerate(changed_train): row['post_outcome_leak']=(i%2)
+            pt=validate(predict(changed_train,tampered),len(future))
             delta=max(abs(a-b) for a,b in zip(p,pt))
             metrics["leakage_safety"]=100 if delta<1e-12 else 0; evidence["leakage_safety"]={"max_delta":delta}
             ll=logloss(p,y); metrics["temporal_logloss"]=max(0,min(100,100-(ll-.42)*180)); evidence["temporal_logloss"]={"log_loss":ll}
             br=brier(p,y); mean_error=abs(sum(p)/len(p)-sum(y)/len(y)); metrics["calibration"]=max(0,min(100,100-(br-.14)*260-mean_error*180)); evidence["calibration"]={"brier":br,"mean_error":mean_error}
             ps=validate(predict(copy.deepcopy(train),copy.deepcopy(shifted)),len(shifted)); ll2=logloss(ps,y2); metrics["drift_robustness"]=max(0,min(100,100-(ll2-.48)*170)); evidence["drift_robustness"]={"log_loss":ll2}
             again=validate(predict(copy.deepcopy(train),copy.deepcopy(future)),len(future)); shuffled=list(reversed(copy.deepcopy(future))); rev=validate(predict(copy.deepcopy(train),shuffled),len(shuffled)); order_delta=max(abs(a-b) for a,b in zip(p,reversed(rev)))
-            metrics["determinism"]=100 if p==again and order_delta<1e-12 else 0; evidence["determinism"]={"repeat_equal":p==again,"order_delta":order_delta}
+            reversed_train=validate(predict(list(reversed(copy.deepcopy(train))),copy.deepcopy(future)),len(future))
+            train_delta=max(abs(a-b) for a,b in zip(p,reversed_train))
+            metrics["determinism"]=100 if p==again and order_delta<1e-12 and train_delta<1e-10 else 0; evidence["determinism"]={"repeat_equal":p==again,"order_delta":order_delta,'train_order_delta':train_delta}
         except Exception as exc: evidence["failure"]={"error":repr(exc),"trace":traceback.format_exc()[-2500:]}
         print("AGENTBENCH_METRICS="+json.dumps({"metrics":metrics,"evidence":evidence},ensure_ascii=False,separators=(",",":")))
         '''
@@ -511,6 +566,7 @@ def build_data_frontier_cases() -> list[dict[str, Any]]:
         {"key":"late_refund","name":"乱序销售退款归因","weight":20,"cap":72},
         {"key":"atomic_replay","name":"原子批次与重放恢复","weight":20,"cap":68},
         {"key":"audit_chain","name":"增量审计哈希链","weight":10,"cap":82},
+        {"key":"history_generalization","name":"隐藏乱序长历史模型对照","weight":20,"cap":78},
     ]
     experiment_metrics = [
         {"key":"estimands","name":"聚类 IPW ITT","weight":20,"cap":72},
@@ -520,6 +576,9 @@ def build_data_frontier_cases() -> list[dict[str, Any]]:
         {"key":"multiplicity_sequential","name":"多重检验与连续偷看","weight":15,"cap":78},
         {"key":"simpson_validation","name":"辛普森悖论与输入审计","weight":15,"cap":75},
     ]
+    for metric in pipeline_metrics:
+        if metric['key'] != 'history_generalization':
+            metric['weight'] = int(metric['weight'] * 0.8)
     model_metrics = [
         {"key":"interface","name":"概率接口与输入安全","weight":10,"cap":65},
         {"key":"leakage_safety","name":"决策时点防泄漏","weight":20,"cap":65},

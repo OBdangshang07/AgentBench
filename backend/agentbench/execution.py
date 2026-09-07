@@ -47,10 +47,12 @@ class Workspace:
         for relative, content in files.items():
             self.write_file(relative, content)
 
-    def read_file(self, path: str, max_chars: int = 100_000) -> str:
+    def read_file(self, path: str, max_chars: int | None = 100_000) -> str:
         target = safe_workspace_path(self.root, path)
         if not target.is_file():
             raise FileNotFoundError(path)
+        # Tool previews remain bounded; validators explicitly request complete
+        # documents. Never parse a silently truncated preview as a submission.
         return target.read_text(encoding="utf-8", errors="replace")[:max_chars]
 
     def write_file(self, path: str, content: str) -> dict[str, Any]:

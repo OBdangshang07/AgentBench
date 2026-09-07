@@ -38,8 +38,8 @@ export interface WorkspaceNotification {
 }
 
 export type WorkspaceDensity = "comfortable" | "compact";
-export type WorkspaceTheme = "workbench" | "acid-terminal";
-export type WorkspaceColorMode = "system" | "light" | "dark";
+export type WorkspaceTheme = "fieldnotes";
+export type WorkspaceColorMode = "light";
 
 interface ConfirmOptions {
   title: string;
@@ -61,9 +61,7 @@ interface WorkspaceUxValue {
   density: WorkspaceDensity;
   setDensity: (density: WorkspaceDensity) => void;
   theme: WorkspaceTheme;
-  setTheme: (theme: WorkspaceTheme) => void;
   colorMode: WorkspaceColorMode;
-  setColorMode: (mode: WorkspaceColorMode) => void;
   selectedProjectId: string;
   setSelectedProjectId: (projectId: string) => void;
 }
@@ -91,23 +89,6 @@ function storedDensity(): WorkspaceDensity {
   }
 }
 
-function storedTheme(): WorkspaceTheme {
-  try {
-    return window.localStorage.getItem(themeStorageKey) === "acid-terminal" ? "acid-terminal" : "workbench";
-  } catch {
-    return "workbench";
-  }
-}
-
-function storedColorMode(): WorkspaceColorMode {
-  try {
-    const value = window.localStorage.getItem(colorModeStorageKey);
-    return value === "light" || value === "dark" ? value : "system";
-  } catch {
-    return "system";
-  }
-}
-
 function storedProjectId() {
   try {
     return window.localStorage.getItem(projectStorageKey) ?? "";
@@ -127,10 +108,8 @@ const safeFallbackUx: WorkspaceUxValue = {
   clearNotifications: () => undefined,
   density: "comfortable",
   setDensity: () => undefined,
-  theme: "workbench",
-  setTheme: () => undefined,
-  colorMode: "system",
-  setColorMode: () => undefined,
+  theme: "fieldnotes",
+  colorMode: "light",
   selectedProjectId: "",
   setSelectedProjectId: () => undefined,
 };
@@ -147,15 +126,9 @@ const toastIcons = {
 };
 
 export function WorkspaceUxProvider({ children }: { children: ReactNode }) {
-  const hadStoredTheme = useRef<boolean>((() => {
-    try { return window.localStorage.getItem(themeStorageKey) !== null; } catch { return false; }
-  })());
-  const themeAnnouncementShown = useRef(false);
   const [toasts, setToasts] = useState<ToastRecord[]>([]);
   const [notifications, setNotifications] = useState<WorkspaceNotification[]>(storedNotifications);
   const [density, setDensityState] = useState<WorkspaceDensity>(storedDensity);
-  const [theme, setThemeState] = useState<WorkspaceTheme>(storedTheme);
-  const [colorMode, setColorModeState] = useState<WorkspaceColorMode>(storedColorMode);
   const [selectedProjectId, setSelectedProjectIdState] = useState(storedProjectId);
   const [confirmState, setConfirmState] = useState<(ConfirmOptions & { resolve: (value: boolean) => void }) | null>(null);
   const toastSequence = useRef(Date.now());
@@ -193,8 +166,6 @@ export function WorkspaceUxProvider({ children }: { children: ReactNode }) {
   const clearNotifications = useCallback(() => setNotifications([]), []);
 
   const setDensity = useCallback((value: WorkspaceDensity) => setDensityState(value), []);
-  const setTheme = useCallback((value: WorkspaceTheme) => setThemeState(value), []);
-  const setColorMode = useCallback((value: WorkspaceColorMode) => setColorModeState(value), []);
   const setSelectedProjectId = useCallback((value: string) => setSelectedProjectIdState(value), []);
 
   useEffect(() => {
@@ -211,39 +182,15 @@ export function WorkspaceUxProvider({ children }: { children: ReactNode }) {
   }, [density]);
 
   useEffect(() => {
-    const root = document.documentElement;
-    const media = typeof window.matchMedia === "function"
-      ? window.matchMedia("(prefers-color-scheme: dark)")
-      : { matches: false, addEventListener: () => undefined, removeEventListener: () => undefined };
-    const apply = () => {
-      const resolvedMode = theme === "acid-terminal" ? "dark" : colorMode === "system" ? (media.matches ? "dark" : "light") : colorMode;
-      root.dataset.agentbenchTheme = theme;
-      root.dataset.agentbenchColorMode = resolvedMode;
-      root.style.colorScheme = resolvedMode;
-    };
-    apply();
-    media.addEventListener?.("change", apply);
+    // The approved design replaces both legacy themes, including saved dark mode.
+    document.documentElement.dataset.agentbenchTheme = "fieldnotes";
+    document.documentElement.dataset.agentbenchColorMode = "light";
+    document.documentElement.style.colorScheme = "light";
     try {
-      window.localStorage.setItem(themeStorageKey, theme);
-      window.localStorage.setItem(colorModeStorageKey, colorMode);
+      window.localStorage.setItem(themeStorageKey, "fieldnotes");
+      window.localStorage.setItem(colorModeStorageKey, "light");
     } catch { /* optional UI preference */ }
-    return () => media.removeEventListener?.("change", apply);
-  }, [colorMode, theme]);
-
-  useEffect(() => {
-    if (hadStoredTheme.current || themeAnnouncementShown.current) return;
-    themeAnnouncementShown.current = true;
-    try {
-      if (window.localStorage.getItem("agentbench.v5.onboarding.done") === "1") {
-        notify({
-          title: "已启用 5.4 Workbench 新主题",
-          message: "5.3 的 Acid Terminal 主题仍可在设置 → 外观与主题中恢复。",
-          kind: "info",
-          duration: 8000,
-        });
-      }
-    } catch { /* optional upgrade notice */ }
-  }, [notify]);
+  }, []);
 
   useEffect(() => {
     try {
@@ -255,7 +202,7 @@ export function WorkspaceUxProvider({ children }: { children: ReactNode }) {
   }, [selectedProjectId]);
 
   const unreadCount = useMemo(() => notifications.filter((notification) => !notification.read).length, [notifications]);
-  const value = useMemo(() => ({
+  const value = useMemo<WorkspaceUxValue>(() => ({
     notify,
     dismiss,
     confirm,
@@ -265,13 +212,11 @@ export function WorkspaceUxProvider({ children }: { children: ReactNode }) {
     clearNotifications,
     density,
     setDensity,
-    theme,
-    setTheme,
-    colorMode,
-    setColorMode,
+    theme: "fieldnotes",
+    colorMode: "light",
     selectedProjectId,
     setSelectedProjectId,
-  }), [clearNotifications, colorMode, confirm, density, dismiss, markNotificationsRead, notifications, notify, selectedProjectId, setColorMode, setDensity, setSelectedProjectId, setTheme, theme, unreadCount]);
+  }), [clearNotifications, confirm, density, dismiss, markNotificationsRead, notifications, notify, selectedProjectId, setDensity, setSelectedProjectId, unreadCount]);
 
   function settleConfirm(approved: boolean) {
     const current = confirmState;

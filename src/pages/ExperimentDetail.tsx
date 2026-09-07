@@ -4,6 +4,7 @@ import { Link, useParams } from "react-router-dom";
 import { api, downloadUrl } from "../lib/api";
 import { formatDate, formatDuration, formatNumber } from "../lib/format";
 import { useApi } from "../lib/useApi";
+import RadarChart from "../components/RadarChart";
 import { useRunEvents } from "../lib/useRunEvents";
 import type { CapabilityReport, Experiment, RunDetail, RunSummary } from "../types";
 import { Button, Card, ErrorBlock, LoadingBlock, Score, StatusBadge } from "../components/ui";
@@ -188,7 +189,7 @@ function CapabilityPanel({ experimentId, report, loading, error }: { experimentI
       </div>
     </div>
     <div className="capability-panel-layout">
-      <div className="capability-panel-preview"><img src={downloadUrl(panelPath)} alt={`${profile.model.name} 六维能力面板`} /></div>
+      <div className="capability-panel-preview"><span className="eyebrow">CAPABILITY PROFILE</span><h3>{profile.model.name}</h3><RadarChart data={profile.dimensions.map(dimension => ({ label: dimension.short_label || dimension.label, value: dimension.score ?? null }))} ariaLabel={`${profile.model.name} 六维能力雷达图`} /><div className="fn-capability-total"><strong>{profile.overall_score?.toFixed(1) ?? "—"}</strong><span>{profile.overall_complete ? "六维综合得分" : "阶段成绩 · 评分尚未完成"}</span></div><p>各维度等权计分，未评分维度保持为空。</p></div>
       <div className="capability-dimension-list">
         {profile.dimensions.map((dimension) => <article key={dimension.key}>
           <div><strong>{dimension.label}</strong><span>{dimension.score == null ? "待评分" : dimension.score.toFixed(1)}</span></div>

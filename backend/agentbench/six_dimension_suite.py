@@ -13,8 +13,9 @@ from typing import Any
 
 from .data_frontier import build_data_frontier_cases
 from .math_builtin import build_builtin_math_cases
+from .moment_transfer import build_moment_transfer_case
 
-SUITE_VERSION = "4.1.1"
+SUITE_VERSION = "5.0.0"
 FRONTEND_CASE_VERSION = "1.0.0"
 
 DIMENSIONS: tuple[dict[str, str], ...] = (
@@ -1338,6 +1339,7 @@ def build_six_dimension_cases() -> list[dict[str, Any]]:
         ),
         *build_data_frontier_cases(),
         *build_frontier_math_cases(),
+        build_moment_transfer_case(),
     ]
 
 
@@ -1353,6 +1355,7 @@ SUITE_CASE_SLUGS: tuple[str, ...] = (
     "sixdim.math.frontier.q20",
     "sixdim.math.frontier.q21",
     "sixdim.math.frontier.q22",
+    "sixdim.math.moment-duality-transfer",
     "sixdim.research-heliogrid-acquisition",
     "sixdim.research-urban-heat-policy",
     "sixdim.data-incremental-revenue-ledger",

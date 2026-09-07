@@ -64,7 +64,7 @@ def test_six_dimension_report_and_svg_panel_are_video_ready(settings):
         assert {
             item["key"]: item["score"] for item in profile["dimensions"]
         } == expected_scores
-        assert profile["totals"]["runs"] == 18
+        assert profile["totals"]["runs"] == len(rows)
         assert all(item["runs"] for item in profile["dimensions"])
 
         detail = client.get(f"/api/v1/experiments/{experiment_id}").json()

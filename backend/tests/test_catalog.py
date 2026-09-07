@@ -437,7 +437,7 @@ def test_seed_disables_retired_builtin_cases(settings):
             "SELECT enabled FROM test_cases WHERE id='retired'"
         )
         assert retired == {"enabled": 0}
-        assert service.dashboard()["test_cases"] == 298
+        assert service.dashboard()["test_cases"] == 299
     finally:
         service.close()
 
@@ -644,7 +644,7 @@ def test_seeded_suites_have_expected_sizes(settings):
             for definition in math_frontier_definitions
         } == {"mathematical_reasoning"}
         six_dimension_cases = service.get_suite(SIX_DIMENSION_SUITE_ID)["cases"]
-        assert len(six_dimension_cases) == 18
+        assert len(six_dimension_cases) == 19
         six_dimension_definitions = [
             json.loads(
                 service.database.fetch_one(
@@ -670,7 +670,7 @@ def test_seeded_suites_have_expected_sizes(settings):
         ) == {
             "creative_frontend": 3,
             "systems_backend": 2,
-            "mathematical_reasoning": 6,
+            "mathematical_reasoning": 7,
             "research_writing": 2,
             "data_engineering_science": 3,
             "agent_execution": 2,
@@ -680,7 +680,7 @@ def test_seeded_suites_have_expected_sizes(settings):
             for definition in six_dimension_definitions
             if definition["metadata"]["capability_dimension"] != "creative_frontend"
         ]
-        assert len(non_frontend) == 15
+        assert len(non_frontend) == 16
         assert all(definition["metadata"].get("frontier_profile") for definition in non_frontend)
         data_definitions = [
             definition
@@ -722,7 +722,7 @@ def test_seeded_suites_have_expected_sizes(settings):
         assert len(gauntlet_cases) >= 55
         assert {case["category"] for case in gauntlet_cases}.isdisjoint({"office-exam"})
         assert 50 <= len(gauntlet_lite_cases) <= 75
-        assert service.dashboard()["test_cases"] == 298
+        assert service.dashboard()["test_cases"] == 299
         suites = {item["id"]: item for item in service.list_suites()}
         assert suites[FRONTIER_SUITE_ID]["difficulty_max"] == 5
         assert suites[PRACTICAL_SUITE_ID]["docker_case_count"] > 0

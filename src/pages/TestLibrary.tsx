@@ -65,13 +65,13 @@ export default function TestLibrary() {
   return (
     <div className="ab-view ab-agent-document ab-library-view ab-library-vnext">
       <header className="ab-view-header">
-        <div className="ab-view-title"><span className="ab-view-index">能力评测</span><div><h1>测试与套件</h1><p>先按评测目标选择套件，再查看其中的题目、运行要求和评分方式。</p></div></div>
+        <div className="ab-view-title"><span className="ab-view-index">能力评测</span><div><h1>测试套件</h1><p>先按评测目标选择套件，再查看其中的题目、运行要求和评分方式。</p></div></div>
         <div className="ab-header-meta"><span className="ab-meta-pill"><i />{cases.data?.length ?? 0} 项测试</span><span className="ab-meta-pill">{lowCount} 项区分度待关注</span><button className="ab-ghost-button" type="button" onClick={() => setImporting(true)}><FileUp size={13} />导入题包</button></div>
       </header>
 
       <main className="ab-library-document">
         <section className="ab-suite-section" aria-labelledby="recommended-suites">
-          <div className="ab-document-section-head"><div><span>从目标开始</span><h2 id="recommended-suites">推荐评测套件</h2><p>套件已经组合好题目与评分规则，适合直接发起一次对比评测。</p></div><Link to="/benchmarks">查看全部套件 <ChevronRight size={14} /></Link></div>
+          <div className="ab-document-section-head"><div><span>从目标开始</span><h2 id="recommended-suites">推荐评测套件</h2><p>套件已经组合好题目与评分规则，适合直接发起一次对比评测。</p></div><Link to="/benchmarks?all=1">查看全部套件 <ChevronRight size={14} /></Link></div>
           <div className="ab-suite-strip">
             {mathSuite && <article className="ab-suite-entry"><span className="ab-suite-mark"><Sigma size={17} /></span><div><small>完整试卷 · 内置题库</small><strong>2025 考研数学（一）</strong><p>22 道原题，150 分制；检验长程推理与答案严谨性。</p></div><nav><Link to={`/experiments?create=1&suite_id=${mathSuite.id}`}>闭卷推理</Link>{mathToolsSuite && <Link to={`/experiments?create=1&suite_id=${mathToolsSuite.id}`}>工具增强</Link>}</nav></article>}
             {frontendSuite && <article className="ab-suite-entry"><span className="ab-suite-mark"><MonitorSmartphone size={17} /></span><div><small>工程实践 · 人工验收</small><strong>Xnmk Library 前端工程</strong><p>{frontendSuite.case_count} 项真实前端任务，覆盖实现质量与视觉结果。</p></div><nav><Link to={`/experiments?create=1&suite_id=${frontendSuite.id}`}>运行完整套件</Link></nav></article>}

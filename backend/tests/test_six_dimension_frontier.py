@@ -56,7 +56,7 @@ def test_frontier_math_v5_is_seeded_three_layer_and_defect_aware():
         for item in cases
     ] == [40, 40, 40, 40, 45, 45]
     for item in cases:
-        assert item["version"] == SUITE_VERSION == "4.1.1"
+        assert item["version"] == SUITE_VERSION == "5.0.0"
         assert item["tools"] == []
         assert "工具增强测试" not in item["instruction"]
         assert "闭卷极限测试" in item["instruction"]
@@ -276,7 +276,8 @@ def test_six_dimension_data_cases_use_hidden_holdouts_and_mastery_caps():
         assert command["config"]["metric_caps"]
 
 
-def test_online_experiment_hidden_payload_obeys_binary_received_contract():
+def test_online_experiment_hidden_payload_obeys_binary_received_contract(monkeypatch):
+    monkeypatch.setattr('sys.argv', ['validate.py'])
     case = next(
         item
         for item in build_six_dimension_cases()

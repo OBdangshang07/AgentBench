@@ -73,7 +73,7 @@ describe("experiment live queue", () => {
   it("can reveal every run while keeping the current run on the live stage", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
-      if (url.endsWith("/health")) return response({ name: "AgentBench Desktop", version: "5.4.1" });
+      if (url.endsWith("/health")) return response({ name: "AgentBench Desktop", version: "5.5.0" });
       if (url.includes("/experiments/exp-live")) return response(experiment);
       if (url.includes("/runs?experiment_id=exp-live")) return response(runs);
       if (url.includes("/runs/run-1")) return response(runDetail(runs[0]));
@@ -95,7 +95,7 @@ describe("experiment live queue", () => {
   it("can pause every suite, not only the frontend suite", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
-      if (url.endsWith("/health")) return response({ name: "AgentBench Desktop", version: "5.4.1" });
+      if (url.endsWith("/health")) return response({ name: "AgentBench Desktop", version: "5.5.0" });
       if (url.endsWith("/experiments/exp-live/pause")) return response({ ...experiment, status: "pausing" });
       if (url.includes("/experiments/exp-live")) return response(experiment);
       if (url.includes("/runs?experiment_id=exp-live")) return response(runs);
@@ -121,7 +121,7 @@ describe("experiment live queue", () => {
     }));
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
-      if (url.endsWith("/health")) return response({ name: "AgentBench Desktop", version: "5.4.1" });
+      if (url.endsWith("/health")) return response({ name: "AgentBench Desktop", version: "5.5.0" });
       if (url.endsWith("/experiments/exp-live/start")) return response({ ...pausedExperiment, status: "running" });
       if (url.includes("/experiments/exp-live")) return response(pausedExperiment);
       if (url.includes("/runs?experiment_id=exp-live")) return response(pausedRuns);

@@ -1,0 +1,58 @@
+@layer reset, components, design;
+@import "./components.css" layer(components);
+@import "./workspace.css" layer(design);
+
+@layer reset {
+  :root {
+    --paper: #f5f3ed;
+    --surface: #fdfcf8;
+    --wash: #eeece4;
+    --line: #dcdad0;
+    --line-strong: #c8c6bb;
+    --ink: #262822;
+    --muted: #6e7167;
+    --accent: #c8402b;
+    --accent-wash: #f8e9e1;
+    --green: #426b54;
+    --green-wash: #e9efe8;
+    --amber: #856329;
+    --amber-wash: #f4eddc;
+    --font: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei", sans-serif;
+    --mono: "Cascadia Code", Consolas, monospace;
+    --radius: 5px;
+    --v4-sidebar: 218px;
+    --v4-topbar: 62px;
+    /* Compatibility aliases for component geometry and inline chart styles. */
+    --font-mono: var(--mono);
+    --v4-font: var(--font);
+    --v4-sans: var(--font);
+    --v4-serif: var(--font);
+    --v4-mono: var(--mono);
+    --v4-radius: 5px;
+    --ab53-radius: 5px;
+    --ab53-radius-lg: 5px;
+    --violet: var(--accent);
+    --ab-acid: var(--accent);
+    --v4-purple: var(--accent);
+    --v4-teal: var(--green);
+    --v4-red: var(--accent);
+    --ab-font: var(--font);
+    --ab-brand: var(--accent);
+    --ab-brand-soft: var(--accent-wash);
+    --ab-radius-lg: 5px;
+    color-scheme: light;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+  }
+  * { box-sizing: border-box; }
+  html, body, #root { margin: 0; width: 100%; height: 100%; min-width: 0; }
+  body { color: var(--ink); background: var(--paper); font: 14px/1.6 var(--font); }
+  h1,h2,h3,h4,p { margin: 0; }
+  button,input,select,textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; border: 0; background: transparent; }
+  button,a { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+  a { color: inherit; text-decoration: none; }
+  svg { flex-shrink: 0; vertical-align: middle; }
+  code,pre,kbd,time { font-family: var(--mono); }
+  ::selection { background: #efd5c5; }
+}

@@ -2861,8 +2861,8 @@ def build_ultra_catalog() -> list[dict[str, Any]]:
 
 
 BACKEND_ULTRA_BUNDLE_ID = "backend-ultra-extreme"
-BACKEND_ULTRA_BUNDLE_VERSION = "1.3.0"
-BACKEND_ULTRA_MANIFEST_SHA256 = "1293591e737a73630917741b5deb5cd37036f5e01391580359b17e122ce092da"
+BACKEND_ULTRA_BUNDLE_VERSION = "1.4.0"
+BACKEND_ULTRA_MANIFEST_SHA256 = "7ac7bade14f7307d24f083a3e308ec6e0459254f2e720b59335ac64677fb4f06"
 
 
 def build_backend_ultra_catalog() -> list[dict[str, Any]]:
@@ -3196,6 +3196,8 @@ def seed_builtin_data(database: Database) -> None:
         + frontend_cases
         + six_dimension_cases
     )
+    from .frontier_v5 import optimize_case
+    cases = [optimize_case(item) if item['slug'] in SUITE_CASE_SLUGS else item for item in cases]
     for definition in cases:
         case_id = stable_id("case", f"{definition['slug']}@{definition['version']}")
         case_ids.append(case_id)

@@ -1,6 +1,6 @@
 export interface RadarDatum {
   label: string;
-  value: number;
+  value: number | null;
 }
 
 export const RADAR_SIZE = 300;
@@ -32,7 +32,7 @@ export default function RadarChart({ data, ariaLabel }: { data: RadarDatum[]; ar
   const total = data.length;
   const gridRatios = [1 / 3, 2 / 3, 1];
   const dataPoints = data.map((datum, index) =>
-    radarPoint(index, total, Math.max(0, Math.min(100, datum.value)) / 100),
+    datum.value == null ? null : radarPoint(index, total, Math.max(0, Math.min(100, datum.value)) / 100),
   );
   return (
     <svg
@@ -61,9 +61,10 @@ export default function RadarChart({ data, ariaLabel }: { data: RadarDatum[]; ar
           />
         );
       })}
-      <polygon className="radar-data" points={toPoints(dataPoints)} />
+      <title>{data.map(datum => `${datum.label}：${datum.value == null ? "待评分" : datum.value.toFixed(1)}`).join("；")}</title>
+      {dataPoints.every(point => point !== null) && <polygon className="radar-data" points={toPoints(dataPoints)} />}
       {dataPoints.map((point, index) => (
-        <circle key={index} className="radar-vertex" cx={point.x} cy={point.y} r={3.2} />
+        point && <circle key={index} className="radar-vertex" cx={point.x} cy={point.y} r={3.2} />
       ))}
       {data.map((datum, index) => {
         const label = radarPoint(index, total, 1.2);

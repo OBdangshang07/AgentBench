@@ -749,6 +749,26 @@ class EvaluationService:
         if existing:
             return existing
         seed_hex = secure_random.token_hex(32)
+        if (definition.get('metadata') or {}).get('validation_pairing') == 'experiment-case-repetition/v1':
+            # Both models see identical hidden cases. Keep the seed private and
+            # reuse it only inside this explicitly paired experiment/repetition.
+            with self._state_lock:
+                peer = self.database.fetch_one(
+                    'SELECT s.seed_hex FROM run_validation_seeds s JOIN runs p ON p.id=s.run_id '
+                    'JOIN runs r ON r.id=? WHERE p.experiment_id=r.experiment_id '
+                    'AND p.test_revision_id=r.test_revision_id AND p.repetition=r.repetition LIMIT 1',
+                    (run_id,),
+                )
+                if peer:
+                    seed_hex = peer['seed_hex']
+                commitment = hashlib.sha256(bytes.fromhex(seed_hex)).hexdigest()
+                self.database.execute(
+                    'INSERT OR IGNORE INTO run_validation_seeds(run_id,seed_hex,commitment_sha256,created_at) VALUES (?,?,?,?)',
+                    (run_id, seed_hex, commitment, utc_now()),
+                )
+                return self.database.fetch_one(
+                    'SELECT seed_hex,commitment_sha256,revealed_at FROM run_validation_seeds WHERE run_id=?', (run_id,),
+                )
         commitment = hashlib.sha256(bytes.fromhex(seed_hex)).hexdigest()
         self.database.execute(
             "INSERT OR IGNORE INTO run_validation_seeds("
@@ -4567,7 +4587,7 @@ class EvaluationService:
                     requested_effort,
                     int(value.strict_fairness),
                     value.judge_reasoning_effort,
-                    "5.4.1",
+                    __version__,
                     now,
                 ),
             )
@@ -4755,7 +4775,7 @@ class EvaluationService:
             for item in metadata
             if item.get("capability_dimension")
         }
-        if len(capability_dimensions) == 6:
+        if len(capability_dimensions) >= 2 and all(item.get('capability_dimension') for item in metadata):
             return {
                 "kind": "six-dimension",
                 "capability_report": True,

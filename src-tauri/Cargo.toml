@@ -1,6 +1,6 @@
 [package]
 name = "agentbench-desktop"
-version = "5.4.1"
+version = "5.5.0"
 description = "Local AI Agent evaluation desktop client"
 authors = ["AgentBench"]
 edition = "2021"

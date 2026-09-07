@@ -6,8 +6,7 @@ import {
   Boxes,
   CheckCheck,
   ChevronRight,
-  ChevronsLeft,
-  ChevronsRight,
+  Menu,
   CircleGauge,
   Command,
   FolderKanban,
@@ -28,7 +27,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
-import agentbenchMark from "../assets/agentbench-mark.png";
+import { APP_VERSION } from "../lib/api";
 import { useWorkspaceUx } from "../components/WorkspaceUx";
 import { useApi } from "../lib/useApi";
 import type { SystemStatus } from "../types";
@@ -43,16 +42,16 @@ interface NavigationItem {
 }
 
 const workspaceNavigation: NavigationItem[] = [
-  { to: "/", label: "首页", icon: CircleGauge, end: true },
-  { to: "/studio", label: "Agent", icon: Sparkles },
+  { to: "/", label: "工作台", icon: CircleGauge, end: true },
+  { to: "/studio", label: "Agent 会话", icon: Sparkles },
   { to: "/projects", label: "项目", icon: FolderKanban },
   { to: "/tasks", label: "任务", icon: ListTodo },
   { to: "/flows", label: "工作流", icon: GitFork },
 ];
 
 const benchmarkNavigation: NavigationItem[] = [
-  { to: "/benchmarks", label: "评测首页", icon: FlaskConical },
-  { to: "/library", label: "测试与套件", icon: Boxes },
+  { to: "/benchmarks", label: "评测中心", icon: FlaskConical },
+  { to: "/library", label: "测试套件", icon: Boxes },
   { to: "/experiments", label: "运行记录", icon: Activity, aliases: ["/runs"] },
   { to: "/leaderboard", label: "排行与报告", icon: CircleGauge, aliases: ["/profiles"] },
 ];
@@ -71,10 +70,10 @@ const quickActions = [
 ];
 
 const pageNames: Array<[RegExp, string]> = [
-  [/^\/$/, "首页"],
+  [/^\/$/, "工作台"],
   [/^\/projects/, "项目"],
-  [/^\/studio/, "Agent"],
-  [/^\/flows/, "自动化 Flow"],
+  [/^\/studio/, "Agent 会话"],
+  [/^\/flows/, "工作流"],
   [/^\/tasks/, "任务"],
   [/^\/tools/, "工具与 MCP"],
   [/^\/models/, "模型与 Agent"],
@@ -85,9 +84,8 @@ const pageNames: Array<[RegExp, string]> = [
 function Brand() {
   return (
     <Link className="v4-brand" to="/" aria-label="AgentBench 控制中心">
-      <span className="v4-brand-mark"><img src={agentbenchMark} alt="" /></span>
-      <span><strong>AgentBench</strong><small>本地 Agent 工作台</small></span>
-      <em>5.4</em>
+      <span className="v4-brand-mark" aria-hidden="true">A</span>
+      <span><strong>AgentBench</strong><small>LOCAL WORKSPACE</small></span>
     </Link>
   );
 }
@@ -116,7 +114,7 @@ export default function V4Layout() {
   const { data: projects } = useApi<Project[]>("/projects", 10_000);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.localStorage.getItem("agentbench.workspace.sidebar.v2") === "collapsed");
+  const [navigationOpen, setNavigationOpen] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(() => window.localStorage.getItem("agentbench.v5.onboarding.done") !== "1");
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
@@ -154,6 +152,7 @@ export default function V4Layout() {
       if (event.key === "Escape") {
         setPaletteOpen(false);
         setNotificationsOpen(false);
+        setNavigationOpen(false);
       }
     }
     window.addEventListener("keydown", handleKeyboard);
@@ -161,9 +160,8 @@ export default function V4Layout() {
   }, []);
 
   useEffect(() => {
-    window.localStorage.setItem("agentbench.workspace.sidebar.v1", sidebarCollapsed ? "collapsed" : "expanded");
-    window.localStorage.setItem("agentbench.workspace.sidebar.v2", sidebarCollapsed ? "collapsed" : "expanded");
-  }, [sidebarCollapsed]);
+    setNavigationOpen(false);
+  }, [location.pathname, location.search]);
 
   useEffect(() => {
     if (!projects?.length) return;
@@ -210,43 +208,39 @@ export default function V4Layout() {
   };
 
   return (
-    <div className={`v4-shell ab-app-shell ab-language-agent-desktop density-${ux.density} ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${location.pathname.startsWith("/studio") ? "studio-route" : ""}`}>
-      <aside className="v4-sidebar ab-app-rail ab-agent-sidebar">
+    <div className={`v4-shell density-${ux.density} ${navigationOpen ? "navigation-open" : ""} ${location.pathname.startsWith("/studio") ? "studio-route" : ""}`}>
+      {navigationOpen && <button className="fn-nav-backdrop" aria-label="关闭主导航" onClick={() => setNavigationOpen(false)} />}
+      <aside id="main-navigation" className="v4-sidebar" aria-label="主导航">
         <Brand />
-        <Link className="ab-new-agent-task" to="/studio?new=1" title="新建 Agent 任务" aria-label="新建 Agent 任务"><Sparkles size={17} /><span>新建 Agent 任务</span></Link>
-        <button className="v5-shell-collapse" type="button" aria-label={sidebarCollapsed ? "展开主导航" : "收起主导航"} title={sidebarCollapsed ? "展开主导航" : "收起主导航"} onClick={() => setSidebarCollapsed((value) => !value)}>{sidebarCollapsed ? <ChevronsRight size={16} /> : <ChevronsLeft size={16} />}<span>{sidebarCollapsed ? "展开" : "收起导航"}</span></button>
+        <label className="fn-workspace-select"><FolderKanban size={16} /><select aria-label="当前工作项目" value={selectedProject?.id ?? ""} onChange={(event) => ux.setSelectedProjectId(event.target.value)}>{projects?.length ? projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>) : <option value="">本地工作区</option>}</select></label>
         <div className="v4-nav-scroll">
           <NavigationGroup label="工作区" items={workspaceNavigation} pathname={location.pathname} />
           <NavigationGroup label="能力评测" items={benchmarkNavigation} pathname={location.pathname} />
-          <NavigationGroup label="资源与设置" items={resourceNavigation} pathname={location.pathname} />
+          <NavigationGroup label="资源管理" items={resourceNavigation} pathname={location.pathname} />
         </div>
         <section className={`v4-runtime-card ${runtime.tone}`}>
-          <header><strong>本地运行环境</strong><span><i />{runtime.label}</span></header>
-          <div><span>可用 Agent</span><b>{installed} / {runners.length || "—"}</b></div>
-          <div><span>运行中会话</span><b>{dashboard?.active_sessions ?? 0}</b></div>
-          <div className="v4-runtime-bar"><i style={{ width: `${runners.length ? Math.round(installed / runners.length * 100) : 0}%` }} /></div>
-          <Link to="/models">检查与配置</Link>
+          <header><span><i />{runtime.label}</span><Link to="/models">检查环境</Link></header>
+          <small>AGENTBENCH / {APP_VERSION}</small>
         </section>
       </aside>
 
-      <header className="v4-topbar ab-app-header ab-agent-toolbar">
-        <div className="v4-breadcrumb"><span>工作台</span><ChevronRight size={13} /><strong>{title}</strong>{projects?.length ? <label className="v5-project-switcher" title={selectedProject?.root_path}><FolderKanban size={14} /><select aria-label="当前工作项目" value={selectedProject?.id ?? ""} onChange={(event) => ux.setSelectedProjectId(event.target.value)}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label> : null}</div>
+      <header className="v4-topbar">
+        <button className="fn-mobile-menu icon-button" type="button" aria-label="打开主导航" aria-controls="main-navigation" aria-expanded={navigationOpen} onClick={() => setNavigationOpen((value) => !value)}><Menu size={18} /></button>
+        <div className="v4-breadcrumb"><span>本地工作区</span><ChevronRight size={13} /><strong>{title}</strong></div>
         <div className="v4-top-actions">
           <button className="v4-command-trigger" type="button" onClick={() => setPaletteOpen(true)}><Search size={15} /><span>搜索或新建</span><kbd>Ctrl K</kbd></button>
           {(dashboard?.pending_approvals ?? 0) > 0 && <Link className="v5-approval-chip" to="/"><ShieldAlert size={15} /><span>{dashboard?.pending_approvals} 个操作等待审批</span></Link>}
-          <Link className="v4-live-chip" to="/studio"><Activity size={15} /><span>{dashboard?.active_sessions ?? 0} 个会话运行中</span></Link>
-          <button className="v5-density-toggle" type="button" title={`切换为${ux.density === "comfortable" ? "紧凑" : "舒适"}密度`} onClick={() => ux.setDensity(ux.density === "comfortable" ? "compact" : "comfortable")}><Boxes size={16} /><span>{ux.density === "comfortable" ? "舒适" : "紧凑"}</span></button>
           <button className="v5-help-trigger" type="button" title="打开入门向导" aria-label="打开入门向导" onClick={() => setOnboardingOpen(true)}><HelpCircle size={17} /></button>
           <button className={`v5-notification-trigger ${ux.unreadCount ? "unread" : ""}`} type="button" aria-label={`通知中心，${ux.unreadCount} 条未读`} onClick={() => { const opening = !notificationsOpen; setNotificationsOpen(opening); if (opening) ux.markNotificationsRead(); }}><Bell size={17} />{ux.unreadCount > 0 && <b>{Math.min(99, ux.unreadCount)}</b>}</button>
         </div>
       </header>
 
-      <main className="v4-viewport ab-app-main"><Outlet /></main>
+      <main className="v4-viewport"><Outlet /></main>
 
       {paletteOpen && (
         <div className="v4-palette-backdrop" onMouseDown={() => setPaletteOpen(false)}>
-          <section className="v4-palette" onMouseDown={(event) => event.stopPropagation()}>
-            <header><Search size={18} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="输入页面、项目或命令…" /><button type="button" onClick={() => setPaletteOpen(false)}><X size={16} /></button></header>
+          <section className="v4-palette" role="dialog" aria-modal="true" aria-label="搜索工作区" onMouseDown={(event) => event.stopPropagation()}>
+            <header><Search size={18} /><input aria-label="搜索页面、项目或命令" autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="输入页面、项目或命令…" /><button type="button" aria-label="关闭搜索" onClick={() => setPaletteOpen(false)}><X size={16} /></button></header>
             {!!visibleActions.length && <label>立即执行</label>}
             {!!visibleActions.length && <div className="v5-command-actions">{visibleActions.map(({ to, label, detail, icon: Icon }) => <Link key={to} to={to} onClick={() => setPaletteOpen(false)}><span><Icon size={16} /></span><div><strong>{label}</strong><small>{detail}</small></div><ArrowRight size={14} /></Link>)}</div>}
             <label>{query.trim() ? "页面与命令" : "快速前往"}</label>
@@ -273,7 +267,7 @@ export default function V4Layout() {
                 {searchError && <div className="v5-palette-state error">搜索失败：{searchError}</div>}
               </div>
             )}
-            <footer><Command size={13} /> 数据仅保存在本机 · Desktop {status?.version ?? "5.4.1"}</footer>
+            <footer><Command size={13} /> 数据仅保存在本机 · Desktop {status?.version ?? APP_VERSION}</footer>
           </section>
         </div>
       )}

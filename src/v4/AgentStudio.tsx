@@ -181,18 +181,18 @@ interface StudioLayoutState {
   dockHeight: number;
 }
 
-const studioLayoutKey = "agentbench.studio.layout.v2";
+const studioLayoutKey = "agentbench.studio.layout.v3";
 
 function initialStudioLayout(): StudioLayoutState {
-  const defaults = { left: true, right: false, dock: false, dockExpanded: false, leftWidth: 286, rightWidth: 520, dockHeight: 246 };
+  const defaults = { left: window.innerWidth > 600, right: window.innerWidth > 1250, dock: window.innerWidth > 1250, dockExpanded: false, leftWidth: 224, rightWidth: 300, dockHeight: 246 };
   try {
     const stored = window.localStorage.getItem(studioLayoutKey);
     if (stored) {
       const value = { ...defaults, ...JSON.parse(stored) };
       return {
         ...value,
-        leftWidth: Math.max(210, Math.min(420, Number(value.leftWidth) || defaults.leftWidth)),
-        rightWidth: Math.max(380, Math.min(760, Number(value.rightWidth) || defaults.rightWidth)),
+        leftWidth: Math.max(180, Math.min(360, Number(value.leftWidth) || defaults.leftWidth)),
+        rightWidth: Math.max(260, Math.min(620, Number(value.rightWidth) || defaults.rightWidth)),
         dockHeight: Math.max(180, Math.min(520, Number(value.dockHeight) || defaults.dockHeight)),
       };
     }
@@ -625,8 +625,8 @@ export default function AgentStudio() {
       const resize = resizeRef.current;
       if (!resize) return;
       setStudioLayout((current) => {
-        if (resize.kind === "left") return { ...current, leftWidth: Math.max(210, Math.min(420, resize.value + event.clientX - resize.x)) };
-        if (resize.kind === "right") return { ...current, rightWidth: Math.max(380, Math.min(760, resize.value - event.clientX + resize.x)) };
+        if (resize.kind === "left") return { ...current, leftWidth: Math.max(180, Math.min(360, resize.value + event.clientX - resize.x)) };
+        if (resize.kind === "right") return { ...current, rightWidth: Math.max(260, Math.min(620, resize.value - event.clientX + resize.x)) };
         return { ...current, dockHeight: Math.max(180, Math.min(520, resize.value - event.clientY + resize.y)), dockExpanded: false };
       });
     }
@@ -655,9 +655,9 @@ export default function AgentStudio() {
     const direction = ["ArrowRight", "ArrowDown"].includes(key) ? 1 : ["ArrowLeft", "ArrowUp"].includes(key) ? -1 : 0;
     if (!direction) return;
     setStudioLayout((current) => kind === "left"
-      ? { ...current, leftWidth: Math.max(210, Math.min(420, current.leftWidth + direction * 16)) }
+      ? { ...current, leftWidth: Math.max(180, Math.min(360, current.leftWidth + direction * 16)) }
       : kind === "right"
-        ? { ...current, rightWidth: Math.max(380, Math.min(760, current.rightWidth - direction * 16)) }
+        ? { ...current, rightWidth: Math.max(260, Math.min(620, current.rightWidth - direction * 16)) }
         : { ...current, dockHeight: Math.max(180, Math.min(520, current.dockHeight - direction * 16)), dockExpanded: false });
   }
 
@@ -1517,8 +1517,9 @@ export default function AgentStudio() {
     <div className={`v4-studio-workbench ab-studio-shell ${isChat ? "chat-mode" : ""} ${studioLayout.left ? "" : "left-collapsed"} ${studioLayout.right && !isChat ? "" : "right-collapsed"} ${studioLayout.dock && !isChat ? "" : "dock-collapsed"} ${studioLayout.dockExpanded && !isChat ? "dock-expanded" : ""} ${resizing ? `resizing-${resizing}` : ""}`} style={{ "--studio-left": studioLayout.left ? `${studioLayout.leftWidth}px` : "0px", "--studio-right": studioLayout.right && !isChat ? `${studioLayout.rightWidth}px` : "0px", "--studio-dock": !studioLayout.dock || isChat ? "45px" : studioLayout.dockExpanded ? "min(54vh, 540px)" : `${studioLayout.dockHeight}px` } as CSSProperties}>
       {draggingFiles && <div className="v5-studio-dropzone"><Upload size={28} /><strong>放下即可附加到当前会话</strong><span>图片和文件最多 10 个，单个最大 50 MB</span></div>}
       <aside className="v4-studio-rail ab-session-sidebar">
+        <button className="fn-studio-sidebar-close" type="button" aria-label="关闭会话侧栏" onClick={() => setStudioLayout((current) => ({ ...current, left: false }))}><X size={16} />关闭侧栏</button>
         <Link className="v54-studio-app-back" to="/"><ArrowLeft size={14} /><span>AgentBench 工作区</span></Link>
-        <header>{detail ? <><span className="v4-project-logo">{detail.project_name.slice(0, 2).toUpperCase()}</span><div><strong>{detail.project_name}</strong><small title={isChat ? "无工作区" : detail.workspace_path}>{isChat ? <MessageSquarePlus size={11} /> : <GitBranch size={11} />} {isChat ? "无工作区 · 隔离对话" : detail.workspace_path}</small></div></> : <span>加载会话…</span>}</header>
+        <header>{detail ? <><span className="v4-project-logo">{detail.project_name.slice(0, 2).toUpperCase()}</span><div><strong>{detail.project_name}</strong><small title={isChat ? "无工作区" : detail.workspace_path}>{isChat ? <MessageSquarePlus size={11} /> : <GitBranch size={11} />} {isChat ? "无工作区 · 隔离对话" : detail.workspace_path}</small></div></> : <span>{loading ? "加载会话…" : "Agent 会话"}</span>}</header>
         <button className="v5-new-session-primary" type="button" onClick={() => openCreate()}><Plus size={15} />新建会话</button>
         <div className="v4-rail-tabs v5-studio-nav-tabs"><button className={railMode === "sessions" ? "active" : ""} type="button" onClick={() => setRailMode("sessions")}><Bot size={13} />会话</button>{!isChat && <><button className={railMode === "files" ? "active" : ""} type="button" onClick={() => setRailMode("files")}><Folder size={13} />文件</button><button className={railMode === "search" ? "active" : ""} type="button" onClick={() => setRailMode("search")}><Search size={13} />搜索</button></>}</div>
         {railMode === "sessions" ? (
@@ -1621,7 +1622,7 @@ export default function AgentStudio() {
           <button type="button" className={studioLayout.dock && dock === "file" ? "active" : ""} onClick={() => { setDock("file"); setStudioLayout((current) => ({ ...current, dock: true, right: true })); }}><Code2 size={14} />文件</button>
           <button type="button" className={studioLayout.dock && dock === "changes" ? "active" : ""} onClick={() => { setDock("changes"); setStudioLayout((current) => ({ ...current, dock: true, right: true })); }}><FileDiff size={14} />变更 <b>{detail?.file_changes.length ?? 0}</b></button>
           <span className="v4-dock-summary">{dock === "browser" && browserStatus?.running ? "VISIBLE BROWSER · 用户可随时接管" : terminal?.running ? "TERMINAL LIVE · 点击终端区域直接输入" : `${processEvents.length} 个可读步骤 · ${collapsedEventCount} 条底层事件已折叠`}</span>
-          {studioLayout.dock && <button className="v4-dock-toggle icon" type="button" aria-label={studioLayout.dockExpanded ? "恢复底部面板高度" : "展开底部面板高度"} title={studioLayout.dockExpanded ? "恢复普通高度" : "展开工作区域"} onClick={() => setStudioLayout((current) => ({ ...current, dockExpanded: !current.dockExpanded }))}>{studioLayout.dockExpanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>}
+          {studioLayout.dock && <button className="v4-dock-toggle icon" type="button" aria-label={studioLayout.dockExpanded ? "恢复会话布局" : "展开工具工作台"} title={studioLayout.dockExpanded ? "恢复普通高度" : "展开工作区域"} onClick={() => setStudioLayout((current) => ({ ...current, dockExpanded: !current.dockExpanded }))}>{studioLayout.dockExpanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>}
           <button className="v4-dock-toggle" type="button" aria-label="关闭工具工作台" title="关闭工具工作台 · Ctrl J" onClick={() => setStudioLayout((current) => ({ ...current, dock: false, right: false, dockExpanded: false }))}><X size={16} />关闭</button>
         </nav>
         {studioLayout.dock && dock === "activity" && <div className="v5-workbench-activity"><section className="v5-workbench-session"><div className="v4-agent-profile"><span>{detail?.runner_name?.slice(0, 2).toUpperCase()}</span><div><strong>{detail?.runner_name}</strong><small>{detail?.model_name} · {statusLabels[detail?.status ?? ""]}</small></div></div><dl className="v4-telemetry"><div><dt>Token</dt><dd>{quotaTokens.toLocaleString()}</dd></div><div><dt>费用</dt><dd>${quotaCost.toFixed(3)}</dd></div><div><dt>用时</dt><dd>{duration(detail?.duration_ms ?? 0)}</dd></div><div><dt>变更</dt><dd>{detail?.file_changes.length ?? 0}</dd></div></dl></section><section className="v4-terminal"><header><span>完整活动记录</span><small>用于排错和审计；对话中只显示可读摘要</small></header>{processEvents.slice(-40).map((event) => <div key={event.seq}><time>{time(event.created_at)}</time><span>{eventTitle(event)}</span></div>)}{!processEvents.length && <span>等待 Agent 活动…</span>}</section><footer className="v5-session-actions"><button type="button" onClick={() => void forkSession()} disabled={!detail}><GitFork size={14} />创建分支</button><button type="button" onClick={exportSession} disabled={!detail}><Download size={14} />导出</button>{retryableTurn && <button type="button" onClick={() => void retryLastTurn()} disabled={sending}><RefreshCw size={14} />重试</button>}<button className="danger" type="button" onClick={() => void archiveSession()} disabled={!detail || activeStatuses.has(detail?.status ?? "")}><Archive size={14} />归档</button></footer></div>}

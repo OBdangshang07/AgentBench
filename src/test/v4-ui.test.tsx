@@ -5,7 +5,7 @@ import App from "../App";
 import { useWorkspaceUx, WorkspaceUxProvider } from "../components/WorkspaceUx";
 
 const systemStatus = {
-  version: "5.4.1",
+  version: "5.5.0",
   data_dir: "C:/AgentBench",
   database: { path: "C:/AgentBench/agentbench.db", ready: true },
   docker: { installed: true, available: true, executable: "docker" },
@@ -111,7 +111,7 @@ describe("AgentBench V4 application shell", () => {
   it("renders the real Agent operations navigation and control center", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.4.1" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.0" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       return json([]);
@@ -119,10 +119,10 @@ describe("AgentBench V4 application shell", () => {
 
     render(<MemoryRouter initialEntries={["/"]}><App /></MemoryRouter>);
 
-    expect(await screen.findByRole("heading", { name: "今天要做什么？" }, { timeout: 5_000 })).toBeInTheDocument();
-    expect(screen.getByText("Agent")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "工作台" }, { timeout: 5_000 })).toBeInTheDocument();
+    expect(screen.getByText("Agent 会话")).toBeInTheDocument();
     expect(screen.getAllByText("能力评测").length).toBeGreaterThan(0);
-    expect(screen.getByText("资源与设置")).toBeInTheDocument();
+    expect(screen.getByText("资源管理")).toBeInTheDocument();
     expect(screen.getByText("Agent 与模型")).toBeInTheDocument();
     expect(screen.getByText("工具与 MCP")).toBeInTheDocument();
     expect(screen.getByText("设置")).toBeInTheDocument();
@@ -136,7 +136,7 @@ describe("AgentBench V4 application shell", () => {
     let posted: Record<string, unknown> | null = null;
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.4.1" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.0" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       if (url.endsWith("/runners")) return json([runner]);
@@ -166,10 +166,10 @@ describe("AgentBench V4 application shell", () => {
     });
   });
 
-  it("persists workspace density, collapses navigation, runs commands and keeps notifications", async () => {
+  it("opens and dismisses mobile navigation, runs commands and keeps notifications", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.4.1" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.0" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       if (url.endsWith("/projects")) return json([{ id: "project-1", name: "AgentBench", root_path: "D:/AgentBench" }]);
@@ -178,15 +178,12 @@ describe("AgentBench V4 application shell", () => {
 
     render(<WorkspaceUxProvider><NotificationSeed /><MemoryRouter initialEntries={["/"]}><App /></MemoryRouter></WorkspaceUxProvider>);
 
-    const shell = (await screen.findByRole("heading", { name: "今天要做什么？" })).closest(".v4-shell");
-    fireEvent.click(screen.getByRole("button", { name: "收起主导航" }));
-    expect(shell).toHaveClass("sidebar-collapsed");
-    expect(window.localStorage.getItem("agentbench.workspace.sidebar.v1")).toBe("collapsed");
-
-    fireEvent.click(screen.getByTitle("切换为紧凑密度"));
-    await waitFor(() => expect(document.documentElement.dataset.agentbenchDensity).toBe("compact"));
-    expect(window.localStorage.getItem("agentbench.workspace.density.v1")).toBe("compact");
-
+    const shell = (await screen.findByRole("heading", { name: "工作台" })).closest(".v4-shell");
+    fireEvent.click(screen.getByRole("button", { name: "打开主导航" }));
+    expect(shell).toHaveClass("navigation-open");
+    expect(screen.getByRole("button", { name: "打开主导航" })).toHaveAttribute("aria-expanded", "true");
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(shell).not.toHaveClass("navigation-open");
     fireEvent.click(screen.getByRole("button", { name: "生成通知" }));
     fireEvent.click(screen.getByRole("button", { name: /通知中心，1 条未读/ }));
     expect(screen.getByRole("complementary", { name: "通知中心" })).toHaveTextContent("任务已完成");
@@ -202,7 +199,7 @@ describe("AgentBench V4 application shell", () => {
     let acceptanceUpdate: Record<string, unknown> | null = null;
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.4.1" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.0" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       if (url.endsWith("/projects")) return json([{ id: "project-1", name: "AgentBench", root_path: "D:/AgentBench" }]);
@@ -248,7 +245,7 @@ describe("AgentBench V4 application shell", () => {
     const secondTask = { ...task, id: "task-2", title: "验证批量操作", priority: "normal" as const };
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.4.1" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.0" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       if (url.endsWith("/projects")) return json([{ id: "project-1", name: "AgentBench", root_path: "D:/AgentBench" }]);

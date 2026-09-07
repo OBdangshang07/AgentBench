@@ -212,8 +212,8 @@ export default function AgentFlow() {
   const [panning, setPanning] = useState(false);
   const [connectingFrom, setConnectingFrom] = useState<string>();
   const [connectionPointer, setConnectionPointer] = useState({ x: 0, y: 0 });
-  const [libraryOpen, setLibraryOpen] = useState(() => window.localStorage.getItem("agentbench.flow.library") !== "closed");
-  const [inspectorOpen, setInspectorOpen] = useState(() => window.localStorage.getItem("agentbench.flow.inspector") !== "closed");
+  const [libraryOpen, setLibraryOpen] = useState(() => window.innerWidth > 820 && window.localStorage.getItem("agentbench.flow.library") !== "closed");
+  const [inspectorOpen, setInspectorOpen] = useState(() => window.innerWidth > 1100 && window.localStorage.getItem("agentbench.flow.inspector") !== "closed");
   const draftRevision = useRef(0);
   const loadedFlowId = useRef<string | undefined>(undefined);
   const panStart = useRef({ x: 0, y: 0, left: 0, top: 0 });
@@ -814,7 +814,7 @@ export default function AgentFlow() {
   return (
     <div className={`v4-flow-workbench ${libraryOpen ? "library-open" : "library-closed"} ${inspectorOpen ? "inspector-open" : "inspector-closed"}`}>
       {libraryOpen && <aside className="v4-flow-library">
-        <header><strong>节点库</strong><small>点击添加到画布</small></header>
+        <header><strong>节点库</strong><button className="icon-button" type="button" aria-label="关闭节点库" onClick={() => setLibraryOpen(false)}><PanelLeftClose size={16} /></button></header>
         {libraryGroups.map((group) => (
           <section key={group.label}>
             <label>{group.label}</label>
@@ -866,7 +866,7 @@ export default function AgentFlow() {
                 draggable={!active && !connectingFrom}
                 className={`v4-flow-node ${node.node_type} ${node.status} ${node.id === selectedNodeId ? "selected" : ""}`}
                 style={{ left: node.position_x, top: node.position_y }}
-                onClick={(event) => { event.stopPropagation(); setSelectedNodeId(node.id); setInspectorTab("edit"); }}
+                onClick={(event) => { event.stopPropagation(); setSelectedNodeId(node.id); setInspectorTab("edit"); setInspectorOpen(true); }}
                 onDragEnd={(event) => moveNode(event, node)}
               >
                 <button
@@ -908,7 +908,7 @@ export default function AgentFlow() {
       </section>
 
       {inspectorOpen && <aside className="v4-flow-inspector">
-        <header><strong>{inspectorTab === "validation" ? "静态验证" : inspectorTab === "history" ? "版本与运行" : selectedNode ? "节点设置" : "流程设置"}</strong><small>{selectedNode ? selectedNode.node_type.toUpperCase() : selected ? "FLOW SELECTED" : "NO SELECTION"}</small></header>
+        <header><strong>{inspectorTab === "validation" ? "静态验证" : inspectorTab === "history" ? "版本与运行" : selectedNode ? "节点设置" : "流程设置"}</strong><small>{selectedNode ? selectedNode.node_type.toUpperCase() : selected ? "FLOW SELECTED" : "NO SELECTION"}</small><button className="icon-button" type="button" aria-label="关闭检查器" onClick={() => setInspectorOpen(false)}><PanelRightClose size={16} /></button></header>
         <section className="v4-flow-selector"><label>已有工作流</label>{flows?.map((flow) => <button className={flow.id === selectedId ? "active" : ""} key={flow.id} type="button" onClick={() => void switchFlow(flow.id)}><GitFork size={14} /><span><strong>{flow.name}</strong><small>{flow.node_count} 个节点 · {flow.project_name || "跨项目"}</small></span></button>)}</section>
         {draft && <nav className="v5-flow-inspector-tabs"><button className={inspectorTab === "edit" ? "active" : ""} type="button" onClick={() => setInspectorTab("edit")}><Wrench size={13} />编辑</button><button className={inspectorTab === "validation" ? "active" : ""} type="button" onClick={() => setInspectorTab("validation")}><ListChecks size={13} />验证</button><button className={inspectorTab === "history" ? "active" : ""} type="button" onClick={() => setInspectorTab("history")}><History size={13} />历史</button></nav>}
         {inspectorTab === "validation" && draft ? (

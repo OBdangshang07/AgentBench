@@ -42,12 +42,12 @@ def test_health_and_catalog_api(settings):
     with TestClient(create_app(settings)) as client:
         health = client.get("/api/v1/health")
         assert health.status_code == 200
-        assert health.json()["version"] == "5.4.1"
+        assert health.json()["version"] == "5.5.0"
         cases = client.get("/api/v1/test-cases").json()
         # Existing catalog plus both built-in 2025 Math I tracks and the five
         # new six-dimension-only frontend/research cases. The API must expose
         # the complete bundled benchmark without a user-side import.
-        assert len(cases) == 298
+        assert len(cases) == 299
         assert {item["difficulty"] for item in cases} == {1, 2, 3, 4, 5, 6}
         assert any(item["requires_docker"] for item in cases)
         assert any(item["requires_judge"] for item in cases)

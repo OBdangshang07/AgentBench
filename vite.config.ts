@@ -18,7 +18,7 @@ export default defineConfig({
         }
       : undefined,
     watch: {
-      ignored: ["**/src-tauri/**", "**/backend/**"],
+      ignored: ["**/src-tauri/**", "**/backend/**", "**/tmp/**", "**/reports/**", "**/videos/**", "**/design-demo/**", "**/.*/**"],
     },
   },
 });

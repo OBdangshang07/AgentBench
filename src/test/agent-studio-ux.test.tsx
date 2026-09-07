@@ -153,7 +153,7 @@ function installApiMock(
   });
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = String(input);
-    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.4.1" });
+    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.0" });
     if (url.endsWith("/sessions")) return json([currentSession]);
     if (url.endsWith("/sessions/session-1") && init?.method === "PATCH") return json({ ...currentDetail, ...JSON.parse(String(init.body)) });
     if (url.includes("/sessions/session-1?message_limit=")) return json(currentDetail);
@@ -260,19 +260,19 @@ describe("Agent Studio visual workspace controls", () => {
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes("files/search?query=read"))).toBe(true);
 
     fireEvent.keyDown(screen.getByRole("separator", { name: "调整导航侧栏宽度" }), { key: "ArrowRight" });
-    expect(container.querySelector(".v4-studio-workbench")).toHaveStyle({ "--studio-left": "302px" });
+    expect(container.querySelector(".v4-studio-workbench")).toHaveStyle({ "--studio-left": "240px" });
 
     fireEvent.click(screen.getByRole("button", { name: "收起导航侧栏" }));
 
     const workbench = container.querySelector(".v4-studio-workbench");
     expect(workbench).toHaveClass("left-collapsed", "right-collapsed", "dock-collapsed");
-    await waitFor(() => expect(JSON.parse(window.localStorage.getItem("agentbench.studio.layout.v2") ?? "{}")).toMatchObject({
+    await waitFor(() => expect(JSON.parse(window.localStorage.getItem("agentbench.studio.layout.v3") ?? "{}")).toMatchObject({
       left: false,
       right: false,
       dock: false,
       dockExpanded: false,
-      leftWidth: 302,
-      rightWidth: 520,
+      leftWidth: 240,
+      rightWidth: 300,
       dockHeight: 246,
     }));
   });
