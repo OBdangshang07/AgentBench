@@ -42,7 +42,7 @@ def test_health_and_catalog_api(settings):
     with TestClient(create_app(settings)) as client:
         health = client.get("/api/v1/health")
         assert health.status_code == 200
-        assert health.json()["version"] == "5.5.0"
+        assert health.json()["version"] == "5.5.1"
         cases = client.get("/api/v1/test-cases").json()
         # Existing catalog plus both built-in 2025 Math I tracks and the five
         # new six-dimension-only frontend/research cases. The API must expose

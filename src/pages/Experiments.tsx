@@ -34,7 +34,13 @@ export default function Experiments() {
       <div className="ab-history-intro"><div><span>本机运行记录</span><h2>所有评测</h2><p>每次运行都会固定套件版本、参测对象、运行条件和评分方式。</p></div><FlaskConical size={38} /></div>
       {state.loading ? <LoadingBlock /> : state.error || !state.data ? <ErrorBlock message={state.error ?? "读取失败"} retry={() => void state.refresh()} /> : state.data.length ? <div className="ab-experiment-list">
         <div className="ab-experiment-columns"><span>评测</span><span>参测对象</span><span>进度</span><span>得分</span><span>状态</span><span /></div>
-        {state.data.map((item) => <Link className="ab-experiment-row" to={`/experiments/${item.id}`} key={item.id}><span><strong>{item.name}</strong><small>{item.suite_name} · {formatDate(item.created_at)}</small></span><b>{item.participants.length}</b><b>{item.finished_count ?? 0} / {item.run_count ?? 0}</b><Score value={item.avg_score} /><StatusBadge status={item.status} /><ArrowRight size={14} /></Link>)}
+        {state.data.map((item) => <Link className="ab-experiment-row" to={`/experiments/${item.id}`} key={item.id}>
+          <span><strong>{item.name}</strong><small>{item.suite_name} · {formatDate(item.created_at)}</small></span>
+          <b><small className="fn-row-label">参测对象</small>{item.participants.length}</b>
+          <b><small className="fn-row-label">完成进度</small>{item.finished_count ?? 0} / {item.run_count ?? 0}</b>
+          <span><small className="fn-row-label">得分</small><Score value={item.avg_score} /></span>
+          <StatusBadge status={item.status} /><ArrowRight size={14} />
+        </Link>)}
       </div> : <div className="ab-history-empty"><FlaskConical size={24} /><strong>还没有评测记录</strong><span>向导会帮助你选择套件、参测对象与运行条件，并在启动前检查环境。</span><button className="ab-run-button" type="button" onClick={openCreator}><Play size={14} />创建第一次评测</button></div>}
     </div>
   </div>;

@@ -1,3 +1,4 @@
+import { useDialog } from "../lib/useDialog";
 import { useState } from "react";
 import { Box, ChevronDown, ListChecks, X } from "lucide-react";
 import { useApi } from "../lib/useApi";
@@ -10,10 +11,11 @@ export function Difficulty({ min = 1, max = 1 }: { min?: number; max?: number })
 
 export function SuiteDrawer({ suiteId, suiteName, onClose }: { suiteId: string; suiteName: string; onClose: () => void }) {
   const state = useApi<SuiteCasePreview[]>(`/suites/${suiteId}/cases`);
+  const dialogRef = useDialog(true, onClose);
   const [expandedId, setExpandedId] = useState("");
   return (
     <div className="suite-drawer-backdrop" role="presentation" onMouseDown={onClose}>
-      <aside className="suite-drawer" role="dialog" aria-modal="true" aria-label={`${suiteName} 题目列表`} onMouseDown={(event) => event.stopPropagation()}>
+      <aside ref={dialogRef} tabIndex={-1} className="suite-drawer" role="dialog" aria-modal="true" aria-label={`${suiteName} 题目列表`} onMouseDown={(event) => event.stopPropagation()}>
         <header>
           <div>
             <span className="section-kicker">SUITE CASES</span>

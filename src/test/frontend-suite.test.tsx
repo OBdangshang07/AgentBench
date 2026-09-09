@@ -94,7 +94,7 @@ describe("Xnmk frontend suite UI", () => {
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.1" });
       return json(portfolio);
     }));
     render(<MemoryRouter initialEntries={["/experiments/exp-front/portfolio"]}><Routes><Route path="/experiments/:experimentId/portfolio" element={<FrontendPortfolio />} /></Routes></MemoryRouter>);
@@ -108,7 +108,7 @@ describe("Xnmk frontend suite UI", () => {
   it("uploads screenshot evidence from the manual rubric workbench", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.1" });
       if (url.includes("manual-review/evidence?")) return json({ ...review, evidence: [{ name: "proof.png", path: "evidence.png", size: 8 }] });
       if (url.includes("/runs?experiment_id=")) return json([run]);
       return json(run);
@@ -141,7 +141,7 @@ describe("Xnmk frontend suite UI", () => {
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.1" });
       if (url.includes("/frontend-import?")) return json({ run, preview: { available: true, kind: "static", entry: "index.html" } });
       return json(portfolio);
     });

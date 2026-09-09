@@ -1,3 +1,5 @@
+import { useMediaQuery, useResponsiveLayout } from "../lib/useResponsiveLayout";
+import { useDialog } from "../lib/useDialog";
 import {
   AlertTriangle,
   ArrowRight,
@@ -212,8 +214,30 @@ export default function AgentFlow() {
   const [panning, setPanning] = useState(false);
   const [connectingFrom, setConnectingFrom] = useState<string>();
   const [connectionPointer, setConnectionPointer] = useState({ x: 0, y: 0 });
-  const [libraryOpen, setLibraryOpen] = useState(() => window.innerWidth > 820 && window.localStorage.getItem("agentbench.flow.library") !== "closed");
-  const [inspectorOpen, setInspectorOpen] = useState(() => window.innerWidth > 1100 && window.localStorage.getItem("agentbench.flow.inspector") !== "closed");
+  const compactLibrary = useMediaQuery("(max-width: 1100px)");
+  const compactInspector = useMediaQuery("(max-width: 1400px)");
+  const [panels, setPanels] = useResponsiveLayout<{ library: boolean; inspector: boolean }>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("agentbench.flow.panels.v2") || "null") ?? {
+        library: localStorage.getItem("agentbench.flow.library") !== "closed",
+        inspector: localStorage.getItem("agentbench.flow.inspector") !== "closed",
+      };
+    } catch { return { library: true, inspector: true }; }
+  }, "agentbench.flow.panels.v2", compactLibrary ? "narrow" : compactInspector ? "medium" : "wide",
+  compactLibrary ? { library: false, inspector: false } : compactInspector ? { inspector: false } : {});
+  const libraryOpen: boolean = panels.library;
+  const inspectorOpen: boolean = panels.inspector;
+  const setLibraryOpen = (action: boolean | ((value: boolean) => boolean)) => setPanels(current => {
+    const library = typeof action === "function" ? action(current.library) : action;
+    return { ...current, library, ...(compactLibrary && library ? { inspector: false } : {}) };
+  });
+  const setInspectorOpen = (action: boolean | ((value: boolean) => boolean)) => setPanels(current => {
+    const inspector = typeof action === "function" ? action(current.inspector) : action;
+    return { ...current, inspector, ...(compactLibrary && inspector ? { library: false } : {}) };
+  });
+  const libraryRef = useDialog<HTMLElement>(compactLibrary && libraryOpen && !modalOpen, () => setLibraryOpen(false));
+  const inspectorRef = useDialog<HTMLElement>(compactInspector && inspectorOpen && !modalOpen, () => setInspectorOpen(false));
+  const createRef = useDialog<HTMLFormElement>(modalOpen, () => setModalOpen(false));
   const draftRevision = useRef(0);
   const loadedFlowId = useRef<string | undefined>(undefined);
   const panStart = useRef({ x: 0, y: 0, left: 0, top: 0 });
@@ -224,13 +248,7 @@ export default function AgentFlow() {
   const requestedFlowId = searchParams.get("flow") ?? "";
   const requestedProjectId = searchParams.get("project") ?? "";
 
-  useEffect(() => {
-    window.localStorage.setItem("agentbench.flow.library", libraryOpen ? "open" : "closed");
-  }, [libraryOpen]);
 
-  useEffect(() => {
-    window.localStorage.setItem("agentbench.flow.inspector", inspectorOpen ? "open" : "closed");
-  }, [inspectorOpen]);
 
   useEffect(() => {
     if (!flows?.length) return;
@@ -813,7 +831,8 @@ export default function AgentFlow() {
 
   return (
     <div className={`v4-flow-workbench ${libraryOpen ? "library-open" : "library-closed"} ${inspectorOpen ? "inspector-open" : "inspector-closed"}`}>
-      {libraryOpen && <aside className="v4-flow-library">
+      {((compactLibrary && libraryOpen) || (compactInspector && inspectorOpen)) && <button className="fn-pane-backdrop" data-dialog-backdrop="" tabIndex={-1} aria-label="关闭工作流面板" onClick={() => { if (compactLibrary) setLibraryOpen(false); if (compactInspector) setInspectorOpen(false); }} />}
+      {libraryOpen && <aside ref={libraryRef} tabIndex={-1} role={compactLibrary ? "dialog" : undefined} aria-modal={compactLibrary || undefined} aria-label="节点库" className="v4-flow-library">
         <header><strong>节点库</strong><button className="icon-button" type="button" aria-label="关闭节点库" onClick={() => setLibraryOpen(false)}><PanelLeftClose size={16} /></button></header>
         {libraryGroups.map((group) => (
           <section key={group.label}>
@@ -835,7 +854,7 @@ export default function AgentFlow() {
           <div className="v5-flow-toolbar">
             <button className="v4-icon-button" type="button" disabled={!historyStack.length || active} title="撤销 Ctrl+Z" onClick={undo}><Undo2 size={15} /></button>
             <button className="v4-icon-button" type="button" disabled={!futureStack.length || active} title="重做 Ctrl+Y" onClick={redo}><Redo2 size={15} /></button>
-            <button className="v4-button secondary" type="button" disabled={!selected || active} onClick={() => { setInspectorTab("validation"); void validateDraft(); }}><ListChecks size={15} />验证</button>
+            <button className="v4-button secondary" type="button" disabled={!selected || active} onClick={() => { setInspectorOpen(true); setInspectorTab("validation"); void validateDraft(); }}><ListChecks size={15} />验证</button>
             <button className="v4-button secondary" type="button" disabled={!selected || active || saving} onClick={() => void dryRun()}><FlaskConical size={15} />试运行</button>
             <button className="v4-button secondary" type="button" disabled={!selected || active || saving || !dirty} onClick={() => void save()}><Save size={15} />{saving ? "保存中" : "保存"}</button>
             <button className={`v4-button ${active ? "secondary" : "primary"}`} type="button" disabled={!selected || saving} onClick={() => void toggleRun()}>{active ? <CircleStop size={16} /> : <Play size={16} />}{active ? "停止" : "运行"}</button>
@@ -907,7 +926,7 @@ export default function AgentFlow() {
         <footer><span><i />拖动节点端口创建连接；修改会自动保存，可以随时恢复历史版本</span><div><button type="button" title="缩小" onClick={() => setZoom((value) => Math.max(0.4, Number((value - .1).toFixed(2))))}><ZoomOut size={14} /></button><b>{Math.round(zoom * 100)}%</b><button type="button" title="放大" onClick={() => setZoom((value) => Math.min(1.6, Number((value + .1).toFixed(2))))}><ZoomIn size={14} /></button><button type="button" title="适应画布" onClick={fitCanvas}><Scan size={14} /></button></div><b>{draft?.edges.length ?? 0} 条连接</b></footer>
       </section>
 
-      {inspectorOpen && <aside className="v4-flow-inspector">
+      {inspectorOpen && <aside ref={inspectorRef} tabIndex={-1} role={compactInspector ? "dialog" : undefined} aria-modal={compactInspector || undefined} aria-label="工作流检查器" className="v4-flow-inspector">
         <header><strong>{inspectorTab === "validation" ? "静态验证" : inspectorTab === "history" ? "版本与运行" : selectedNode ? "节点设置" : "流程设置"}</strong><small>{selectedNode ? selectedNode.node_type.toUpperCase() : selected ? "FLOW SELECTED" : "NO SELECTION"}</small><button className="icon-button" type="button" aria-label="关闭检查器" onClick={() => setInspectorOpen(false)}><PanelRightClose size={16} /></button></header>
         <section className="v4-flow-selector"><label>已有工作流</label>{flows?.map((flow) => <button className={flow.id === selectedId ? "active" : ""} key={flow.id} type="button" onClick={() => void switchFlow(flow.id)}><GitFork size={14} /><span><strong>{flow.name}</strong><small>{flow.node_count} 个节点 · {flow.project_name || "跨项目"}</small></span></button>)}</section>
         {draft && <nav className="v5-flow-inspector-tabs"><button className={inspectorTab === "edit" ? "active" : ""} type="button" onClick={() => setInspectorTab("edit")}><Wrench size={13} />编辑</button><button className={inspectorTab === "validation" ? "active" : ""} type="button" onClick={() => setInspectorTab("validation")}><ListChecks size={13} />验证</button><button className={inspectorTab === "history" ? "active" : ""} type="button" onClick={() => setInspectorTab("history")}><History size={13} />历史</button></nav>}
@@ -971,7 +990,7 @@ export default function AgentFlow() {
 
       {modalOpen && (
         <div className="v4-modal-backdrop" onMouseDown={() => setModalOpen(false)}>
-          <form className="v4-modal v5-flow-create-modal" onSubmit={create} onMouseDown={(event) => event.stopPropagation()}>
+          <form ref={createRef} role="dialog" aria-modal="true" aria-label="新建自动化 Flow" tabIndex={-1} className="v4-modal v5-flow-create-modal" onSubmit={create} onMouseDown={(event) => event.stopPropagation()}>
             <header><div><strong>新建自动化 Flow</strong><small>选择最接近目标的模板，然后再调整节点、连接和失败策略</small></div><button type="button" aria-label="关闭" onClick={() => setModalOpen(false)}><X size={18} /></button></header>
             <div className="v5-flow-create-body">
               <section className="v5-flow-template-picker">

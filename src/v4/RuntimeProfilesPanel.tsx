@@ -1,3 +1,4 @@
+import { useDialog } from "../lib/useDialog";
 import { Bot, Check, Copy, Gauge, Plus, ShieldCheck, Sparkles, Trash2, Wrench, X } from "lucide-react";
 import { FormEvent, useState } from "react";
 import { useWorkspaceUx } from "../components/WorkspaceUx";
@@ -71,6 +72,7 @@ export default function RuntimeProfilesPanel() {
     setError(null);
     setOpen(true);
   }
+  const profileDialog = useDialog<HTMLFormElement>(open, () => setOpen(false));
 
   async function save(event: FormEvent) {
     event.preventDefault();
@@ -122,7 +124,7 @@ export default function RuntimeProfilesPanel() {
       </div>
     </section>
 
-    {open && <div className="v4-modal-backdrop" onMouseDown={() => setOpen(false)}><form className="v4-modal" onSubmit={save} onMouseDown={(event) => event.stopPropagation()}><header><div><strong>{editing ? "编辑运行 Profile" : "创建运行 Profile"}</strong><small>Profile 只保存配置引用，不保存 API 密钥</small></div><button type="button" onClick={() => setOpen(false)}><X size={18} /></button></header><div className="v4-form-grid">
+    {open && <div className="v4-modal-backdrop" onMouseDown={() => setOpen(false)}><form ref={profileDialog} role="dialog" aria-modal="true" aria-label={editing ? "编辑运行 Profile" : "创建运行 Profile"} tabIndex={-1} className="v4-modal" onSubmit={save} onMouseDown={(event) => event.stopPropagation()}><header><div><strong>{editing ? "编辑运行 Profile" : "创建运行 Profile"}</strong><small>Profile 只保存配置引用，不保存 API 密钥</small></div><button type="button" aria-label="关闭" onClick={() => setOpen(false)}><X size={18} /></button></header><div className="v4-form-grid">
       <label className="full"><span>名称</span><input required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如：深度代码实现" /></label>
       <label className="full"><span>说明</span><input value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="说明适用任务和限制" /></label>
       <label><span>Agent</span><select value={form.runner_id} onChange={(event) => setForm({ ...form, runner_id: event.target.value })}><option value="">跟随项目默认</option>{runners?.filter((item) => item.enabled).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>

@@ -1,3 +1,4 @@
+import { useDialog } from "../lib/useDialog";
 import { AlertTriangle, CheckCircle2, Info, RotateCcw, X, XCircle } from "lucide-react";
 import {
   Component,
@@ -131,6 +132,7 @@ export function WorkspaceUxProvider({ children }: { children: ReactNode }) {
   const [density, setDensityState] = useState<WorkspaceDensity>(storedDensity);
   const [selectedProjectId, setSelectedProjectIdState] = useState(storedProjectId);
   const [confirmState, setConfirmState] = useState<(ConfirmOptions & { resolve: (value: boolean) => void }) | null>(null);
+  const confirmRef = useDialog(!!confirmState, () => settleConfirm(false));
   const toastSequence = useRef(Date.now());
 
   const dismiss = useCallback((id: number) => {
@@ -243,7 +245,7 @@ export function WorkspaceUxProvider({ children }: { children: ReactNode }) {
       </div>
       {confirmState && (
         <div className="v4-modal-backdrop v5-confirm-backdrop" role="presentation" onMouseDown={() => settleConfirm(false)}>
-          <section className="v5-confirm" role="alertdialog" aria-modal="true" aria-labelledby="v5-confirm-title" onMouseDown={(event) => event.stopPropagation()}>
+          <section ref={confirmRef} tabIndex={-1} className="v5-confirm" role="alertdialog" aria-modal="true" aria-labelledby="v5-confirm-title" onMouseDown={(event) => event.stopPropagation()}>
             <header><span className={confirmState.tone === "danger" ? "danger" : "default"}><AlertTriangle size={19} /></span><div><strong id="v5-confirm-title">{confirmState.title}</strong><p>{confirmState.message}</p></div></header>
             {confirmState.detail && <code>{confirmState.detail}</code>}
             <footer><button className="v4-button secondary" type="button" autoFocus onClick={() => settleConfirm(false)}>{confirmState.cancelLabel ?? "取消"}</button><button className={`v4-button ${confirmState.tone === "danger" ? "danger" : "primary"}`} type="button" onClick={() => settleConfirm(true)}>{confirmState.confirmLabel ?? "确认"}</button></footer>

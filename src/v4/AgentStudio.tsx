@@ -1,3 +1,5 @@
+import { useMediaQuery, useResponsiveLayout } from "../lib/useResponsiveLayout";
+import { useDialog } from "../lib/useDialog";
 import {
   Activity,
   AlertTriangle,
@@ -53,7 +55,7 @@ import {
 import { open } from "@tauri-apps/plugin-dialog";
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent, ReactNode, type SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, downloadUrl } from "../lib/api";
 import { useApi } from "../lib/useApi";
@@ -184,7 +186,7 @@ interface StudioLayoutState {
 const studioLayoutKey = "agentbench.studio.layout.v3";
 
 function initialStudioLayout(): StudioLayoutState {
-  const defaults = { left: window.innerWidth > 600, right: window.innerWidth > 1250, dock: window.innerWidth > 1250, dockExpanded: false, leftWidth: 224, rightWidth: 300, dockHeight: 246 };
+  const defaults = { left: true, right: true, dock: true, dockExpanded: false, leftWidth: 224, rightWidth: 300, dockHeight: 246 };
   try {
     const stored = window.localStorage.getItem(studioLayoutKey);
     if (stored) {
@@ -440,7 +442,20 @@ export default function AgentStudio() {
   const [configBusy, setConfigBusy] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [sessionForm, setSessionForm] = useState<SessionForm>({ session_mode: "workspace", project_id: "", profile_id: "", title: "新 Agent 会话", runner_id: "", model_id: "", permission_profile: "workspace", reasoning_effort: "medium", skill_pack_id: "" });
-  const [studioLayout, setStudioLayout] = useState<StudioLayoutState>(initialStudioLayout);
+  const compactRail = useMediaQuery("(max-width: 900px)");
+  const compactTools = useMediaQuery("(max-width: 1250px)");
+  const [studioLayout, updateStudioLayout] = useResponsiveLayout<StudioLayoutState>(initialStudioLayout, studioLayoutKey,
+    compactRail ? "narrow" : compactTools ? "medium" : "wide",
+    compactRail ? { left: false, right: false, dock: false, dockExpanded: false } : compactTools ? { right: false, dock: false, dockExpanded: false } : {});
+  const setStudioLayout = useCallback((action: SetStateAction<StudioLayoutState>) => updateStudioLayout(current => {
+    const next = typeof action === "function" ? action(current) : action;
+    if (compactRail && next.left && !current.left) return { ...next, right: false, dock: false, dockExpanded: false };
+    if (compactRail && next.right && next.dock && (!current.right || !current.dock)) return { ...next, left: false };
+    return next;
+  }), [compactRail, updateStudioLayout]);
+  const createRef = useDialog<HTMLFormElement>(createOpen, () => setCreateOpen(false));
+  const railRef = useDialog<HTMLElement>(compactRail && studioLayout.left && !createOpen, () => setStudioLayout(current => ({ ...current, left: false })));
+  const toolsRef = useDialog<HTMLElement>(compactTools && studioLayout.right && studioLayout.dock && !createOpen && !isChat, () => setStudioLayout(current => ({ ...current, right: false, dock: false, dockExpanded: false })));
   const [followingLatest, setFollowingLatest] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   const followingLatestRef = useRef(true);
@@ -587,13 +602,7 @@ export default function AgentStudio() {
     };
   }, [sessionId, attachments.length, attachmentBusy]);
 
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(studioLayoutKey, JSON.stringify(studioLayout));
-    } catch {
-      // Layout persistence is a convenience, not a runtime requirement.
-    }
-  }, [studioLayout]);
+
 
   useEffect(() => {
     if (railMode !== "search") return;
@@ -613,12 +622,12 @@ export default function AgentStudio() {
         setStudioLayout((current) => ({ ...current, left: !current.left }));
       } else if (!event.shiftKey && event.key.toLowerCase() === "j") {
         event.preventDefault();
-        setStudioLayout((current) => ({ ...current, dock: !current.dock }));
+        setStudioLayout((current) => ({ ...current, right: !current.dock, dock: !current.dock }));
       }
     }
     window.addEventListener("keydown", handleWorkbenchShortcuts);
     return () => window.removeEventListener("keydown", handleWorkbenchShortcuts);
-  }, []);
+  }, [setStudioLayout]);
 
   useEffect(() => {
     function move(event: PointerEvent) {
@@ -642,7 +651,7 @@ export default function AgentStudio() {
       window.removeEventListener("pointerup", stopResize);
       window.removeEventListener("pointercancel", stopResize);
     };
-  }, []);
+  }, [setStudioLayout]);
 
   function beginResize(kind: "left" | "right" | "dock", event: ReactPointerEvent<HTMLDivElement>) {
     const value = kind === "left" ? studioLayout.leftWidth : kind === "right" ? studioLayout.rightWidth : studioLayout.dockHeight;
@@ -1462,7 +1471,7 @@ export default function AgentStudio() {
     const chatMode = sessionForm.session_mode === "chat";
     return (
       <div className="v4-modal-backdrop" onMouseDown={() => setCreateOpen(false)}>
-        <form className="v4-modal small" onSubmit={createSession} onMouseDown={(event) => event.stopPropagation()}>
+        <form ref={createRef} role="dialog" aria-modal="true" aria-label="开始新会话" tabIndex={-1} className="v4-modal small" onSubmit={createSession} onMouseDown={(event) => event.stopPropagation()}>
           <header><div><strong>开始新会话</strong><small>{chatMode ? "无需项目目录，只进行对话和处理附件" : "先选择工作项目，再确认由哪个 Agent 执行"}</small></div><button type="button" aria-label="关闭" onClick={() => setCreateOpen(false)}><X size={18} /></button></header>
           <div className="v4-form-grid">
             <div className="v5-session-mode full"><button className={!chatMode ? "active" : ""} type="button" onClick={() => setSessionForm((current) => ({ ...current, session_mode: "workspace", project_id: current.project_id || projects?.[0]?.id || "", permission_profile: projects?.[0]?.permission_profile ?? "workspace" }))}><FolderOpen size={17} /><span><strong>项目 Agent</strong><small>在授权工作区内使用文件、终端和浏览器</small></span></button><button className={chatMode ? "active" : ""} type="button" onClick={() => setSessionForm((current) => ({ ...current, session_mode: "chat", project_id: "", profile_id: "", skill_pack_id: "", permission_profile: "readonly", title: current.title.includes("Agent 会话") ? "新纯对话" : current.title }))}><MessageSquarePlus size={17} /><span><strong>纯对话</strong><small>不选择工作区，只保留 Agent、模型与附件</small></span></button></div>
@@ -1516,14 +1525,15 @@ export default function AgentStudio() {
   return (
     <div className={`v4-studio-workbench ab-studio-shell ${isChat ? "chat-mode" : ""} ${studioLayout.left ? "" : "left-collapsed"} ${studioLayout.right && !isChat ? "" : "right-collapsed"} ${studioLayout.dock && !isChat ? "" : "dock-collapsed"} ${studioLayout.dockExpanded && !isChat ? "dock-expanded" : ""} ${resizing ? `resizing-${resizing}` : ""}`} style={{ "--studio-left": studioLayout.left ? `${studioLayout.leftWidth}px` : "0px", "--studio-right": studioLayout.right && !isChat ? `${studioLayout.rightWidth}px` : "0px", "--studio-dock": !studioLayout.dock || isChat ? "45px" : studioLayout.dockExpanded ? "min(54vh, 540px)" : `${studioLayout.dockHeight}px` } as CSSProperties}>
       {draggingFiles && <div className="v5-studio-dropzone"><Upload size={28} /><strong>放下即可附加到当前会话</strong><span>图片和文件最多 10 个，单个最大 50 MB</span></div>}
-      <aside className="v4-studio-rail ab-session-sidebar">
+      {((compactRail && studioLayout.left) || (compactTools && studioLayout.right && studioLayout.dock && !isChat)) && <button className="fn-pane-backdrop" data-dialog-backdrop="" tabIndex={-1} aria-label="关闭会话面板" onClick={() => setStudioLayout(current => ({ ...current, ...(compactRail ? { left: false } : {}), ...(compactTools ? { right: false, dock: false, dockExpanded: false } : {}) }))} />}
+      <aside ref={railRef} role={compactRail && studioLayout.left ? "dialog" : undefined} aria-modal={compactRail && studioLayout.left || undefined} id="studio-navigation" aria-label="会话导航" tabIndex={-1} className="v4-studio-rail ab-session-sidebar">
         <button className="fn-studio-sidebar-close" type="button" aria-label="关闭会话侧栏" onClick={() => setStudioLayout((current) => ({ ...current, left: false }))}><X size={16} />关闭侧栏</button>
         <Link className="v54-studio-app-back" to="/"><ArrowLeft size={14} /><span>AgentBench 工作区</span></Link>
         <header>{detail ? <><span className="v4-project-logo">{detail.project_name.slice(0, 2).toUpperCase()}</span><div><strong>{detail.project_name}</strong><small title={isChat ? "无工作区" : detail.workspace_path}>{isChat ? <MessageSquarePlus size={11} /> : <GitBranch size={11} />} {isChat ? "无工作区 · 隔离对话" : detail.workspace_path}</small></div></> : <span>{loading ? "加载会话…" : "Agent 会话"}</span>}</header>
         <button className="v5-new-session-primary" type="button" onClick={() => openCreate()}><Plus size={15} />新建会话</button>
         <div className="v4-rail-tabs v5-studio-nav-tabs"><button className={railMode === "sessions" ? "active" : ""} type="button" onClick={() => setRailMode("sessions")}><Bot size={13} />会话</button>{!isChat && <><button className={railMode === "files" ? "active" : ""} type="button" onClick={() => setRailMode("files")}><Folder size={13} />文件</button><button className={railMode === "search" ? "active" : ""} type="button" onClick={() => setRailMode("search")}><Search size={13} />搜索</button></>}</div>
         {railMode === "sessions" ? (
-          <section className="v4-session-list v5-session-list-primary"><header><span>会话</span><button type="button" aria-label="新建 Agent 会话" onClick={() => openCreate()}><Plus size={14} /></button></header><label className="v5-session-search"><Search size={13} /><input aria-label="搜索会话" value={sessionQuery} onChange={(event) => setSessionQuery(event.target.value)} placeholder="搜索会话…" />{sessionQuery && <button type="button" aria-label="清除会话搜索" onClick={() => setSessionQuery("")}><X size={12} /></button>}</label>{sessionGroups.flatMap((group) => [<div className="v54-session-group-label" key={`group-${group.label}`}>{group.label}<span>{group.items.length}</span></div>, ...group.items.map((session) => <button key={session.id} className={session.id === sessionId ? "active" : ""} type="button" title={session.summary || session.title} onClick={() => navigate(`/studio/${session.id}`)}><i className={activeStatuses.has(session.status) ? "live" : ""} /><span><strong>{session.title}</strong><small>{session.summary || `${session.project_name} · ${session.runner_name}`}</small></span><em>{statusLabels[session.status] ?? session.status}</em></button>)])}{!visibleSessions.length && <div className="v5-session-none">{sessionQuery ? "没有匹配会话" : "还没有会话，从上方开始第一个任务"}</div>}</section>
+          <section className="v4-session-list v5-session-list-primary"><header><span>会话</span><button type="button" aria-label="新建 Agent 会话" onClick={() => openCreate()}><Plus size={14} /></button></header><label className="v5-session-search"><Search size={13} /><input aria-label="搜索会话" value={sessionQuery} onChange={(event) => setSessionQuery(event.target.value)} placeholder="搜索会话…" />{sessionQuery && <button type="button" aria-label="清除会话搜索" onClick={() => setSessionQuery("")}><X size={12} /></button>}</label>{sessionGroups.flatMap((group) => [<div className="v54-session-group-label" key={`group-${group.label}`}>{group.label}<span>{group.items.length}</span></div>, ...group.items.map((session) => <button key={session.id} className={session.id === sessionId ? "active" : ""} type="button" title={session.summary || session.title} onClick={() => { navigate(`/studio/${session.id}`); if (compactRail) setStudioLayout(current => ({ ...current, left: false })); }}><i className={activeStatuses.has(session.status) ? "live" : ""} /><span><strong>{session.title}</strong><small>{session.summary || `${session.project_name} · ${session.runner_name}`}</small></span><em>{statusLabels[session.status] ?? session.status}</em></button>)])}{!visibleSessions.length && <div className="v5-session-none">{sessionQuery ? "没有匹配会话" : "还没有会话，从上方开始第一个任务"}</div>}</section>
         ) : railMode === "files" ? (
           <section className="v4-file-tree">
             <button className="v4-tree-up" type="button" disabled={treePath === "."} onClick={() => setTreePath(treePath.includes("/") ? treePath.slice(0, treePath.lastIndexOf("/")) : ".")}><ChevronDown size={14} />WORKSPACE · {treePath}</button>
@@ -1546,17 +1556,17 @@ export default function AgentStudio() {
         )}
       </aside>
 
-      {studioLayout.left && <div className="v5-studio-resizer left" role="separator" aria-label="调整导航侧栏宽度" aria-orientation="vertical" tabIndex={0} onPointerDown={(event) => beginResize("left", event)} onKeyDown={(event) => resizeWithKeyboard("left", event.key)} />}
+      {!compactRail && studioLayout.left && <div className="v5-studio-resizer left" role="separator" aria-label="调整导航侧栏宽度" aria-orientation="vertical" tabIndex={0} onPointerDown={(event) => beginResize("left", event)} onKeyDown={(event) => resizeWithKeyboard("left", event.key)} />}
 
       <section className="v4-conversation ab-thread">
         <header className="v4-conversation-head ab-thread-header">
-          <button className={`v4-pane-toggle with-label ${studioLayout.left ? "active" : ""}`} type="button" aria-label={studioLayout.left ? "收起导航侧栏" : "展开导航侧栏"} title={`${studioLayout.left ? "收起" : "展开"}导航侧栏 · Ctrl B`} onClick={() => setStudioLayout((current) => ({ ...current, left: !current.left }))}>{studioLayout.left ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}<span>导航</span></button>
+          <button className={`v4-pane-toggle with-label ${studioLayout.left ? "active" : ""}`} type="button" aria-controls="studio-navigation" aria-expanded={studioLayout.left} aria-label={studioLayout.left ? "收起导航侧栏" : "展开导航侧栏"} title={`${studioLayout.left ? "收起" : "展开"}导航侧栏 · Ctrl B`} onClick={() => setStudioLayout((current) => ({ ...current, left: !current.left }))}>{studioLayout.left ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}<span>导航</span></button>
           {editingTitle ? <form className="v5-session-title-edit" onSubmit={renameSession}><input autoFocus aria-label="会话名称" value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} /><button type="submit"><Check size={14} /></button><button type="button" onClick={() => setEditingTitle(false)}><X size={14} /></button></form> : <div className="v4-conversation-title"><strong>{detail?.title ?? "正在加载会话"}</strong><small title={isChat ? "纯对话 · 无工作区" : detail?.workspace_path}>SESSION / {sessionId?.slice(0, 8)} · {isChat ? "纯对话 · 无工作区" : detail?.workspace_path}</small></div>}
           <span className={`v4-status ${activeStatuses.has(detail?.status ?? "") ? "green" : ""}`}><i />{detail ? statusLabels[detail.status] ?? detail.status : "加载中"}</span>
           <button className="v5-runtime-summary" type="button" aria-label="打开运行配置" aria-expanded={runtimeConfigOpen} onClick={() => setRuntimeConfigOpen((current) => !current)}><Bot size={14} /><span><strong>{detail?.runner_name ?? "选择 Agent"}</strong><small>{detail?.model_name ?? "选择模型"} · {effortLabels[detail?.reasoning_effort ?? "medium"]}思考 · {permissionLabels[detail?.permission_profile ?? "workspace"]}</small></span><ChevronDown size={13} /></button>
           <button className="v4-pane-toggle" type="button" onClick={() => void refresh()} title="刷新会话"><RefreshCw className={loading ? "spin" : ""} size={16} /></button>
           <button className="v4-pane-toggle" type="button" disabled={!detail} onClick={() => { setTitleDraft(detail?.title ?? ""); setEditingTitle(true); }} title="重命名会话"><Edit3 size={15} /></button>
-          {!isChat && <button className={`v4-pane-toggle with-label ${studioLayout.right ? "active" : ""}`} type="button" aria-label={studioLayout.right ? "关闭工具工作台" : "打开工具工作台"} title={`${studioLayout.right ? "关闭" : "打开"}工具工作台`} onClick={() => setStudioLayout((current) => ({ ...current, right: !current.right, dock: !current.right }))}>{studioLayout.right ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}<span>工具</span></button>}
+          {!isChat && <button className={`v4-pane-toggle with-label ${studioLayout.right ? "active" : ""}`} type="button" aria-controls="studio-tools" aria-expanded={studioLayout.right} aria-label={studioLayout.right ? "关闭工具工作台" : "打开工具工作台"} title={`${studioLayout.right ? "关闭" : "打开"}工具工作台`} onClick={() => setStudioLayout((current) => ({ ...current, right: !current.right, dock: !current.right }))}>{studioLayout.right ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}<span>工具</span></button>}
         </header>
 
         {runtimeConfigOpen && <section className="v5-runtime-config-popover"><header><div><strong>运行配置</strong><small>{isChat ? "纯对话固定隔离权限；可切换 Agent、模型与思考强度" : "当前会话立即生效；运行中限制切换 Agent 与模型"}</small></div><button type="button" aria-label="关闭运行配置" onClick={() => setRuntimeConfigOpen(false)}><X size={14} /></button></header><div className="v5-runtime-primary"><StudioPicker ariaLabel="选择 Agent" caption="AGENT" icon={<Bot size={15} />} disabled={activeStatuses.has(detail?.status ?? "")} value={detail?.runner_id ?? ""} options={runnerOptions} onChange={(runnerId) => void updateSession({ runner_id: runnerId })} /><StudioPicker ariaLabel="选择模型" caption="MODEL" icon={<Cpu size={15} />} disabled={activeStatuses.has(detail?.status ?? "")} value={detail?.model_id ?? ""} options={modelOptions} onChange={(modelId) => void updateSession({ model_id: modelId })} /></div><div className="v5-runtime-secondary"><ComposerMenu ariaLabel="会话访问权限" label="权限" icon={<ShieldCheck size={14} />} value={detail?.permission_profile ?? "workspace"} options={permissionOptions} disabled={configBusy || isChat} onChange={(value) => void updateRuntimeSetting({ permission_profile: value as PermissionProfile })} /><ComposerMenu ariaLabel="思考强度" label="思考" icon={<Brain size={14} />} value={detail?.reasoning_effort ?? "medium"} options={effortOptions} disabled={configBusy} onChange={(value) => void updateRuntimeSetting({ reasoning_effort: value as ReasoningEffort })} />{!isChat && <><ComposerMenu ariaLabel="会话能力包" label="能力" icon={<Sparkles size={14} />} value={detail?.skill_pack_id ?? ""} options={skillOptions} disabled={configBusy || activeStatuses.has(detail?.status ?? "")} onChange={(value) => void updateRuntimeSetting({ skill_pack_id: value || null })} /><ComposerMenu ariaLabel="运行 Profile" label="Profile" icon={<Gauge size={14} />} value={detail?.profile_id ?? ""} options={profileOptions} disabled={configBusy || activeStatuses.has(detail?.status ?? "")} onChange={(value) => void updateRuntimeSetting({ profile_id: value || null })} /></>}</div>{harnessEffort && <div className="v5-harness-effort-note"><Brain size={14} /><span><strong>Harness 实际生效：{harnessEffort.actual} · {harnessEffort.label}</strong><small>{harnessEffort.note}；本次使用隔离配置，不修改 dsh 全局设置</small></span></div>}<footer><span><Gauge size={13} />{quotaTokens.toLocaleString()} Tokens · ${quotaCost.toFixed(3)}</span><span><Clock3 size={13} />{duration(detail?.duration_ms ?? 0)}</span>{!isChat && <span><FileDiff size={13} />{detail?.file_changes.length ?? 0} 个变更</span>}</footer></section>}
@@ -1612,9 +1622,9 @@ export default function AgentStudio() {
         </form>
       </section>
 
-      {studioLayout.right && !isChat && <div className="v5-studio-resizer right" role="separator" aria-label="调整工具工作台宽度" aria-orientation="vertical" tabIndex={0} onPointerDown={(event) => beginResize("right", event)} onKeyDown={(event) => resizeWithKeyboard("right", event.key)} />}
+      {!compactTools && studioLayout.right && !isChat && <div className="v5-studio-resizer right" role="separator" aria-label="调整工具工作台宽度" aria-orientation="vertical" tabIndex={0} onPointerDown={(event) => beginResize("right", event)} onKeyDown={(event) => resizeWithKeyboard("right", event.key)} />}
 
-      {!isChat && <section className="v4-studio-dock ab-context-drawer">
+      {!isChat && <section ref={toolsRef} role={compactTools && studioLayout.right ? "dialog" : undefined} aria-modal={compactTools && studioLayout.right || undefined} id="studio-tools" aria-label="工具工作台" tabIndex={-1} className="v4-studio-dock ab-context-drawer">
         <nav>
           <button type="button" className={studioLayout.dock && dock === "activity" ? "active" : ""} onClick={() => { setDock("activity"); setStudioLayout((current) => ({ ...current, dock: true, right: true })); }}><Activity size={14} />活动详情 <b>{processEvents.length}</b></button>
           <button type="button" className={studioLayout.dock && dock === "terminal" ? "active" : ""} onClick={openTerminalPanel}><TerminalSquare size={14} />交互终端 <b>{terminals.length || ""}</b><i className={terminals.some((item) => item.running) ? "live" : ""} /></button>

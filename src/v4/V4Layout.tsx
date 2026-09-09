@@ -28,6 +28,8 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import { APP_VERSION } from "../lib/api";
+import { useDialog } from "../lib/useDialog";
+import { useMediaQuery } from "../lib/useResponsiveLayout";
 import { useWorkspaceUx } from "../components/WorkspaceUx";
 import { useApi } from "../lib/useApi";
 import type { SystemStatus } from "../types";
@@ -77,7 +79,14 @@ const pageNames: Array<[RegExp, string]> = [
   [/^\/tasks/, "任务"],
   [/^\/tools/, "工具与 MCP"],
   [/^\/models/, "模型与 Agent"],
-  [/^\/benchmarks|^\/library|^\/experiments|^\/leaderboard|^\/profiles|^\/runs/, "能力评测"],
+  [/^\/benchmarks/, "评测中心"],
+  [/^\/library/, "测试套件"],
+  [/^\/experiments\/[^/]+\/portfolio/, "前端作品集"],
+  [/^\/experiments\/./, "评测详情"],
+  [/^\/experiments/, "运行记录"],
+  [/^\/runs/, "运行证据"],
+  [/^\/leaderboard/, "排行与报告"],
+  [/^\/profiles/, "能力画像"],
   [/^\/settings/, "设置"],
 ];
 
@@ -115,6 +124,10 @@ export default function V4Layout() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [navigationOpen, setNavigationOpen] = useState(false);
+  const compactNavigation = useMediaQuery("(max-width: 1024px)");
+  const navigationRef = useDialog(compactNavigation && navigationOpen, () => setNavigationOpen(false));
+  const paletteRef = useDialog(paletteOpen, () => setPaletteOpen(false));
+  const notificationsRef = useDialog(notificationsOpen, () => setNotificationsOpen(false));
   const [onboardingOpen, setOnboardingOpen] = useState(() => window.localStorage.getItem("agentbench.v5.onboarding.done") !== "1");
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
@@ -136,6 +149,7 @@ export default function V4Layout() {
           ? { label: "等待配置", tone: "warning" }
           : { label: "运行正常", tone: "ready" };
   const showOnboarding = onboardingOpen && Boolean(status && dashboard);
+  const onboardingRef = useDialog(showOnboarding, dismissOnboarding);
   const selectedProject = projects?.find((project) => project.id === ux.selectedProjectId) ?? projects?.[0];
   const setupStep = installed === 0 ? 0 : (dashboard?.project_count ?? 0) === 0 ? 1 : 2;
   function dismissOnboarding() {
@@ -162,6 +176,10 @@ export default function V4Layout() {
   useEffect(() => {
     setNavigationOpen(false);
   }, [location.pathname, location.search]);
+
+  useEffect(() => {
+    if (!compactNavigation) setNavigationOpen(false);
+  }, [compactNavigation]);
 
   useEffect(() => {
     if (!projects?.length) return;
@@ -209,8 +227,10 @@ export default function V4Layout() {
 
   return (
     <div className={`v4-shell density-${ux.density} ${navigationOpen ? "navigation-open" : ""} ${location.pathname.startsWith("/studio") ? "studio-route" : ""}`}>
-      {navigationOpen && <button className="fn-nav-backdrop" aria-label="关闭主导航" onClick={() => setNavigationOpen(false)} />}
-      <aside id="main-navigation" className="v4-sidebar" aria-label="主导航">
+      <a className="fn-skip-link" href="#main-content" onClick={(event) => { event.preventDefault(); document.getElementById("main-content")?.focus(); }}>跳到页面内容</a>
+      {navigationOpen && <button data-dialog-backdrop="" tabIndex={-1} className="fn-nav-backdrop" aria-label="关闭主导航" onClick={() => setNavigationOpen(false)} />}
+      <aside ref={navigationRef} tabIndex={-1} role={compactNavigation && navigationOpen ? "dialog" : undefined} aria-modal={compactNavigation && navigationOpen || undefined} id="main-navigation" className="v4-sidebar" aria-label="主导航">
+        <button className="fn-navigation-close icon-button" type="button" aria-label="收起主导航" onClick={() => setNavigationOpen(false)}><X size={18} /></button>
         <Brand />
         <label className="fn-workspace-select"><FolderKanban size={16} /><select aria-label="当前工作项目" value={selectedProject?.id ?? ""} onChange={(event) => ux.setSelectedProjectId(event.target.value)}>{projects?.length ? projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>) : <option value="">本地工作区</option>}</select></label>
         <div className="v4-nav-scroll">
@@ -228,18 +248,18 @@ export default function V4Layout() {
         <button className="fn-mobile-menu icon-button" type="button" aria-label="打开主导航" aria-controls="main-navigation" aria-expanded={navigationOpen} onClick={() => setNavigationOpen((value) => !value)}><Menu size={18} /></button>
         <div className="v4-breadcrumb"><span>本地工作区</span><ChevronRight size={13} /><strong>{title}</strong></div>
         <div className="v4-top-actions">
-          <button className="v4-command-trigger" type="button" onClick={() => setPaletteOpen(true)}><Search size={15} /><span>搜索或新建</span><kbd>Ctrl K</kbd></button>
+          <button className="v4-command-trigger" type="button" aria-label="搜索或新建" onClick={() => setPaletteOpen(true)}><Search size={15} /><span>搜索或新建</span><kbd>Ctrl K</kbd></button>
           {(dashboard?.pending_approvals ?? 0) > 0 && <Link className="v5-approval-chip" to="/"><ShieldAlert size={15} /><span>{dashboard?.pending_approvals} 个操作等待审批</span></Link>}
           <button className="v5-help-trigger" type="button" title="打开入门向导" aria-label="打开入门向导" onClick={() => setOnboardingOpen(true)}><HelpCircle size={17} /></button>
           <button className={`v5-notification-trigger ${ux.unreadCount ? "unread" : ""}`} type="button" aria-label={`通知中心，${ux.unreadCount} 条未读`} onClick={() => { const opening = !notificationsOpen; setNotificationsOpen(opening); if (opening) ux.markNotificationsRead(); }}><Bell size={17} />{ux.unreadCount > 0 && <b>{Math.min(99, ux.unreadCount)}</b>}</button>
         </div>
       </header>
 
-      <main className="v4-viewport"><Outlet /></main>
+      <main id="main-content" tabIndex={-1} className="v4-viewport"><Outlet /></main>
 
       {paletteOpen && (
         <div className="v4-palette-backdrop" onMouseDown={() => setPaletteOpen(false)}>
-          <section className="v4-palette" role="dialog" aria-modal="true" aria-label="搜索工作区" onMouseDown={(event) => event.stopPropagation()}>
+          <section ref={paletteRef} tabIndex={-1} className="v4-palette" role="dialog" aria-modal="true" aria-label="搜索工作区" onMouseDown={(event) => event.stopPropagation()}>
             <header><Search size={18} /><input aria-label="搜索页面、项目或命令" autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="输入页面、项目或命令…" /><button type="button" aria-label="关闭搜索" onClick={() => setPaletteOpen(false)}><X size={16} /></button></header>
             {!!visibleActions.length && <label>立即执行</label>}
             {!!visibleActions.length && <div className="v5-command-actions">{visibleActions.map(({ to, label, detail, icon: Icon }) => <Link key={to} to={to} onClick={() => setPaletteOpen(false)}><span><Icon size={16} /></span><div><strong>{label}</strong><small>{detail}</small></div><ArrowRight size={14} /></Link>)}</div>}
@@ -272,14 +292,15 @@ export default function V4Layout() {
         </div>
       )}
 
-      {notificationsOpen && <aside className="v5-notification-center" aria-label="通知中心">
+      {notificationsOpen && <button data-dialog-backdrop="" tabIndex={-1} className="fn-notification-backdrop" aria-label="关闭通知中心" onClick={() => setNotificationsOpen(false)} />}
+      {notificationsOpen && <aside ref={notificationsRef} tabIndex={-1} role="dialog" aria-modal="true" className="v5-notification-center" aria-label="通知中心">
         <header><div><strong>通知中心</strong><small>{ux.notifications.length} 条本地事件</small></div><button type="button" title="全部标记已读" onClick={ux.markNotificationsRead}><CheckCheck size={15} /></button><button type="button" title="清空通知" onClick={ux.clearNotifications}><Trash2 size={15} /></button><button type="button" title="关闭" onClick={() => setNotificationsOpen(false)}><X size={15} /></button></header>
         <div>{[...ux.notifications].reverse().map((notification) => <article className={`${notification.kind} ${notification.read ? "read" : "unread"}`} key={notification.id}><i /><div><strong>{notification.title}</strong>{notification.message && <p>{notification.message}</p>}<time>{new Date(notification.created_at).toLocaleString("zh-CN")}</time></div></article>)}{!ux.notifications.length && <section><Bell size={24} /><strong>还没有通知</strong><p>任务完成、审批、失败和配置结果会保存在这里。</p></section>}</div>
       </aside>}
 
       {showOnboarding && (
         <div className="v4-modal-backdrop v5-onboarding-backdrop" onMouseDown={dismissOnboarding}>
-          <section className="v5-onboarding" role="dialog" aria-modal="true" aria-labelledby="v5-onboarding-title" onMouseDown={(event) => event.stopPropagation()}>
+          <section ref={onboardingRef} tabIndex={-1} className="v5-onboarding" role="dialog" aria-modal="true" aria-labelledby="v5-onboarding-title" onMouseDown={(event) => event.stopPropagation()}>
             <header><div><small>入门向导 · 第 {setupStep + 1} 步，共 3 步</small><h2 id="v5-onboarding-title">完成第一个本地 Agent 任务</h2><p>每一步都可以稍后继续。项目目录、模型配置和会话记录只保存在这台设备。</p></div><button type="button" aria-label="关闭入门向导" onClick={dismissOnboarding}><X size={17} /></button></header>
             <div className="v5-onboarding-progress" aria-label={`入门进度 ${setupStep} / 3`}><i className={setupStep >= 1 ? "done" : "active"} /><i className={setupStep >= 2 ? "done" : setupStep === 1 ? "active" : ""} /><i className={setupStep === 2 ? "active" : ""} /></div>
             <div className="v5-onboarding-steps">

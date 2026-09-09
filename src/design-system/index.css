@@ -1,6 +1,7 @@
 @layer reset, components, design;
 @import "./components.css" layer(components);
 @import "./workspace.css" layer(design);
+@import "./responsive.css" layer(design);
 
 @layer reset {
   :root {

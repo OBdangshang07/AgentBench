@@ -1,4 +1,5 @@
-import type { ButtonHTMLAttributes, ComponentProps, PropsWithChildren, ReactNode } from "react";
+import { useId, type ButtonHTMLAttributes, type ComponentProps, type PropsWithChildren, type ReactNode } from "react";
+import { useDialog } from "../lib/useDialog";
 import { AlertTriangle, LoaderCircle } from "lucide-react";
 import { statusLabel, statusTone } from "../lib/format";
 
@@ -6,13 +7,15 @@ export function Button({
   children,
   variant = "primary",
   busy,
+  disabled,
+  className = "",
   ...props
 }: ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: "primary" | "secondary" | "ghost" | "danger";
   busy?: boolean;
 }) {
   return (
-    <button className={`button button-${variant}`} disabled={busy || props.disabled} {...props}>
+    <button {...props} className={`button button-${variant} ${className}`} disabled={busy || disabled} aria-busy={busy || undefined}>
       {busy && <LoaderCircle size={16} className="spin" />}
       {children}
     </button>
@@ -62,7 +65,7 @@ export function Score({ value, large = false }: { value?: number | null; large?:
 
 export function LoadingBlock({ label = "读取本地数据…" }: { label?: string }) {
   return (
-    <div className="state-block">
+    <div className="state-block" role="status">
       <LoaderCircle className="spin" size={24} />
       <span>{label}</span>
     </div>
@@ -71,7 +74,7 @@ export function LoadingBlock({ label = "读取本地数据…" }: { label?: stri
 
 export function ErrorBlock({ message, retry }: { message: string; retry?: () => void }) {
   return (
-    <div className="state-block state-error">
+    <div className="state-block state-error" role="alert">
       <AlertTriangle size={24} />
       <div>
         <strong>本地服务暂时不可用</strong>
@@ -112,15 +115,18 @@ export function Modal({
   children,
   onClose,
 }: PropsWithChildren<{ title: string; description?: string; onClose: () => void }>) {
+  const titleId = useId();
+  const descriptionId = useId();
+  const dialogRef = useDialog(true, onClose);
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+      <section ref={dialogRef} tabIndex={-1} className="modal" role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={description ? descriptionId : undefined} onMouseDown={(event) => event.stopPropagation()}>
         <header>
           <div>
-            <h2>{title}</h2>
-            {description && <p>{description}</p>}
+            <h2 id={titleId}>{title}</h2>
+            {description && <p id={descriptionId}>{description}</p>}
           </div>
-          <button className="icon-button" onClick={onClose} aria-label="关闭">
+          <button className="icon-button" type="button" onClick={onClose} aria-label="关闭">
             ×
           </button>
         </header>

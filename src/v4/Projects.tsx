@@ -1,3 +1,4 @@
+import { useDialog } from "../lib/useDialog";
 import {
   Archive,
   Bot,
@@ -56,6 +57,7 @@ export default function Projects() {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
+  const projectDialog = useDialog<HTMLFormElement>(modalOpen, () => setModalOpen(false));
   useEffect(() => {
     if (!modalOpen) return;
     setForm((current) => ({
@@ -204,7 +206,7 @@ export default function Projects() {
 
       {modalOpen && (
         <div className="v4-modal-backdrop" onMouseDown={() => setModalOpen(false)}>
-          <form className="v4-modal" onSubmit={submit} onMouseDown={(event) => event.stopPropagation()}>
+          <form ref={projectDialog} role="dialog" aria-modal="true" aria-label="添加本地项目" tabIndex={-1} className="v4-modal" onSubmit={submit} onMouseDown={(event) => event.stopPropagation()}>
             <header><div><strong>添加本地项目</strong><small>完成后将直接进入会话配置，不会立刻执行任何操作</small></div><button type="button" aria-label="关闭" onClick={() => setModalOpen(false)}><X size={18} /></button></header>
             <div className="v4-form-grid">
               <label><span>项目名称</span><input required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如 AgentBench Desktop" /></label>

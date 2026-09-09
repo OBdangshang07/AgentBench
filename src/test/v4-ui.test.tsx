@@ -5,7 +5,7 @@ import App from "../App";
 import { useWorkspaceUx, WorkspaceUxProvider } from "../components/WorkspaceUx";
 
 const systemStatus = {
-  version: "5.5.0",
+  version: "5.5.1",
   data_dir: "C:/AgentBench",
   database: { path: "C:/AgentBench/agentbench.db", ready: true },
   docker: { installed: true, available: true, executable: "docker" },
@@ -111,7 +111,7 @@ describe("AgentBench V4 application shell", () => {
   it("renders the real Agent operations navigation and control center", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.1" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       return json([]);
@@ -136,7 +136,7 @@ describe("AgentBench V4 application shell", () => {
     let posted: Record<string, unknown> | null = null;
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.1" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       if (url.endsWith("/runners")) return json([runner]);
@@ -169,7 +169,7 @@ describe("AgentBench V4 application shell", () => {
   it("opens and dismisses mobile navigation, runs commands and keeps notifications", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.1" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       if (url.endsWith("/projects")) return json([{ id: "project-1", name: "AgentBench", root_path: "D:/AgentBench" }]);
@@ -186,7 +186,8 @@ describe("AgentBench V4 application shell", () => {
     expect(shell).not.toHaveClass("navigation-open");
     fireEvent.click(screen.getByRole("button", { name: "生成通知" }));
     fireEvent.click(screen.getByRole("button", { name: /通知中心，1 条未读/ }));
-    expect(screen.getByRole("complementary", { name: "通知中心" })).toHaveTextContent("任务已完成");
+    expect(screen.getByRole("dialog", { name: "通知中心" })).toHaveTextContent("任务已完成");
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
 
     fireEvent.click(screen.getByRole("button", { name: /搜索或新建/ }));
     const palette = document.querySelector(".v4-palette");
@@ -199,7 +200,7 @@ describe("AgentBench V4 application shell", () => {
     let acceptanceUpdate: Record<string, unknown> | null = null;
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.1" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       if (url.endsWith("/projects")) return json([{ id: "project-1", name: "AgentBench", root_path: "D:/AgentBench" }]);
@@ -245,7 +246,7 @@ describe("AgentBench V4 application shell", () => {
     const secondTask = { ...task, id: "task-2", title: "验证批量操作", priority: "normal" as const };
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.0" });
+      if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.1" });
       if (url.endsWith("/system/status")) return json(systemStatus);
       if (url.endsWith("/studio/dashboard")) return json(studioDashboard);
       if (url.endsWith("/projects")) return json([{ id: "project-1", name: "AgentBench", root_path: "D:/AgentBench" }]);

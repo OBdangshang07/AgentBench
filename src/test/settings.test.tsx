@@ -4,7 +4,7 @@ import SettingsPage from "../pages/Settings";
 import { WorkspaceUxProvider } from "../components/WorkspaceUx";
 
 const status = {
-  version: "5.5.0",
+  version: "5.5.1",
   data_dir: "C:/AgentBench",
   database: { path: "C:/AgentBench/agentbench.db", ready: true },
   docker: { installed: true, available: true, executable: "docker" },
@@ -22,7 +22,7 @@ describe("settings", () => {
   it("persists judge selection immediately", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/health")) return new Response(JSON.stringify({ name: "AgentBench Desktop", version: "5.5.0" }), { status: 200 });
+      if (url.endsWith("/health")) return new Response(JSON.stringify({ name: "AgentBench Desktop", version: "5.5.1" }), { status: 200 });
       if (init?.method === "PATCH") return new Response(JSON.stringify(status), { status: 200 });
       if (url.endsWith("/models")) {
         return new Response(JSON.stringify([

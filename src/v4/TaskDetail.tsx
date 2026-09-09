@@ -1,3 +1,4 @@
+import { useDialog } from "../lib/useDialog";
 import {
   Activity,
   Archive,
@@ -107,6 +108,7 @@ export default function TaskDetail() {
     setEditError(null);
     setEditing(true);
   }
+  const taskDialog = useDialog<HTMLFormElement>(editing, () => { if (!busy) setEditing(false); });
 
   async function saveTask(event: FormEvent) {
     event.preventDefault();
@@ -249,7 +251,7 @@ export default function TaskDetail() {
       </main>
 
       {editing && <div className="v4-modal-backdrop" onMouseDown={() => !busy && setEditing(false)}>
-        <form className="v4-modal v5-task-modal" onSubmit={(event) => void saveTask(event)} onMouseDown={(event) => event.stopPropagation()}>
+        <form ref={taskDialog} role="dialog" aria-modal="true" aria-label="编辑任务" tabIndex={-1} className="v4-modal v5-task-modal" onSubmit={(event) => void saveTask(event)} onMouseDown={(event) => event.stopPropagation()}>
           <header><div><strong>编辑任务</strong><small>修改会立即保存到当前任务，不会离开详情页</small></div><button type="button" aria-label="关闭编辑" disabled={busy} onClick={() => setEditing(false)}><X size={18} /></button></header>
           <div className="v4-form-grid">
             <label className="full"><span>任务标题</span><input required value={editForm.title} onChange={(event) => setEditForm({ ...editForm, title: event.target.value })} /></label>

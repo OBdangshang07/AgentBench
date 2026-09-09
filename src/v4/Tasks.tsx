@@ -1,3 +1,4 @@
+import { useDialog } from "../lib/useDialog";
 import {
   Archive,
   Bot,
@@ -131,6 +132,7 @@ export default function Tasks() {
 
   const allVisibleSelected = visible.length > 0 && visible.every((task) => selectedIds.has(task.id));
 
+  const taskDialog = useDialog<HTMLFormElement>(modalOpen, closeModal);
   useEffect(() => {
     window.localStorage.setItem(taskViewStorageKey, viewMode);
   }, [taskViewStorageKey, viewMode]);
@@ -437,7 +439,7 @@ export default function Tasks() {
 
       {modalOpen && (
         <div className="v4-modal-backdrop" onMouseDown={closeModal}>
-          <form className="v4-modal v5-task-modal" onSubmit={submit} onMouseDown={(event) => event.stopPropagation()}>
+          <form ref={taskDialog} role="dialog" aria-modal="true" aria-label="任务设置" tabIndex={-1} className="v4-modal v5-task-modal" onSubmit={submit} onMouseDown={(event) => event.stopPropagation()}>
             <header><div><strong>{editingId ? "编辑任务" : "新建任务"}</strong><small>任务说明决定要做什么，验收标准决定怎样才算完成</small></div><button type="button" onClick={closeModal}><X size={18} /></button></header>
             <div className="v4-form-grid">
               <label className="full"><span>任务标题</span><input required value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label>

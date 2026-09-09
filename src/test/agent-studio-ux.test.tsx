@@ -153,7 +153,7 @@ function installApiMock(
   });
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const url = String(input);
-    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.0" });
+    if (url.endsWith("/health")) return json({ name: "AgentBench Desktop", version: "5.5.1" });
     if (url.endsWith("/sessions")) return json([currentSession]);
     if (url.endsWith("/sessions/session-1") && init?.method === "PATCH") return json({ ...currentDetail, ...JSON.parse(String(init.body)) });
     if (url.includes("/sessions/session-1?message_limit=")) return json(currentDetail);
@@ -262,6 +262,7 @@ describe("Agent Studio visual workspace controls", () => {
     fireEvent.keyDown(screen.getByRole("separator", { name: "调整导航侧栏宽度" }), { key: "ArrowRight" });
     expect(container.querySelector(".v4-studio-workbench")).toHaveStyle({ "--studio-left": "240px" });
 
+    fireEvent.click(screen.getAllByRole("button", { name: "关闭工具工作台" })[0]);
     fireEvent.click(screen.getByRole("button", { name: "收起导航侧栏" }));
 
     const workbench = container.querySelector(".v4-studio-workbench");
